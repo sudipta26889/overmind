@@ -6,6 +6,9 @@
 # nuc.lan Redis/cache (the base x-env-common hardcodes the bundled redis, so we win here).
 x-app-env: &app-env
   environment:
+    # Production hardening: off by default in the base compose. Static is served
+    # locally by WhiteNoise (AWS_S3_CUSTOM_DOMAIN blank keeps STATIC_URL off the CDN).
+    DJANGO_DEBUG: "False"
     AWS_PROFILE: default
     AWS_CONFIG_FILE: /code/.aws-minio/config
     CELERY_BROKER_URL: ${CELERY_BROKER_URL}
