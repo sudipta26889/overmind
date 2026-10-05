@@ -51,6 +51,9 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    # Serves /static/ (admin, DRF browsable, debug toolbar) directly from the app —
+    # the ASGI server does not, and self-hosting has no static CDN.
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -72,6 +75,11 @@ def show_debug_toolbar(request):
     from django.conf import settings as dj_settings
 
     if not dj_settings.DEBUG:
+        return False
+    # Never render on a public reverse-proxied host (e.g. the HTTPS MCP/API vhost):
+    # the toolbar must not be exposed there, and its /static assets aren't served
+    # through that vhost. Local dev hosts still get it.
+    if request.get_host().split(":")[0] not in {"localhost", "127.0.0.1", "nuc.lan", "api"}:
         return False
     # DJDT on every JSON poll saturates Django's one thread-sensitive ASGI
     # executor; the React app never renders the toolbar anyway.
@@ -157,6 +165,9 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "static"
+# Under DEBUG, serve static straight from app dirs (admin/DRF/debug_toolbar) without
+# depending on a perfect collectstatic. When DEBUG is off, WhiteNoise serves STATIC_ROOT.
+WHITENOISE_USE_FINDERS = DEBUG
 
 MEDIA_URL = "media/"
 # Must be a real local path: dataset Parquet files live under it. On ECS this is

@@ -38,7 +38,7 @@ services:
   frontend:
     ports: !override ["5973:5173"]
     environment:
-      VITE_API_BASE_URL: http://nuc.lan:5980
+      VITE_API_BASE_URL: https://overmind-api.sudiptadhara.in
       # Vite dev-server host allow-list (Vite's anti-DNS-rebinding guard blocks nuc.lan
       # and proxied domains otherwise). Leading dot = subdomain wildcard.
       __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: nuc.lan,.sudiptadhara.in
