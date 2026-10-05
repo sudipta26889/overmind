@@ -109,7 +109,11 @@ def resolve_inference_url(
 
     env = environment or os.environ.get("MODAL_ENVIRONMENT", "overmind-dev")
     cls_slug = worker_cls_name(gpu_type, serve_image).lower().replace("_", "-")
-    base = f"https://overmind-{env}--{INFERENCE_APP_NAME}-{cls_slug}-api.modal.run"
+    # Web URL prefix is the deployment's Modal web suffix. Defaults to the hosted
+    # `overmind-{env}` convention; self-hosted workspaces set MODAL_WEB_PREFIX (in the
+    # overmind-inference secret) to their own suffix since web suffixes are globally unique.
+    prefix = os.environ.get("MODAL_WEB_PREFIX") or f"overmind-{env}"
+    base = f"https://{prefix}--{INFERENCE_APP_NAME}-{cls_slug}-api.modal.run"
     params = {
         "model_path": rel_weights_path(model_path),
         "model_name": model_name,

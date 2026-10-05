@@ -1,0 +1,70 @@
+# Local plugin layer — gitignored, auto-merged over docker-compose.yml.
+# Keep all local/self-host customizations here so `git pull upstream` never conflicts.
+# Never edit docker-compose.yml itself; override it here instead.
+
+# App-service env + mounts: self-hosted MinIO (path-style S3, keys from .env) and the
+# nuc.lan Redis/cache (the base x-env-common hardcodes the bundled redis, so we win here).
+x-app-env: &app-env
+  environment:
+    AWS_PROFILE: default
+    AWS_CONFIG_FILE: /code/.aws-minio/config
+    CELERY_BROKER_URL: ${CELERY_BROKER_URL}
+    CELERY_RESULT_BACKEND: ${CELERY_RESULT_BACKEND}
+    CACHE_URL: ${CACHE_URL}
+  volumes:
+    - ./deploy/minio-aws-config:/code/.aws-minio/config:ro
+
+services:
+  # Self-deployed Grafana (http://nuc.lan:3000) replaces the bundled one.
+  grafana:
+    profiles: ["bundled-grafana"]
+
+  # External Redis at nuc.lan:6379 replaces the bundled one (which also freed host 6379).
+  # Gated off; depends_on redis is reset on every consumer below.
+  redis:
+    profiles: ["bundled-redis"]
+
+  # External PostgreSQL at nuc.lan:5432 replaces the bundled one. Gated off; the api's
+  # depends_on is reset since the remote DB is not a compose service.
+  postgres:
+    profiles: ["bundled-postgres"]
+
+  # Published ports moved into the 5900–5999 range (host side only; container ports unchanged).
+  api:
+    <<: *app-env
+    ports: !override ["5980:8000"]
+    depends_on: !reset null
+
+  frontend:
+    ports: !override ["5973:5173"]
+    environment:
+      VITE_API_BASE_URL: http://nuc.lan:5980
+      # Vite dev-server host allow-list (Vite's anti-DNS-rebinding guard blocks nuc.lan
+      # and proxied domains otherwise). Leading dot = subdomain wildcard.
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: nuc.lan,.sudiptadhara.in
+
+  celery-control-worker:
+    <<: *app-env
+    depends_on: !override
+      api:
+        condition: service_healthy
+  celery-io-worker:
+    <<: *app-env
+    depends_on: !override
+      api:
+        condition: service_healthy
+  celery-batch-worker:
+    <<: *app-env
+    depends_on: !override
+      api:
+        condition: service_healthy
+  celery-interactive-worker:
+    <<: *app-env
+    depends_on: !override
+      api:
+        condition: service_healthy
+  celery-beat:
+    <<: *app-env
+    depends_on: !override
+      api:
+        condition: service_healthy

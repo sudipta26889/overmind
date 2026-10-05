@@ -72,12 +72,22 @@ _S3_BUCKETS = {
     "overmind-prod": "overmind-finetuning-prod-cmuziwbk",
 }
 MODAL_ENVIRONMENT = os.environ.get("MODAL_ENVIRONMENT", "overmind-dev")
-S3_BUCKET_NAME = _S3_BUCKETS[MODAL_ENVIRONMENT]
+# Self-hosted MinIO replaces AWS S3: when AWS_BUCKET_NAME / AWS_ENDPOINT_URL_S3 are in the
+# deploy shell env, CloudBucketMount targets MinIO (path-style). Absent them it falls back
+# to the hosted AWS bucket map and native S3 addressing.
+S3_BUCKET_NAME = os.environ.get("AWS_BUCKET_NAME") or _S3_BUCKETS[MODAL_ENVIRONMENT]
+_S3_ENDPOINT_URL = os.environ.get("AWS_ENDPOINT_URL_S3") or None
 aws_secret = modal.Secret.from_name("overmind-inference")
 
 
 def _s3_mount(*, read_only: bool) -> modal.CloudBucketMount:
-    return modal.CloudBucketMount(S3_BUCKET_NAME, secret=aws_secret, read_only=read_only)
+    return modal.CloudBucketMount(
+        S3_BUCKET_NAME,
+        secret=aws_secret,
+        read_only=read_only,
+        bucket_endpoint_url=_S3_ENDPOINT_URL,
+        force_path_style=bool(_S3_ENDPOINT_URL),
+    )
 
 
 def _s3_prefix(user_id: str, job_id: str) -> Path:

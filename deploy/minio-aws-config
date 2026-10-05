@@ -1,0 +1,7 @@
+# Path-style S3 addressing for self-hosted MinIO (bucket.host virtual-hosting does
+# not resolve on the minio.sudiptadhara.in subdomain). Mounted read-only into the
+# app containers via docker-compose.override.yml; keeps the host ~/.aws untouched.
+[default]
+region = us-east-1
+s3 =
+    addressing_style = path
