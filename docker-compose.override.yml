@@ -56,13 +56,21 @@ services:
     depends_on: !override
       api:
         condition: service_healthy
+  # Memory caps + init (tini reaps orphaned prefork grandchildren): these workers
+  # leaked to 8-9 GiB each and filled host swap (NUC incident 2026-10-06).
   celery-batch-worker:
     <<: *app-env
+    mem_limit: 5g
+    memswap_limit: 6g
+    init: true
     depends_on: !override
       api:
         condition: service_healthy
   celery-interactive-worker:
     <<: *app-env
+    mem_limit: 4g
+    memswap_limit: 5g
+    init: true
     depends_on: !override
       api:
         condition: service_healthy
