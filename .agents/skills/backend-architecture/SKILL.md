@@ -18,22 +18,29 @@ Single Django app `overbae`, project-scoped tenancy.
 
 ## Celery topology
 
-Four workers, five queues. Workers are resource profiles; queues are fairness classes.
+Five workers, six queues. Workers are resource profiles; queues are fairness classes.
 
-| Worker        | Pool    | Conc | Queues           | Holds                                                    |
-| ------------- | ------- | ---- | ---------------- | -------------------------------------------------------- |
-| `control`     | threads | 8    | `control`        | orchestration, chord callbacks, FSM advances, beat       |
-| `io`          | threads | 24   | `io`,`io_traces` | judges, live trace scoring, connector polling, rebinding |
-| `batch`       | prefork | 6    | `batch`          | sample generation, dataset landing, connector chunks     |
-| `interactive` | prefork | 4    | `interactive`    | workshop cell runs and agent turns                       |
+| Worker        | Pool    | Conc | Queues           | Holds                                                                 |
+| ------------- | ------- | ---- | ---------------- | --------------------------------------------------------------------- |
+| `control`     | threads | 8    | `control`        | orchestration, chord callbacks, FSM advances, beat                    |
+| `io`          | threads | 24   | `io`,`io_traces` | judges, eval launch, live trace scoring, connector polling, rebinding |
+| `batch`       | prefork | 6    | `batch`          | sample generation, connector chunks                                   |
+| `landing`     | prefork | 1    | `landing`        | source import and split publication                                   |
+| `interactive` | prefork | 4    | `interactive`    | workshop cell runs and agent turns                                    |
 
-Three constraints set the worker split. Only prefork enforces `time_limit` and `revoke(terminate=True)`, so every time-limited task routes to `batch` or `interactive`. A loaded prefork child costs hundreds of MB, so wide fan-out cannot be prefork. Orchestration holds its own lane because a chord callback stuck behind work never finalises its run.
+Three constraints set the worker split. Only prefork enforces `time_limit` and `revoke(terminate=True)`, so every time-limited task routes to `batch`, `landing` or `interactive`. A loaded prefork child costs hundreds of MB, so wide fan-out cannot be prefork. Orchestration holds its own lane because a chord callback stuck behind work never finalises its run. `run_eval_run` and `preload_capability_eval_set` route to `io` because Modal warm-up and judge authoring block for minutes; the import and workshop reconcilers and queue metrics run on `control` with short expiries and are dropped when it is full.
 
 `io_traces` is a second queue on the io worker, not a second worker: one worker over both round-robins (kombu's redis default), so an unbounded trace-scoring burst cannot queue ahead of user-started eval scoring.
 
-`interactive` sets `--prefetch-multiplier=1` so a busy child never hoards the next turn.
+`interactive` sets `--prefetch-multiplier=1`. `batch` and `landing` also disable Redis prefetch so busy processes do not reserve waiting work. Landing workers consume only `landing`; raising bulk concurrency cannot protect import latency when every bulk slot is occupied.
 
-Routing lives in `CELERY_TASK_ROUTES` and must stay in sync with `make worker` (one process standing in for the whole fleet, so its `-Q` lists every queue) and docker-compose. `tests/test_celery_topology.py` enforces it, and asserts no time-limited task lands on a threads lane. Workers hot-restart via watchmedo on `.py` changes.
+Evaluation preparation uses `EvalGenerationWork` receipts and a global scheduler row lock. `EVAL_MAX_IN_FLIGHT` bounds admitted provider work (default 12), with `EVAL_MAX_IN_FLIGHT_PER_RUN` (default 2) and least-recently-admitted project/run fairness. Waiting samples remain in Postgres; completion and a 30-second control tick replenish available slots. Completion wakeups coalesce through a cache key, so at most one dispatcher waits on the lock. Failed/cancelled parents cannot claim or continue generation. Lost started attempts become explicit unknown outcomes and are not automatically repeated.
+
+Chat HTTP clients enforce one cancellable elapsed deadline across request bodies, SSE heartbeats and retry waits. They close their connections on expiration; a socket read timeout alone is not a total time bound.
+
+Hosted commands come from `docker/worker-topology.json`. Deployment runs migrations, verifies a healthy landing-only consumer on the new image, then updates workers, beat and API. Landing and interactive workers run with their queue as the Celery hostname, and `overbae.worker_health <queue>` checks that the consumer reads only its queue and registers that queue's task; a rollout of either waits for that health check. `scripts/plan_landing_capacity.py` generates the reviewed ECS, IAM, bounded scale-out and CloudWatch queue-age/newly-blocked-import/monitor-health plan. `NewlyBlockedImports` counts imports blocked in the last 5 minutes by a system cause (`queue_timeout`, `worker_timeout`, `dispatch_failed`, `attempts_exhausted`); a user-data failure does not raise it. Scale-in requires an explicit idle drain; automatic scale-in is disabled.
+
+Routing lives in `CELERY_TASK_ROUTES` and must stay in sync with `make worker` (one process standing in for the whole fleet, so its `-Q` lists every queue) , docker-compose and the deployment command manifest. `tests/test_celery_topology.py` enforces it, and asserts no time-limited task lands on a threads lane. Workers hot-restart via watchmedo on `.py` changes.
 
 ## Tracing
 

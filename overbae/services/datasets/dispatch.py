@@ -6,14 +6,18 @@ import json
 import uuid
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
-from overbae.models import Cell, Dataset
+from overbae.models import Cell, Dataset, DatasetImport
+from overbae.services.datasets import files, imports, selection
 from overbae.services.datasets.land import SPLIT_POSITIONS
 from overbae.services.datasets.lifecycle import (
     DatasetError,
     accept_proposal,
     enter_busy,
+    queue_workshop,
+    refuse_deleted_capability,
     remove_cell,
 )
 
@@ -36,6 +40,7 @@ def _check_source(source: dict) -> None:
 
 
 def _new(project, user, name: str, source: dict, intent: str | None, capability) -> Dataset:
+    refuse_deleted_capability(capability)
     dataset = Dataset.objects.create(
         project=project,
         capability=capability,
@@ -55,6 +60,7 @@ def _new(project, user, name: str, source: dict, intent: str | None, capability)
     return dataset
 
 
+@transaction.atomic
 def create_dataset(
     *,
     project,
@@ -73,19 +79,19 @@ def create_dataset(
     ):
         raise DatasetError("Choose train or eval.", code="intent")
     dataset = _new(project, user, name, source, intent, capability)
-    from overbae.tasks.datasets import land
-
-    land.apply_async(
-        kwargs={
+    imports.enqueue(
+        dataset,
+        {
             "dataset_id": str(dataset.id),
             "source": source,
             "user_id": _user_id(user),
             "infer_capability": infer_capability,
-        }
+        },
     )
     return dataset
 
 
+@transaction.atomic
 def create_split(
     *,
     project,
@@ -117,17 +123,24 @@ def create_split(
             raise DatasetError("Two LLM calls are needed to split.", code="split")
     elif position not in SPLIT_POSITIONS:
         raise DatasetError(f"position must be one of {', '.join(SPLIT_POSITIONS)}.", code="split")
-    known = source.get("rows") or (source.get("traces") or {}).get("trace_ids")
-    if known is not None and len(known) < 2:
+    if source.get("rows") is not None:
+        known = len(source["rows"])
+    elif source.get("traces") is not None:
+        known = selection.TraceSource.parse(source["traces"]).count(project.id)
+    elif source.get("llm_calls") is None:
+        inspected = [files.inspection(i) for i in source.get("uploads") or [source["upload_id"]]]
+        known = None if None in inspected else sum(record["rows"] for record in inspected)
+    else:
+        known = None
+    if known is not None and known < 2:
         raise DatasetError("Two rows are needed to split.", code="split")
     name = (name or "").strip()
     with transaction.atomic():
         train = _new(project, user, f"{name} train", source, Dataset.Intent.TRAIN, capability)
         evaluation = _new(project, user, f"{name} eval", source, Dataset.Intent.EVAL, capability)
-    from overbae.tasks.datasets import land
-
-    land.apply_async(
-        kwargs={
+    imports.enqueue(
+        train,
+        {
             "dataset_id": str(train.id),
             "source": source,
             "user_id": _user_id(user),
@@ -140,34 +153,55 @@ def create_split(
                 "stratify_by": stratify_by,
                 "deduplicate": deduplicate,
             },
-        }
+        },
     )
     return train, evaluation
 
 
 def message_agent(dataset, user, message: str) -> Dataset:
-    if not enter_busy(
-        dataset.pk, Dataset.State.DIAGNOSING, from_states=[Dataset.State.IDLE, Dataset.State.ERROR]
-    ):
-        dataset.refresh_from_db()
-        raise DatasetError("The dataset is busy. Wait for it.", code=dataset.state)
-    dataset.state = Dataset.State.DIAGNOSING
-    from overbae.tasks.datasets import turn
+    with imports.explicit_operation(dataset.pk) as locked:
+        if (
+            locked.source is None
+            and DatasetImport.objects.filter(
+                Q(dataset=locked) | Q(evaluation=locked), state=DatasetImport.State.BLOCKED
+            ).exists()
+        ):
+            raise DatasetError(
+                "Retry the source import before sending another message.", code="import_blocked"
+            )
+        if not enter_busy(
+            locked.pk,
+            Dataset.State.DIAGNOSING,
+            from_states=[Dataset.State.IDLE, Dataset.State.ERROR],
+        ):
+            dataset.refresh_from_db()
+            raise DatasetError("The dataset is busy. Wait for it.", code=dataset.state)
+        locked.state = Dataset.State.DIAGNOSING
+        dataset.state = Dataset.State.DIAGNOSING
+        from overbae.tasks.datasets import turn
 
-    turn.apply_async(
-        kwargs={
-            "dataset_id": str(dataset.id),
-            "message": message,
-            "user_id": _user_id(user),
-        }
-    )
+        kwargs = {"dataset_id": str(dataset.id), "message": message, "user_id": _user_id(user)}
+        task_id = str(uuid.uuid4())
+        queue_workshop(dataset.pk, task_id)
+        transaction.on_commit(lambda: turn.apply_async(kwargs=kwargs, task_id=task_id))
     return dataset
 
 
 def run_dataset(dataset, user, proposal=None) -> Dataset:
     """Refuse landing, diagnosing, running. Idle and error may run."""
-    with transaction.atomic():
-        locked = Dataset.objects.select_for_update().get(pk=dataset.pk)
+    if proposal is None and dataset.source is None:
+        pending = DatasetImport.objects.filter(
+            dataset=dataset, state=DatasetImport.State.BLOCKED
+        ).first()
+        if pending is None:
+            pending = DatasetImport.objects.filter(
+                evaluation=dataset, state=DatasetImport.State.BLOCKED
+            ).first()
+        if pending is not None:
+            imports.resume(pending.pk)
+            dataset.refresh_from_db()
+            return dataset
+    with imports.explicit_operation(dataset.pk) as locked:
         if proposal is not None:
             if proposal.dataset_id != locked.id:
                 raise DatasetError("That version belongs to another dataset.", code="cell_mismatch")
@@ -190,7 +224,9 @@ def run_dataset(dataset, user, proposal=None) -> Dataset:
         kwargs = {"dataset_id": str(dataset.id), "user_id": _user_id(user)}
         if proposal is not None:
             kwargs["proposal_id"] = str(proposal.id)
-        transaction.on_commit(lambda: run.apply_async(kwargs=kwargs))
+        task_id = str(uuid.uuid4())
+        queue_workshop(dataset.pk, task_id)
+        transaction.on_commit(lambda: run.apply_async(kwargs=kwargs, task_id=task_id))
     dataset.state = locked.state
     dataset.error = locked.error
     return dataset
@@ -210,9 +246,9 @@ def resume_after_decision(dataset_id, cell_id, title, decision, *, user_id=None)
         None,
     )
     if owner is None:
-        Dataset.objects.filter(pk=dataset.pk, state=Dataset.State.DIAGNOSING).update(
-            state=Dataset.State.IDLE
-        )
+        Dataset.objects.filter(
+            pk=dataset.pk, state__in=[Dataset.State.DIAGNOSING, Dataset.State.RUNNING]
+        ).update(state=Dataset.State.IDLE)
         return
     turn = chat[owner]
     decisions = dict(turn.get("decisions", {}))
@@ -256,6 +292,7 @@ def resume_after_decision(dataset_id, cell_id, title, decision, *, user_id=None)
         from overbae.tasks.datasets import turn as agent_turn
 
         task_id = str(uuid.uuid5(dataset.id, f"decision:{cell_id}"))
+        queue_workshop(dataset.pk, task_id)
         transaction.on_commit(
             lambda: agent_turn.apply_async(
                 kwargs={

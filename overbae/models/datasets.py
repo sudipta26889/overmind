@@ -1,6 +1,7 @@
 import uuid
 
 from django.conf import settings
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 
 
@@ -57,6 +58,9 @@ class Dataset(models.Model):
     agent_id = models.CharField(max_length=128, blank=True, default="")
     agent_messages = models.JSONField(default=list, blank=True)
     agent_turn_key = models.CharField(max_length=255, blank=True, default="")
+    workshop_task_id = models.CharField(max_length=255, blank=True, default="")
+    workshop_queued_at = models.DateTimeField(null=True, blank=True)
+    workshop_started_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -72,6 +76,11 @@ class Dataset(models.Model):
         indexes = [
             models.Index(fields=["project", "-created_at"]),
             models.Index(fields=["capability", "-created_at"]),
+            models.Index(
+                fields=["state", "workshop_started_at", "workshop_queued_at"],
+                name="dataset_workshop_busy_idx",
+                condition=models.Q(state__in=["diagnosing", "running"]),
+            ),
         ]
 
     def __str__(self):
@@ -117,6 +126,55 @@ class Dataset(models.Model):
                 minor += 1
             out[cell.id] = f"{major}.{minor}"
         return out
+
+
+class DatasetImport(models.Model):
+    class State(models.TextChoices):
+        QUEUED = "queued"
+        RUNNING = "running"
+        BLOCKED = "blocked"
+        COMPLETE = "complete"
+        CANCELLED = "cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    dataset = models.OneToOneField(Dataset, on_delete=models.CASCADE, related_name="import_run")
+    evaluation = models.ForeignKey(
+        Dataset, null=True, blank=True, on_delete=models.SET_NULL, related_name="split_imports"
+    )
+    state = models.CharField(max_length=16, choices=State.choices, default=State.QUEUED)
+    inputs = models.JSONField(default=dict)
+    source_manifest = models.JSONField(default=list)
+    queued_at = models.DateTimeField()
+    started_at = models.DateTimeField(null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    next_publish_at = models.DateTimeField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    owner = models.UUIDField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    publish_attempts = models.PositiveIntegerField(default=0)
+    publish_owner = models.UUIDField(null=True, blank=True)
+    failure_code = models.CharField(max_length=64, blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    result = models.JSONField(default=dict, blank=True)
+    handoff_pending = models.BooleanField(default=False)
+    handoff_owner = models.UUIDField(null=True, blank=True)
+    handoff_lease_until = models.DateTimeField(null=True, blank=True)
+    handoff_attempts = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["state", "next_publish_at"], name="dataset_import_publish"),
+            models.Index(fields=["state", "queued_at"], name="dataset_import_queue"),
+            models.Index(fields=["state", "lease_until"], name="dataset_import_lease"),
+            GinIndex(fields=["source_manifest"], name="dataset_import_sources"),
+            models.Index(
+                fields=["handoff_lease_until", "queued_at"],
+                name="dataset_import_handoff",
+                condition=models.Q(handoff_pending=True, state="complete"),
+            ),
+        ]
 
 
 class Cell(models.Model):
