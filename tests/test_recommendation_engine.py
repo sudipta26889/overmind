@@ -13,6 +13,7 @@ from overbae.api.serializers import FinetuningRecommendationResponseSerializer
 from overbae.models import Capability, Dataset, DatasetContext, Project
 from overbae.services.benchmarks.taxonomy import TaskType, weights_for
 from overbae.services.recommendation import get_recommendation
+from overbae.services.recommendation.candidates import build_candidate
 from overbae.services.recommendation.constraints import eligible_models
 from overbae.services.recommendation.hyperparams import compute_hyperparams
 from overbae.services.recommendation.ranking import DEFAULT_PICKS
@@ -38,6 +39,7 @@ def dataset(db) -> Dataset:
             }
             for i in range(3)
         ],
+        contract="eval",
     )
     _set_stats(dataset)
     return dataset
@@ -79,16 +81,12 @@ def test_every_constraint_passing_model_is_returned_in_rank_order(dataset):
     assert self_reported == sorted(self_reported)
 
 
-def test_modal_candidates_wait_for_exact_preprocessing_instead_of_character_estimates(dataset):
+def test_modal_candidates_drop_models_the_dataset_exceeds(dataset):
     _set_stats(dataset, max_token_length=2_000_000)
     with override_settings(FINETUNING_BACKEND="modal"):
         analysis = get_recommendation(str(dataset.id))
-    assert analysis["candidates"]
-    assert all("context" not in row["reason"].lower() for row in analysis["excluded"])
-    for row in analysis["candidates"]:
-        kind = "lora" if row["use_lora"] else "full"
-        maximum = row["training_type"][kind]["context_length"] or row["context_length_sft"]
-        assert row["hyperparams"]["context_length"] == maximum
+    assert analysis["candidates"] == []
+    assert any("context" in row["reason"].lower() for row in analysis["excluded"])
 
 
 def test_modal_candidates_size_training_context_from_dataset_estimates(dataset):
@@ -100,6 +98,47 @@ def test_modal_candidates_size_training_context_from_dataset_estimates(dataset):
         kind = "lora" if row["use_lora"] else "full"
         maximum = row["training_type"][kind]["context_length"] or row["context_length_sft"]
         assert row["hyperparams"]["context_length"] == min(8192, maximum)
+
+
+def test_modal_candidate_offers_only_the_kind_that_covers_the_row():
+    entry = {
+        "id": "vendor/split",
+        "display": "Split",
+        "params": "8B",
+        "total_params_b": 8.0,
+        "context_length_sft": 32768,
+        "max_batch_size": 8,
+        "min_batch_size": 1,
+        "training_type": {
+            "lora": {"enabled": True, "context_length": 32768},
+            "full": {"enabled": True, "context_length": 4096},
+        },
+    }
+    stats = {
+        "num_examples": 100,
+        "max_token_length": 8000,
+        "avg_input_chars": 10,
+        "avg_output_chars": 10,
+    }
+    with override_settings(FINETUNING_BACKEND="modal"):
+        lora_only = build_candidate(stats, model_entry=entry, tier="small")
+        full_only = build_candidate(
+            stats,
+            model_entry={
+                **entry,
+                "training_type": {
+                    "lora": {"enabled": True, "context_length": 4096},
+                    "full": {"enabled": True, "context_length": 32768},
+                },
+            },
+            tier="small",
+        )
+    assert lora_only["use_lora"] is True
+    assert lora_only["training_type"]["lora"]["enabled"] is True
+    assert lora_only["training_type"]["full"]["enabled"] is False
+    assert full_only["use_lora"] is False
+    assert full_only["training_type"]["full"]["enabled"] is True
+    assert full_only["training_type"]["lora"]["enabled"] is False
 
 
 @pytest.mark.parametrize(("use_lora", "expected"), [(True, 32768), (False, 8192)])
@@ -317,7 +356,7 @@ def test_selected_capability_overrides_dataset_context_and_mapping(dataset):
             return_value=('{"task_type":"creative_writing"}', {}),
         ),
         mock.patch("overbae.services.recommendation._resolve_task_type") as from_dataset,
-        mock.patch("overbae.services.eval.context_extractor.enqueue_refresh") as refresh,
+        mock.patch("overbae.services.datasets.profiler.enqueue_refresh") as refresh,
     ):
         analysis = get_recommendation(str(dataset.id), str(selected.id))
 
@@ -376,3 +415,50 @@ def test_the_payload_matches_the_published_contract(dataset):
     serializer = FinetuningRecommendationResponseSerializer(data=_recommend(dataset))
 
     assert serializer.is_valid(), serializer.errors
+
+
+@pytest.mark.parametrize("source", [None, "heuristic", "semantic"])
+def test_native_task_uses_semantic_context_without_chat_shape_inference(dataset, source, fake_llm):
+    native = frozen_dataset(
+        dataset.project,
+        [
+            {
+                "decision": {
+                    "state": "Pair",
+                    "question": "Match?",
+                    "kind": "choice",
+                    "options": ["No", "Yes"],
+                    "target_probabilities": [0.2, 0.8],
+                }
+            }
+        ],
+        contract="train",
+    )
+    if source:
+        DatasetContext.objects.create(
+            dataset=native,
+            project=native.project,
+            task_type=TaskType.CLASSIFICATION,
+            task_type_source=source,
+            extracted_at=timezone.now(),
+        )
+    calls_before = len(fake_llm.requests)
+    analysis = get_recommendation(str(native.id))
+    assert analysis["task_type"] == ("classification" if source == "semantic" else "unknown")
+    assert analysis["task_type_source"] == ("semantic" if source == "semantic" else "unknown")
+    assert analysis["candidates"] == []
+    assert analysis["skill_weights"] == {}
+    assert len(fake_llm.requests) == calls_before
+
+    capability = Capability.objects.create(
+        project=dataset.project,
+        name="QA",
+        slug="native-qa",
+        description="Answer questions about the supplied records.",
+    )
+    fake_llm.on("Classify the task an AI capability", '{"task_type":"question_answering"}')
+    analysis = get_recommendation(str(native.id), str(capability.id))
+    assert analysis["task_type"] == "question_answering"
+    assert analysis["task_type_source"] == "capability"
+    assert analysis["capability_context"]["capability_id"] == str(capability.id)
+    assert analysis["candidates"] == []

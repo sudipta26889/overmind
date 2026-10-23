@@ -2,7 +2,7 @@ import { type KeyboardEvent, type ReactNode, type UIEvent, useMemo, useRef } fro
 
 import { cn } from "@/lib/utils";
 
-type CellKind = "python" | "sql";
+type CellKind = "python" | "sql" | "shell";
 
 const SQL_KEYWORDS = new Set(
   "ALL AND AS ASC BETWEEN BY CASE CAST DESC DISTINCT ELSE END EXISTS FROM GROUP HAVING IN INNER IS JOIN LEFT LIKE LIMIT NOT NULL ON OR ORDER OUTER RIGHT SELECT THEN UNION USING WHEN WHERE WITH".split(
@@ -16,8 +16,15 @@ const PY_KEYWORDS = new Set(
   )
 );
 
+const SHELL_KEYWORDS = new Set(
+  "curl jq for in do done case esac sleep exit break echo printf".split(" ")
+);
+
 const SQL_TOKEN_RE =
   /(--[^\n]*)|('(?:''|[^'])*'|"(?:""|[^"])*")|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)\b/g;
+
+const SHELL_TOKEN_RE =
+  /(#[^\n]*)|('(?:[^'])*'|"(?:\\.|[^"\\])*")|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_]\w*)\b/g;
 
 const PY_TOKEN_RE =
   /(#[^\n]*)|("""[\s\S]*?"""|'''[\s\S]*?'''|"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*')|\b(\d+(?:\.\d+)?)\b|(@\w+)|\b([A-Za-z_]\w*)\b/g;
@@ -33,7 +40,7 @@ const TONE = {
 const METRICS = "font-mono text-xs leading-5";
 
 function highlight(source: string, kind: CellKind): ReactNode[] {
-  const re = kind === "sql" ? SQL_TOKEN_RE : PY_TOKEN_RE;
+  const re = kind === "sql" ? SQL_TOKEN_RE : kind === "shell" ? SHELL_TOKEN_RE : PY_TOKEN_RE;
   const nodes: ReactNode[] = [];
   let cursor = 0;
   let key = 0;
@@ -42,7 +49,7 @@ function highlight(source: string, kind: CellKind): ReactNode[] {
     const start = match.index ?? 0;
     if (start > cursor) nodes.push(source.slice(cursor, start));
     let tone: string | null = null;
-    if (kind === "sql") {
+    if (kind !== "python") {
       const [, comment, string, number, identifier] = match;
       tone = comment
         ? TONE.comment
@@ -50,7 +57,10 @@ function highlight(source: string, kind: CellKind): ReactNode[] {
           ? TONE.string
           : number
             ? TONE.number
-            : identifier && SQL_KEYWORDS.has(identifier.toUpperCase())
+            : identifier &&
+                (kind === "sql"
+                  ? SQL_KEYWORDS.has(identifier.toUpperCase())
+                  : SHELL_KEYWORDS.has(identifier))
               ? TONE.keyword
               : null;
     } else {
@@ -86,6 +96,7 @@ function highlight(source: string, kind: CellKind): ReactNode[] {
 export function ScriptCode({
   source,
   kind = "python",
+  className,
   onChange,
   onRun,
   onFocus,
@@ -93,6 +104,7 @@ export function ScriptCode({
 }: {
   source: string;
   kind?: CellKind;
+  className?: string;
   onChange?: (value: string) => void;
   onRun?: () => void;
   onFocus?: () => void;
@@ -128,7 +140,15 @@ export function ScriptCode({
   };
 
   return (
-    <div className="flex min-w-0 gap-3">
+    <div
+      aria-label={ariaLabel}
+      className={cn(
+        "nodrag nopan nowheel flex max-h-80 min-w-0 gap-3 overflow-auto overscroll-contain",
+        className
+      )}
+      role="region"
+      tabIndex={editable ? undefined : 0}
+    >
       <ol className={cn("w-5 shrink-0 select-none text-right text-muted-foreground/70", METRICS)}>
         {lines.map((_, index) => (
           <li key={index}>{index + 1}</li>
@@ -164,7 +184,7 @@ export function ScriptCode({
           </>
         ) : (
           <pre className={cn("whitespace-pre-wrap break-words text-foreground/90", METRICS)}>
-            <code>{nodes}</code>
+            <code className="[font-family:inherit]!">{nodes}</code>
           </pre>
         )}
       </div>

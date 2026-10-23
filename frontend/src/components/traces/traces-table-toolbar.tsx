@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 
 import { useQuery } from "@tanstack/react-query";
 import type { Table } from "@tanstack/react-table";
@@ -13,7 +13,6 @@ import {
 import { DataTableViewOptions } from "@/components/traces/table-column-toggle";
 import { Button } from "@/components/ui/button";
 import { Chip } from "@/components/ui/chip";
-import { DateTime } from "@/components/ui/datetime";
 import { Icon } from "@/components/ui/icons";
 import { Input } from "@/components/ui/input";
 import { ListToolbar } from "@/components/ui/list-toolbar";
@@ -26,7 +25,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { NATIVE_DATE_TRIGGER } from "@/lib/colors";
 import { cn } from "@/lib/utils";
@@ -132,20 +130,13 @@ function presetIsActive(existing: FilterEntry[], needed: FilterEntry[]): boolean
 }
 
 /** Mirrors the `?view=` search param. */
-export type TracesViewMode = "executions" | "roots" | "sessions";
-
-const VIEW_LABELS: Record<TracesViewMode, string> = {
-  executions: "Task executions",
-  roots: "Root traces",
-  sessions: "Sessions",
-};
-
-const VIEW_MODES: TracesViewMode[] = ["executions", "roots", "sessions"];
+export type TracesViewMode = "roots" | "sessions";
 
 const ALL_CAPABILITIES = "__all__";
 
 interface TracesTableToolbarProps<TData> {
   table: Table<TData>;
+  viewTabs?: ReactNode;
   searchValue: string;
   onSearchChange: (value: string) => void;
 
@@ -160,25 +151,17 @@ interface TracesTableToolbarProps<TData> {
   onFiltersChange: (filters: FilterEntry[]) => void;
 
   view: TracesViewMode;
-  onViewChange: (value: TracesViewMode) => void;
-
-  groupByConversation?: boolean;
-  onGroupByConversationChange?: (value: boolean) => void;
 
   projectId: string;
 
   onResetAll: () => void;
   onRefresh: () => void;
   isRefetching: boolean;
-  isFetching: boolean;
-  /** Epoch ms of the last successful fetch — undefined before the first one lands. */
-  lastUpdatedAt?: number;
-  /** Epoch ms this view's poll is next due; omitted once polling has backed off. */
-  nextPollAt?: number;
 }
 
 export function TracesTableToolbar<TData>({
   table,
+  viewTabs,
   searchValue,
   onSearchChange,
   timeRange,
@@ -188,31 +171,13 @@ export function TracesTableToolbar<TData>({
   filters,
   onFiltersChange,
   view,
-  onViewChange,
-  groupByConversation = true,
-  onGroupByConversationChange,
   projectId,
   onResetAll,
   onRefresh,
   isRefetching,
-  isFetching,
-  lastUpdatedAt,
-  nextPollAt,
 }: TracesTableToolbarProps<TData>) {
   const [spinning, setSpinning] = useState(false);
   const isSessionsView = view === "sessions";
-  const isExecutionsView = view === "executions";
-
-  // The poll cadence is shorter than a minute, so an absolute clock time reads
-  // as identical to "updated" — count down instead.
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (nextPollAt == null) return;
-    const tick = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(tick);
-  }, [nextPollAt]);
-  const secondsToNextPoll =
-    nextPollAt == null ? 0 : Math.max(0, Math.round((nextPollAt - now) / 1000));
 
   // Sessions filter by a plain select (the span filter builder doesn't apply to
   // session rows), but reuse the traces `capability` entry so the choice survives a
@@ -221,9 +186,7 @@ export function TracesTableToolbar<TData>({
     filters.find((f) => f.field === "capability" && f.lookup === "eq")?.value || undefined;
   // Also fetched in trace views, so the filter chip can show a name, not a UUID.
   const { data: capabilitiesData } = useQuery({
-    enabled:
-      !!projectId &&
-      (isSessionsView || isExecutionsView || filters.some((f) => f.field === "capability")),
+    enabled: !!projectId && (isSessionsView || filters.some((f) => f.field === "capability")),
     queryFn: () => apiClient.capabilities.capabilitiesList({ pageSize: 100, project: projectId }),
     queryKey: ["capabilities", projectId],
   });
@@ -284,36 +247,6 @@ export function TracesTableToolbar<TData>({
 
   return (
     <div className="flex w-full min-w-0 flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Tabs
-          className="w-auto shrink-0"
-          onValueChange={(value) => onViewChange(value as TracesViewMode)}
-          value={view}
-        >
-          <TabsList>
-            {VIEW_MODES.map((mode) => (
-              <TabsTrigger key={mode} value={mode}>
-                {VIEW_LABELS[mode]}
-              </TabsTrigger>
-            ))}
-          </TabsList>
-        </Tabs>
-
-        {lastUpdatedAt != null && (
-          <span className="ml-auto flex items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
-            <span className={cn("size-1.5 rounded-xs bg-success", isFetching && "animate-pulse")} />
-            {isFetching ? (
-              "Fetching…"
-            ) : (
-              <>
-                Updated <DateTime value={lastUpdatedAt} />
-                {secondsToNextPoll > 0 && ` · next in ${secondsToNextPoll}s`}
-              </>
-            )}
-          </span>
-        )}
-      </div>
-
       <ListToolbar
         actions={
           <ToolbarTooltip label="Refresh traces">
@@ -365,14 +298,6 @@ export function TracesTableToolbar<TData>({
                 onFiltersChange={onFiltersChange}
                 projectId={projectId}
               />
-              {isExecutionsView && onGroupByConversationChange && (
-                <Chip
-                  onClick={() => onGroupByConversationChange(!groupByConversation)}
-                  selected={groupByConversation}
-                >
-                  Group by conversation
-                </Chip>
-              )}
               <DataTableViewOptions table={table} />
             </>
           )
@@ -380,33 +305,24 @@ export function TracesTableToolbar<TData>({
         hasActiveFilters={hasAnyState}
         onClearFilters={onResetAll}
         primary={
-          !isSessionsView && (
-            <TimeRangeButton
-              customTimeRange={customTimeRange}
-              onChange={onTimeRangeChange}
-              value={timeRange}
-            />
-          )
+          <>
+            {viewTabs}
+            {!isSessionsView && (
+              <TimeRangeButton
+                customTimeRange={customTimeRange}
+                onChange={onTimeRangeChange}
+                value={timeRange}
+              />
+            )}
+          </>
         }
         search={
           <SearchInput
             className="min-w-[220px] flex-1"
-            label={
-              isSessionsView
-                ? "Search sessions"
-                : isExecutionsView
-                  ? "Search executions"
-                  : "Search traces"
-            }
+            label={isSessionsView ? "Search sessions" : "Search traces"}
             onChange={(e) => onSearchChange(e.target.value)}
             onClear={() => onSearchChange("")}
-            placeholder={
-              isSessionsView
-                ? "Search sessions…"
-                : isExecutionsView
-                  ? "Search executions…"
-                  : "Search traces…"
-            }
+            placeholder={isSessionsView ? "Search sessions…" : "Search traces…"}
             value={searchValue}
           />
         }
@@ -530,7 +446,7 @@ export function TimeRangeButton({
             )
           )}
         </div>
-        <div className="mt-3 border-t border-border/70 pt-3">
+        <div className="-mx-3 mt-3 border-t border-border/70 px-3 pt-3">
           <p className="text-xs font-medium text-muted-foreground">Custom range</p>
           <div className="mt-1.5 grid grid-cols-2 gap-2">
             <label className="flex flex-col gap-1 text-xs">
@@ -573,12 +489,10 @@ export function TimeRangeButton({
   );
 }
 
-/** From/To datetime triggers: clear button affordance; white surface in dark mode. */
 const DATETIME_TRIGGER_CLASS = cn(
-  "h-8 cursor-pointer rounded-sm border border-border bg-background px-2 text-xs font-medium transition-colors",
-  "hover:bg-accent/60 focus-visible:ring-[2px] focus-visible:ring-ring/60",
-  NATIVE_DATE_TRIGGER,
-  "dark:[color-scheme:light]"
+  "h-8 cursor-pointer rounded-sm border px-2 text-xs font-medium transition-colors",
+  "focus-visible:ring-[2px] focus-visible:ring-ring/60",
+  NATIVE_DATE_TRIGGER
 );
 
 /** ISO → `datetime-local` value (local wall clock). Empty/invalid → "". */

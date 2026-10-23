@@ -19,17 +19,13 @@ import { PageHeader } from "@/components/ui/page-header";
 import { PageShell } from "@/components/ui/page-shell";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
-import { Spinner } from "@/components/ui/spinner";
+import { Skeleton } from "@/components/ui/skeleton";
+import { SortableHeader } from "@/components/ui/sortable-header";
+import { LoadingState } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
 import { useNudgeDismissalCount } from "@/hooks/use-nudge-dismissal";
+import { useTableSort } from "@/hooks/use-table-sort";
 import { notify } from "@/lib/notify";
 import { backoffPolling } from "@/lib/poll";
 import { projectIdSearchSchema } from "@/lib/schemas";
@@ -145,6 +141,9 @@ function CredentialItem({
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["connector-credentials", projectId] });
 
+  const { sort, onSort, sortRows } = useTableSort<
+    "startedAt" | "mode" | "status" | "tracesSeen" | "spansCreated"
+  >();
   const runsQuery = useQuery({
     enabled: showRuns && meta.available,
     queryFn: () =>
@@ -318,13 +317,13 @@ function CredentialItem({
 
         {meta.available && (
           <>
-            <div className="grid grid-cols-3 gap-3 border-t border-border/70 pt-3">
+            <div className="-mx-3 grid grid-cols-3 gap-3 border-t border-border/70 px-3 pt-3">
               <Stat label="Traces" value={(credential.totalTracesImported ?? 0).toLocaleString()} />
               <Stat label="Spans" value={(credential.totalSpansImported ?? 0).toLocaleString()} />
               <Stat label="Mapped capabilities" value={mappedCapabilities.toLocaleString()} />
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 border-t border-border/70 pt-3">
+            <div className="-mx-3 flex flex-wrap items-center gap-2 border-t border-border/70 px-3 pt-3">
               <Button asChild size="sm" variant="secondary">
                 <Link
                   search={{ projectId, service_name__icontains: meta.type }}
@@ -343,24 +342,46 @@ function CredentialItem({
             {showRuns && (
               <div className="overflow-hidden rounded-md border border-border/70">
                 {runsQuery.isLoading ? (
-                  <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
-                    <Spinner size="sm" /> Loading runs…
-                  </div>
+                  <LoadingState label="Loading sync runs" />
                 ) : runs.length === 0 ? (
                   <p className="px-3 py-2 text-xs text-muted-foreground">No sync runs yet.</p>
                 ) : (
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Started</TableHead>
-                        <TableHead>Mode</TableHead>
-                        <TableHead>Status</TableHead>
-                        <TableHead className="text-right">Traces</TableHead>
-                        <TableHead className="text-right">Spans</TableHead>
+                        <SortableHeader
+                          label="Started"
+                          onSort={onSort}
+                          sort={sort}
+                          sortKey="startedAt"
+                        />
+                        <SortableHeader label="Mode" onSort={onSort} sort={sort} sortKey="mode" />
+                        <SortableHeader
+                          label="Status"
+                          onSort={onSort}
+                          sort={sort}
+                          sortKey="status"
+                        />
+                        <SortableHeader
+                          className="text-right"
+                          label="Traces"
+                          onSort={onSort}
+                          sort={sort}
+                          sortKey="tracesSeen"
+                        />
+                        <SortableHeader
+                          className="text-right"
+                          label="Spans"
+                          onSort={onSort}
+                          sort={sort}
+                          sortKey="spansCreated"
+                        />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {runs.map((run) => (
+                      {sortRows(runs, (run, key) =>
+                        key === "startedAt" ? run.startedAt?.getTime() : run[key]
+                      ).map((run) => (
                         <TableRow key={run.id}>
                           <TableCell className="text-xs">
                             {run.startedAt ? <DateTime value={run.startedAt} /> : "—"}
@@ -593,7 +614,11 @@ function IntegrationsPage() {
     <PageShell
       header={
         <PageHeader
-          actions={credentialsQuery.isLoading ? <Spinner /> : undefined}
+          actions={
+            credentialsQuery.isLoading ? (
+              <Skeleton aria-label="Loading integrations" className="h-8 w-24" />
+            ) : undefined
+          }
           description="Connect third-party observability platforms to pull traces into Overmind automatically."
           icon={<Icon.integrations aria-hidden className="size-6 shrink-0" />}
           title="Integrations"

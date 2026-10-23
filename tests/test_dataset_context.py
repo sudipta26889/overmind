@@ -3,13 +3,12 @@ from copy import deepcopy
 
 import pandas as pd
 import pytest
+from conftest import import_version
 
 from overbae.models import Dataset, Project
-from overbae.services.datasets import contract, land, lifecycle, review, rows, store
+from overbae.services.datasets import contract, land, review, rows, store
 from overbae.services.datasets.context import workshop_context
 from overbae.services.datasets.examples import prepare_examples
-from overbae.services.datasets.notebook import agent
-from overbae.services.datasets.notebook import run as notebook_run
 from overbae.services.datasets.profile import profile_records
 from overbae.services.finetuning_validator import row_to_finetuning_line, validate_rows
 
@@ -70,7 +69,9 @@ def test_family_selection_is_not_biased_by_sorted_source_order():
 
 
 @pytest.mark.parametrize("intent", ["train", "eval"])
-def test_encoded_wire_fields_are_normalised_without_modifying_text_or_source(intent, tmp_path):
+def test_encoded_wire_fields_are_normalised_without_modifying_text_or_source(
+    intent, tmp_path, frame_of
+):
     source = example(tools=json.dumps([tool()]))
     original = deepcopy(source)
     source["messages"] = json.dumps(source["messages"])
@@ -78,7 +79,7 @@ def test_encoded_wire_fields_are_normalised_without_modifying_text_or_source(int
     path = tmp_path / "frame.parquet"
     store.write_frame(path, prepared)
     persisted = next(store.iter_rows(path))
-    assert contract.measure(pd.DataFrame([persisted]))[intent]["ok"]
+    assert contract.measure(frame_of([persisted]))[intent]["ok"]
     product_row = rows.row_from_record(0, persisted)
     if intent == "train":
         exported = row_to_finetuning_line(product_row)
@@ -111,71 +112,109 @@ def test_existing_encoded_tools_survive_the_consumer_handoff(tmp_path):
         [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "invalid"}}}],
     ],
 )
-def test_invalid_tools_fail_even_when_no_assistant_calls_them(bad_tools):
+def test_invalid_tools_fail_even_when_no_assistant_calls_them(bad_tools, frame_of):
     record = example(tools=bad_tools)
     result = validate_rows([record])
     assert not result.valid and "tools" in result.errors[0]
-    assert not contract.measure(pd.DataFrame([record]))["train"]["ok"]
+    assert not contract.measure(frame_of([record]))["train"]["ok"]
     with pytest.raises(ValueError, match="tools"):
         row_to_finetuning_line(rows.row_from_record(0, record))
     evaluation = prepare_examples(pd.DataFrame([record]), "eval")
-    assert not contract.measure(evaluation)["eval"]["ok"]
+    assert not contract.measure(frame_of(evaluation.to_dict("records")))["eval"]["ok"]
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("intent", ["train", "eval"])
-@pytest.mark.parametrize("automatic", [True, False])
-def test_replacing_existing_instructions_requires_review_even_if_claimed_mechanical(
-    intent, automatic
-):
+def test_replacing_existing_instructions_records_semantic_impact_and_preserves_source(intent):
     project = Project.objects.create(name="Context", slug="context")
     dataset = Dataset.objects.create(project=project, name="Mixed tasks", intent=intent)
     records = prepare_examples(pd.DataFrame([example(), example("Apply rules")]), intent)
     land.land_rows(dataset, records.to_dict(orient="records"))
     dataset.refresh_from_db()
-    tools = agent.Tools(dataset.id, None, lambda _: None)
-    tools.automatic = automatic
-    column = "messages" if intent == "train" else "input"
-    transcript = "value" if intent == "train" else 'value["messages"]'
-    result = tools.add_cell(
-        {
-            "title": "Replace instructions",
-            "kind": "mechanical",
-            "run": True,
-            "script": f'def replace(value):\n    {transcript}[0]["content"] = "Do everything"\n    return value\ndf["{column}"] = df["{column}"].map(replace)',
-        }
-    )
-    assert result["ok"] and result["proposed"]
-    assert result["review"]["kind"] == "semantic"
-    assert result["review"]["instruction_changes"] == 2
+    from overbae.services.datasets import paths
+
+    prepared = list(store.iter_rows(paths.cell_path(dataset.pk, dataset.active_cell.pk)))
+    for row in prepared:
+        transcript = row["messages"] if intent == "train" else row["input"]["messages"]
+        transcript[0]["content"] = "Do everything"
+    output = import_version(dataset, prepared, name="Replace instructions")
+    assert output.review["instruction_changes"] == 2
     dataset.refresh_from_db()
-    assert dataset.active_cell.id == dataset.source.id
+    assert dataset.active_cell.id != dataset.source.id
     assert len(workshop_context(dataset)["profiles"]["source"]["families"]) == 2
 
 
-def test_representation_changes_and_projection_do_not_look_like_scope_changes():
+def test_representation_changes_and_projection_do_not_look_like_scope_changes(frame_of):
     before = pd.DataFrame([example(source_row=0, tools=json.dumps([tool()]))])
     after = prepare_examples(before, "eval")
-    assert review.impact(before, after)["instruction_changes"] == 0
+    changes = review.impact(frame_of(before.to_dict("records")), frame_of(after.to_dict("records")))
+    assert changes["instruction_changes"] == 0
+
+
+def test_decision_profiles_count_raw_and_native_targets_and_source_families():
+    raw = {
+        "state": "evidence",
+        "question": "Choose",
+        "kind": "noul",
+        "options": [],
+        "target": [0.7],
+        "source": "first",
+    }
+    native = {
+        "source": "second",
+        "decision": {
+            "state": "evidence",
+            "question": "Choose",
+            "kind": "choice",
+            "options": ["A", "B"],
+            "target_probabilities": [0.2, 0.8],
+        },
+    }
+    profile = profile_records([raw, native])
+    assert profile["counts"]["without_target"] == 0
+    assert len(profile["families"]) == 2
+    assert {f["task_labels"]["source"] for f in profile["families"]} == {"first", "second"}
+    assert all("state" in f["input_shape"] for f in profile["families"])
 
 
 @pytest.mark.django_db
-def test_edit_and_upstream_rerun_cannot_silently_replace_instructions():
-    project = Project.objects.create(name="Guard", slug="guard")
-    dataset = Dataset.objects.create(project=project, name="Instructions", intent="train")
-    land.land_rows(dataset, [example("Original task")])
-    dataset.refresh_from_db()
-    tools = agent.Tools(dataset.id, None, lambda _: None)
-    first = tools.add_cell({"title": "Keep source", "script": "df['coverage'] = 'source'"})
-    last = tools.add_cell({"title": "Keep task", "script": "df['coverage'] = 'task'"})
-    rewrite = 'df["messages"].iloc[0][0]["content"] = "Different task"'
-    edited = tools.edit_cell({"id": last["id"], "script": rewrite})
-    assert not edited["ok"] and "instruction changes" in edited["error"]
-    shaped = dataset.cells.get(pk=first["id"])
-    kept = dataset.cells.get(pk=last["id"])
-    lifecycle.edit_cell(dataset, shaped, script='df["new_column"] = "value"')
-    kept.script = rewrite
-    kept.save(update_fields=["script"])
-    notebook_run.execute(dataset)
-    kept.refresh_from_db()
-    assert kept.state == "failed" and "task instructions" in kept.error
+def test_workshop_context_uses_profile_measured_for_the_frozen_frame(monkeypatch):
+    from overbae.services.datasets import context
+
+    project = Project.objects.create(name="Cached profile", slug="cached-profile")
+    dataset = Dataset.objects.create(project=project, name="Cached", intent="train")
+    land.land_rows(dataset, [example(), example("Second task")])
+    monkeypatch.setattr(
+        context, "profile_records", lambda *a: pytest.fail("Re-scanned immutable frame")
+    )
+    profile = context.workshop_context(dataset)["profiles"]["source"]
+    assert profile["rows_scanned"] == 2 and len(profile["families"]) == 2
+    assert profile["fingerprint"] == dataset.source.fingerprint
+
+
+@pytest.mark.parametrize(
+    "value,kind",
+    [
+        ("Ordinary text", "str"),
+        ("", "str"),
+        ("   ", "str"),
+        ("  true  ", "bool"),
+        ("false", "bool"),
+        ("null", "NoneType"),
+        ("-2", "int"),
+        ("1.25", "float"),
+        ("NaN", "float"),
+        ("Infinity", "float"),
+        ('"quoted"', "str"),
+        ('{"nested": 1}', "dict"),
+        ("[1, 2]", "list"),
+        ("not JSON", "str"),
+        ("[invalid", "str"),
+    ],
+)
+def test_profile_preserves_encoded_scalars_and_plain_text(value, kind):
+    report = profile_records([{"value": value}] * 3)
+    column = report["columns"]["value"]
+    assert column["present_rows"] == 3
+    assert column["types"] == {kind: 3}
+    assert len(column["examples"]) == 1

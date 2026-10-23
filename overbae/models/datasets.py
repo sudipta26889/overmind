@@ -8,9 +8,10 @@ from django.db import models
 class Dataset(models.Model):
     """A source and a linear chain of cells. Every cell is a version of the
     table; rows live only as Parquet under the media volume. The intent and
-    the capability are proposed at landing and fixed by the first use."""
+    the capability are fixed by the first use."""
 
     class SourceKind(models.TextChoices):
+        PENDING = "pending"
         FILE = "file"
         TRACES = "traces"
         LLM_CALLS = "llm_calls"
@@ -18,11 +19,11 @@ class Dataset(models.Model):
     class Intent(models.TextChoices):
         TRAIN = "train"
         EVAL = "eval"
+        EXPLORE = "explore"
         PENDING = "pending"
 
     class State(models.TextChoices):
         LANDING = "landing"
-        DIAGNOSING = "diagnosing"
         IDLE = "idle"
         RUNNING = "running"
         ERROR = "error"
@@ -31,7 +32,9 @@ class Dataset(models.Model):
     project = models.ForeignKey(
         "overbae.Project", on_delete=models.CASCADE, related_name="datasets"
     )
+    ocr_languages = models.JSONField(default=list, db_default=[], blank=True)
     name = models.CharField(max_length=255)
+    brief = models.TextField(blank=True, default="")
     source_kind = models.CharField(
         max_length=16, choices=SourceKind.choices, default=SourceKind.FILE
     )
@@ -47,20 +50,21 @@ class Dataset(models.Model):
     # [{capability_id, name, score, reason}] best first, computed at landing.
     capability_rank = models.JSONField(default=list, blank=True)
     intent = models.CharField(max_length=8, choices=Intent.choices, default=Intent.PENDING)
+    preparation_plan = models.JSONField(default=dict, blank=True)
+    preparation_pipeline = models.ForeignKey(
+        "overbae.DatasetPipeline",
+        on_delete=models.SET_NULL,
+        related_name="preparations",
+        null=True,
+        blank=True,
+    )
     # The cell consumers read; null means the last cell that ran.
     active = models.ForeignKey(
         "overbae.Cell", on_delete=models.SET_NULL, related_name="+", null=True, blank=True
     )
     state = models.CharField(max_length=12, choices=State.choices, default=State.LANDING)
     error = models.TextField(blank=True, default="")
-    # [{role: user|agent, text, cells: [cell ids], at}] — the one conversation.
-    chat = models.JSONField(default=list, blank=True)
-    agent_id = models.CharField(max_length=128, blank=True, default="")
-    agent_messages = models.JSONField(default=list, blank=True)
-    agent_turn_key = models.CharField(max_length=255, blank=True, default="")
-    workshop_task_id = models.CharField(max_length=255, blank=True, default="")
-    workshop_queued_at = models.DateTimeField(null=True, blank=True)
-    workshop_started_at = models.DateTimeField(null=True, blank=True)
+    operation = models.JSONField(default=dict, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -76,11 +80,6 @@ class Dataset(models.Model):
         indexes = [
             models.Index(fields=["project", "-created_at"]),
             models.Index(fields=["capability", "-created_at"]),
-            models.Index(
-                fields=["state", "workshop_started_at", "workshop_queued_at"],
-                name="dataset_workshop_busy_idx",
-                condition=models.Q(state__in=["diagnosing", "running"]),
-            ),
         ]
 
     def __str__(self):
@@ -88,7 +87,7 @@ class Dataset(models.Model):
 
     @property
     def chain(self) -> list["Cell"]:
-        """Every cell in position order, proposals last."""
+        """Every cell in position order."""
         return list(self.cells.order_by("position"))
 
     @property
@@ -115,8 +114,6 @@ class Dataset(models.Model):
         out: dict[uuid.UUID, str] = {}
         major, minor = 1, 0
         for cell in self.chain if chain is None else chain:
-            if cell.state == Cell.State.PROPOSED:
-                continue
             if cell.position == 0:
                 out[cell.id] = "1.0"
                 continue
@@ -128,52 +125,68 @@ class Dataset(models.Model):
         return out
 
 
-class DatasetImport(models.Model):
-    class State(models.TextChoices):
-        QUEUED = "queued"
-        RUNNING = "running"
-        BLOCKED = "blocked"
-        COMPLETE = "complete"
-        CANCELLED = "cancelled"
-
+class DataExploration(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    dataset = models.OneToOneField(Dataset, on_delete=models.CASCADE, related_name="import_run")
-    evaluation = models.ForeignKey(
-        Dataset, null=True, blank=True, on_delete=models.SET_NULL, related_name="split_imports"
+    project = models.ForeignKey("overbae.Project", on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    request_key = models.CharField(max_length=128)
+    kind = models.CharField(max_length=16)
+    source_cell = models.ForeignKey(
+        "overbae.Cell", on_delete=models.PROTECT, related_name="explorations"
     )
-    state = models.CharField(max_length=16, choices=State.choices, default=State.QUEUED)
-    inputs = models.JSONField(default=dict)
-    source_manifest = models.JSONField(default=list)
-    queued_at = models.DateTimeField()
-    started_at = models.DateTimeField(null=True, blank=True)
-    published_at = models.DateTimeField(null=True, blank=True)
-    next_publish_at = models.DateTimeField(null=True, blank=True)
-    lease_until = models.DateTimeField(null=True, blank=True)
-    owner = models.UUIDField(null=True, blank=True)
-    attempts = models.PositiveIntegerField(default=0)
-    publish_attempts = models.PositiveIntegerField(default=0)
-    publish_owner = models.UUIDField(null=True, blank=True)
-    failure_code = models.CharField(max_length=64, blank=True, default="")
+    source_fingerprint = models.CharField(max_length=64)
+    config = models.JSONField(default=dict)
+    report = models.JSONField(default=dict)
+    output_dataset = models.ForeignKey(
+        "overbae.Dataset", on_delete=models.PROTECT, null=True, related_name="derivations"
+    )
+    state = models.CharField(max_length=16, default="queued", db_index=True)
     error = models.TextField(blank=True, default="")
-    result = models.JSONField(default=dict, blank=True)
-    handoff_pending = models.BooleanField(default=False)
-    handoff_owner = models.UUIDField(null=True, blank=True)
-    handoff_lease_until = models.DateTimeField(null=True, blank=True)
-    handoff_attempts = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        indexes = [
-            models.Index(fields=["state", "next_publish_at"], name="dataset_import_publish"),
-            models.Index(fields=["state", "queued_at"], name="dataset_import_queue"),
-            models.Index(fields=["state", "lease_until"], name="dataset_import_lease"),
-            GinIndex(fields=["source_manifest"], name="dataset_import_sources"),
-            models.Index(
-                fields=["handoff_lease_until", "queued_at"],
-                name="dataset_import_handoff",
-                condition=models.Q(handoff_pending=True, state="complete"),
-            ),
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "request_key"], name="unique_exploration_request"
+            )
+        ]
+
+
+class DataPartitionPlan(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    project = models.ForeignKey("overbae.Project", on_delete=models.CASCADE)
+    name = models.CharField(max_length=255)
+    request_key = models.CharField(max_length=128)
+    source_cell = models.ForeignKey(
+        "overbae.Cell", on_delete=models.PROTECT, related_name="partition_plans"
+    )
+    source_fingerprint = models.CharField(max_length=64)
+    recipe = models.JSONField(default=dict)
+    report = models.JSONField(default=dict)
+    state = models.CharField(max_length=16, default="queued", db_index=True)
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "request_key"], name="unique_partition_request"
+            )
+        ]
+
+
+class DataPartitionMember(models.Model):
+    plan = models.ForeignKey(DataPartitionPlan, on_delete=models.CASCADE, related_name="members")
+    role = models.CharField(max_length=16)
+    cell = models.ForeignKey(
+        "overbae.Cell", on_delete=models.PROTECT, related_name="partition_memberships"
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["plan", "role"], name="unique_partition_role")
         ]
 
 
@@ -182,7 +195,6 @@ class Cell(models.Model):
     used cell is frozen; consumers PROTECT it."""
 
     class State(models.TextChoices):
-        PROPOSED = "proposed"
         QUEUED = "queued"
         RUNNING = "running"
         OK = "ok"
@@ -192,7 +204,7 @@ class Cell(models.Model):
     dataset = models.ForeignKey(Dataset, on_delete=models.CASCADE, related_name="cells")
     position = models.PositiveIntegerField()
     title = models.CharField(max_length=255)
-    # A Python body over ``df``; empty for the source.
+    # Read-only source code retained with historical versions.
     script = models.TextField(blank=True, default="")
     note = models.CharField(max_length=512, blank=True, default="")
     state = models.CharField(max_length=8, choices=State.choices, default=State.QUEUED)
@@ -201,7 +213,7 @@ class Cell(models.Model):
     # [{name, type, null_rate}] of the frame.
     columns = models.JSONField(default=list, blank=True)
     fingerprint = models.CharField(max_length=64, blank=True, default="")
-    # Fingerprint of the frame this cell read; a mismatch means it must run again.
+    # Exact input identity, retained even when a later cell selects an earlier parent.
     input_fingerprint = models.CharField(max_length=64, blank=True, default="")
     # {train: {ok, reason}, eval: {ok, reason}}
     intent_report = models.JSONField(default=dict, blank=True)
@@ -211,6 +223,7 @@ class Cell(models.Model):
     stats = models.JSONField(default=dict, blank=True)
     review = models.JSONField(default=dict, blank=True)
     quality_report = models.JSONField(default=dict, blank=True)
+    preparation_plan = models.JSONField(default=dict, blank=True)
     seconds = models.FloatField(default=0.0)
     used_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(
@@ -248,6 +261,8 @@ class Cell(models.Model):
 
     def fits(self, intent: str) -> tuple[bool, str]:
         """Whether a consumer can read this version; quality findings are advisory."""
+        if intent == Dataset.Intent.EXPLORE:
+            return False, "Data exploration has no training or evaluation format."
         if intent not in (Dataset.Intent.TRAIN, Dataset.Intent.EVAL):
             return False, "The intent is still pending. Choose train or eval."
         if not self.ran:
@@ -256,3 +271,58 @@ class Cell(models.Model):
         if not shape.get("ok"):
             return False, str(shape.get("reason") or f"the table is not a {intent} table")
         return True, ""
+
+
+class DatasetHistory(models.Model):
+    dataset = models.ForeignKey(Dataset, on_delete=models.CASCADE, related_name="history")
+    kind = models.CharField(max_length=32)
+    reference = models.CharField(max_length=128, blank=True)
+    payload = models.JSONField(default=dict)
+    recorded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dataset", "kind", "reference"], name="unique_dataset_history"
+            )
+        ]
+
+
+class DatasetImport(models.Model):
+    class State(models.TextChoices):
+        QUEUED = "queued"
+        RUNNING = "running"
+        BLOCKED = "blocked"
+        COMPLETE = "complete"
+        CANCELLED = "cancelled"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    dataset = models.OneToOneField(Dataset, on_delete=models.CASCADE, related_name="import_run")
+    evaluation = models.ForeignKey(
+        Dataset, null=True, blank=True, on_delete=models.SET_NULL, related_name="split_imports"
+    )
+    state = models.CharField(max_length=16, choices=State.choices, default=State.QUEUED)
+    inputs = models.JSONField(default=dict)
+    source_manifest = models.JSONField(default=list)
+    queued_at = models.DateTimeField()
+    started_at = models.DateTimeField(null=True, blank=True)
+    published_at = models.DateTimeField(null=True, blank=True)
+    next_publish_at = models.DateTimeField(null=True, blank=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    owner = models.UUIDField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    publish_attempts = models.PositiveIntegerField(default=0)
+    publish_owner = models.UUIDField(null=True, blank=True)
+    failure_code = models.CharField(max_length=64, blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    result = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["state", "next_publish_at"], name="dataset_import_publish"),
+            models.Index(fields=["state", "queued_at"], name="dataset_import_queue"),
+            models.Index(fields=["state", "lease_until"], name="dataset_import_lease"),
+            GinIndex(fields=["source_manifest"], name="dataset_import_sources"),
+        ]

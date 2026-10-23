@@ -90,9 +90,9 @@ def test_regular_user_is_not_restricted():
     assert res.json()["is_guest"] is False
 
 
-def test_claim_moves_workspace_to_clerk_account_and_ignores_project_limit(clerk):
+def test_claim_moves_workspace_to_clerk_account(clerk):
     guest, project, client, _refresh = _guest_client()
-    owner = _member(projects_limit=0)
+    owner = _member()
     owner.clerk_user_id = clerk.user(owner.email)
     owner.save(update_fields=["clerk_user_id"])
     res = client.post(
@@ -191,7 +191,7 @@ def test_sweep_keeps_going_past_a_protected_project():
     User.objects.filter(pk__in=[blocked.pk, plain.pk]).update(
         date_joined=timezone.now() - timedelta(days=8)
     )
-    dataset = frozen_dataset(blocked_project, EVAL_ROWS, name="d")
+    dataset = frozen_dataset(blocked_project, EVAL_ROWS, name="d", contract="eval")
     FinetuningJob.objects.create(project=blocked_project, dataset=dataset)
 
     result = sweep_guest_workspaces()

@@ -5,6 +5,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { DatasetNotebook } from "@/components/datasets/notebook/notebook-page";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { WorkshopSidebarContext } from "@/contexts/workshop-sidebar-context";
 import { DatasetFromJSON } from "@/openapi";
 
 const state = vi.hoisted(() => ({
@@ -18,8 +20,12 @@ vi.mock("@/client", () => ({
   default: {
     capabilities: { capabilitiesList: vi.fn(() => Promise.resolve({ results: [] })) },
     datasets: {
+      datasetsPreparationRetrieve: vi.fn(() =>
+        Promise.resolve({ edges: [], nodes: [], selected: null })
+      ),
+      datasetsResumeImportCreate: state.retry,
       datasetsRetrieve: vi.fn(() => Promise.resolve(state.dataset)),
-      datasetsRunCreate: state.retry,
+      datasetsWorkbenchRetrieve: vi.fn(() => Promise.resolve({ runPage: {}, runs: [] })),
     },
   },
   fetchWithAuth: vi.fn(() => Promise.resolve(new Response(""))),
@@ -36,10 +42,10 @@ beforeEach(() => {
   state.guest = false;
   state.dataset = DatasetFromJSON({
     cells: [],
-    chat: [],
     error: "The import worker stopped.",
     id: "dataset",
     name: "titanic",
+    operation: { source_import: { can_resume: true } },
     project: "project",
     source_spec: {},
     state: "error",
@@ -69,40 +75,42 @@ function showNotebook() {
   queryClient.setQueryData(["eval-capabilities", "project"], { results: [] });
   return render(
     <QueryClientProvider client={queryClient}>
-      <DatasetNotebook datasetId="dataset" projectId="project" />
+      <TooltipProvider>
+        <WorkshopSidebarContext.Provider value={{ close: vi.fn(), open: false, toggle: vi.fn() }}>
+          <DatasetNotebook datasetId="dataset" projectId="project" />
+        </WorkshopSidebarContext.Provider>
+      </TooltipProvider>
     </QueryClientProvider>
   );
 }
 
 it("retries a failed import once and prevents duplicate clicks while the request is pending", async () => {
   showNotebook();
-  const button = screen.getByRole("button", { name: "Retry import" }) as HTMLButtonElement;
+  const button = screen.getByRole("button", { name: "Resume import" }) as HTMLButtonElement;
   expect(button.disabled).toBe(false);
-  expect(screen.getByText("Import failed")).toBeTruthy();
+  expect(screen.getByText("The import worker stopped.")).toBeTruthy();
   fireEvent.click(button);
   await waitFor(() => expect(state.retry).toHaveBeenCalledWith({ id: "dataset" }));
   await waitFor(() => expect(button.disabled).toBe(true));
   fireEvent.click(button);
   expect(state.retry).toHaveBeenCalledTimes(1);
-  expect(
-    (screen.getByRole("textbox", { name: "Message the agent" }) as HTMLTextAreaElement).disabled
-  ).toBe(true);
 });
 
 it("gates retry for guests without submitting a mutation", () => {
   state.guest = true;
   showNotebook();
-  fireEvent.click(screen.getByRole("button", { name: "Retry import" }));
+  fireEvent.click(screen.getByRole("button", { name: "Resume import" }));
   expect(state.upgrade).toHaveBeenCalledOnce();
   expect(state.retry).not.toHaveBeenCalled();
 });
 
 it("keeps import retry unavailable while the source is landing", () => {
-  state.dataset = { ...state.dataset, state: "landing" };
+  state.dataset = {
+    ...state.dataset,
+    operation: { source_import: { can_resume: false } },
+    state: "landing",
+  };
   showNotebook();
-  expect(screen.queryByRole("button", { name: "Retry import" })).toBeNull();
-  expect(screen.getByText("Landing the source…")).toBeTruthy();
-  expect(
-    (screen.getByRole("textbox", { name: "Message the agent" }) as HTMLTextAreaElement).disabled
-  ).toBe(true);
+  expect(screen.queryByRole("button", { name: "Resume import" })).toBeNull();
+  expect(screen.getByText("Workshop operation running")).toBeTruthy();
 });

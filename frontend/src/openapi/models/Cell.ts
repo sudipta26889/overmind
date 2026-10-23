@@ -13,6 +13,20 @@
  */
 
 import { mapValues } from '../runtime';
+import type { DatasetAnalytics } from './DatasetAnalytics';
+import {
+    DatasetAnalyticsFromJSON,
+    DatasetAnalyticsFromJSONTyped,
+    DatasetAnalyticsToJSON,
+    DatasetAnalyticsToJSONTyped,
+} from './DatasetAnalytics';
+import type { CellTransformation } from './CellTransformation';
+import {
+    CellTransformationFromJSON,
+    CellTransformationFromJSONTyped,
+    CellTransformationToJSON,
+    CellTransformationToJSONTyped,
+} from './CellTransformation';
 import type { DatasetReadiness } from './DatasetReadiness';
 import {
     DatasetReadinessFromJSON,
@@ -67,6 +81,12 @@ export interface Cell {
     readonly script: string;
     /**
      *
+     * @type {CellTransformation}
+     * @memberof Cell
+     */
+    readonly transformation: CellTransformation;
+    /**
+     *
      * @type {string}
      * @memberof Cell
      */
@@ -109,6 +129,12 @@ export interface Cell {
     readonly fingerprint: string;
     /**
      *
+     * @type {string}
+     * @memberof Cell
+     */
+    readonly inputFingerprint: string;
+    /**
+     *
      * @type {any}
      * @memberof Cell
      */
@@ -133,6 +159,12 @@ export interface Cell {
     readonly stats: any | null;
     /**
      *
+     * @type {DatasetAnalytics}
+     * @memberof Cell
+     */
+    readonly analytics: DatasetAnalytics;
+    /**
+     *
      * @type {any}
      * @memberof Cell
      */
@@ -143,6 +175,12 @@ export interface Cell {
      * @memberof Cell
      */
     readonly qualityReport: any | null;
+    /**
+     *
+     * @type {{ [key: string]: any; }}
+     * @memberof Cell
+     */
+    readonly preparationPlan: { [key: string]: any; } | null;
     /**
      *
      * @type {DatasetReadiness}
@@ -161,6 +199,12 @@ export interface Cell {
      * @memberof Cell
      */
     readonly usedAt: Date | null;
+    /**
+     *
+     * @type {{ [key: string]: Array<{ [key: string]: any; }>; }}
+     * @memberof Cell
+     */
+    readonly usage: { [key: string]: Array<{ [key: string]: any; }>; };
     /**
      *
      * @type {Date}
@@ -186,6 +230,7 @@ export function instanceOfCell(value: object): value is Cell {
     if (!('version' in value) || value['version'] === undefined) return false;
     if (!('title' in value) || value['title'] === undefined) return false;
     if (!('script' in value) || value['script'] === undefined) return false;
+    if (!('transformation' in value) || value['transformation'] === undefined) return false;
     if (!('note' in value) || value['note'] === undefined) return false;
     if (!('state' in value) || value['state'] === undefined) return false;
     if (!('error' in value) || value['error'] === undefined) return false;
@@ -193,15 +238,19 @@ export function instanceOfCell(value: object): value is Cell {
     if (!('rows' in value) || value['rows'] === undefined) return false;
     if (!('columns' in value) || value['columns'] === undefined) return false;
     if (!('fingerprint' in value) || value['fingerprint'] === undefined) return false;
+    if (!('inputFingerprint' in value) || value['inputFingerprint'] === undefined) return false;
     if (!('intentReport' in value) || value['intentReport'] === undefined) return false;
     if (!('capabilityReport' in value) || value['capabilityReport'] === undefined) return false;
     if (!('fits' in value) || value['fits'] === undefined) return false;
     if (!('stats' in value) || value['stats'] === undefined) return false;
+    if (!('analytics' in value) || value['analytics'] === undefined) return false;
     if (!('review' in value) || value['review'] === undefined) return false;
     if (!('qualityReport' in value) || value['qualityReport'] === undefined) return false;
+    if (!('preparationPlan' in value) || value['preparationPlan'] === undefined) return false;
     if (!('readiness' in value) || value['readiness'] === undefined) return false;
     if (!('seconds' in value) || value['seconds'] === undefined) return false;
     if (!('usedAt' in value) || value['usedAt'] === undefined) return false;
+    if (!('usage' in value) || value['usage'] === undefined) return false;
     if (!('createdAt' in value) || value['createdAt'] === undefined) return false;
     if (!('updatedAt' in value) || value['updatedAt'] === undefined) return false;
     return true;
@@ -222,6 +271,7 @@ export function CellFromJSONTyped(json: any, ignoreDiscriminator: boolean): Cell
         'version': json['version'],
         'title': json['title'],
         'script': json['script'],
+        'transformation': CellTransformationFromJSON(json['transformation']),
         'note': json['note'],
         'state': CellStateEnumFromJSON(json['state']),
         'error': json['error'],
@@ -229,15 +279,19 @@ export function CellFromJSONTyped(json: any, ignoreDiscriminator: boolean): Cell
         'rows': json['rows'],
         'columns': json['columns'],
         'fingerprint': json['fingerprint'],
+        'inputFingerprint': json['input_fingerprint'],
         'intentReport': json['intent_report'],
         'capabilityReport': json['capability_report'],
         'fits': json['fits'],
         'stats': json['stats'],
+        'analytics': DatasetAnalyticsFromJSON(json['analytics']),
         'review': json['review'],
         'qualityReport': json['quality_report'],
+        'preparationPlan': json['preparation_plan'],
         'readiness': DatasetReadinessFromJSON(json['readiness']),
         'seconds': json['seconds'],
         'usedAt': (json['used_at'] == null ? null : new Date(json['used_at'])),
+        'usage': json['usage'],
         'createdAt': (new Date(json['created_at'])),
         'updatedAt': (new Date(json['updated_at'])),
     };
@@ -247,7 +301,7 @@ export function CellToJSON(json: any): Cell {
     return CellToJSONTyped(json, false);
 }
 
-export function CellToJSONTyped(value?: Omit<Cell, 'id'|'position'|'version'|'title'|'script'|'note'|'state'|'error'|'frozen'|'rows'|'columns'|'fingerprint'|'intent_report'|'capability_report'|'fits'|'stats'|'review'|'quality_report'|'readiness'|'seconds'|'used_at'|'created_at'|'updated_at'> | null, ignoreDiscriminator: boolean = false): any {
+export function CellToJSONTyped(value?: Omit<Cell, 'id'|'position'|'version'|'title'|'script'|'transformation'|'note'|'state'|'error'|'frozen'|'rows'|'columns'|'fingerprint'|'input_fingerprint'|'intent_report'|'capability_report'|'fits'|'stats'|'analytics'|'review'|'quality_report'|'preparation_plan'|'readiness'|'seconds'|'used_at'|'usage'|'created_at'|'updated_at'> | null, ignoreDiscriminator: boolean = false): any {
     if (value == null) {
         return value;
     }

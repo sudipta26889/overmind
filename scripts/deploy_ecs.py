@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deploy reviewed immutable images and source-controlled worker commands.
 
-AWS calls require an explicit ``migrate`` or ``deploy`` subcommand. The rendering
+AWS calls require an explicit ``preflight``, ``migrate`` or ``deploy`` subcommand. The rendering
 helpers are pure so task definitions can be reviewed and tested without AWS.
 """
 
@@ -18,6 +18,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HEALTH_CHECKED_QUEUES = {
+    "celery-io-worker": "io",
+    "celery-traces-worker": "io_traces",
     "celery-landing-worker": "landing",
     "celery-interactive-worker": "interactive",
 }
@@ -54,6 +56,67 @@ def render_task_definition(document, *, service, image, cluster):
         app["entryPoint"] = ["/usr/local/bin/worker-entrypoint.sh"]
     elif service != "api":
         raise ValueError(f"No reviewed command for service {service!r}")
+    if service == "sandbox":
+        linux = app.setdefault("linuxParameters", {})
+        linux["initProcessEnabled"] = True
+        linux["capabilities"] = {
+            "add": ["SYS_PTRACE"],
+            "drop": [
+                "AUDIT_WRITE",
+                "FSETID",
+                "MKNOD",
+                "NET_BIND_SERVICE",
+                "NET_RAW",
+                "SETFCAP",
+                "SETPCAP",
+                "SYS_CHROOT",
+            ],
+        }
+        app["healthCheck"] = {
+            "command": [
+                "CMD",
+                "python",
+                "-c",
+                "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5)",
+            ],
+            "interval": 30,
+            "timeout": 15,
+            "retries": 3,
+            "startPeriod": 90,
+        }
+        app["stopTimeout"] = 120
+    if service != "sandbox":
+        _environment(app, RUN_DB_BOOTSTRAP="0", WORKSHOP_EXECUTION_BACKEND="sandbox-package-v1")
+    if service in {"celery-interactive-worker", "celery-landing-worker"}:
+        volumes = result.setdefault("volumes", [])
+        if any(
+            volume["name"] == "workshop-scratch"
+            and volume
+            not in ({"name": "workshop-scratch"}, {"name": "workshop-scratch", "host": {}})
+            for volume in volumes
+        ):
+            raise ValueError("Workshop scratch must use task-local ephemeral storage.")
+        if not any(volume["name"] == "workshop-scratch" for volume in volumes):
+            volumes.append({"name": "workshop-scratch"})
+        mounts = app.setdefault("mountPoints", [])
+        if any(
+            mount["containerPath"] == "/scratch"
+            and (mount["sourceVolume"] != "workshop-scratch" or mount.get("readOnly"))
+            for mount in mounts
+        ):
+            raise ValueError("The /scratch mount conflicts with Workshop temporary storage.")
+        if not any(mount["containerPath"] == "/scratch" for mount in mounts):
+            mounts.append(
+                {"sourceVolume": "workshop-scratch", "containerPath": "/scratch", "readOnly": False}
+            )
+        _environment(app, TMPDIR="/scratch/tmp")
+    if service == "api" and cluster in {"overmind-prod-cluster", "overmind-staging-cluster"}:
+        host = (
+            "api.overmindlab.ai"
+            if cluster == "overmind-prod-cluster"
+            else "api-staging.overmindlab.ai"
+        )
+        _environment(app, MCP_SERVER_URL=f"https://{host}/api/mcp/")
     if service == "celery-control-worker":
         _environment(app, QUEUE_METRICS_ENABLED="1", QUEUE_METRICS_CLUSTER=cluster)
     if service in HEALTH_CHECKED_QUEUES:
@@ -74,6 +137,42 @@ def render_task_definition(document, *, service, image, cluster):
         # remains disabled until a reviewed graceful-drain policy is installed.
         app["stopTimeout"] = 120
     return result
+
+
+def preflight(cluster):
+    for name in (
+        "sandbox",
+        "celery-landing-worker",
+        "celery-interactive-worker",
+        "celery-traces-worker",
+    ):
+        service = describe_service(cluster, name)
+        family = service["taskDefinition"].rsplit("/", 1)[-1].rsplit(":", 1)[0]
+        definition = aws("ecs", "describe-task-definition", "--task-definition", family)[
+            "taskDefinition"
+        ]
+        if not any(c["name"] == name for c in definition["containerDefinitions"]):
+            raise ValueError(f"Missing {name} container in its task definition")
+    api = describe_service(cluster, "api")
+    definition = aws("ecs", "describe-task-definition", "--task-definition", api["taskDefinition"])[
+        "taskDefinition"
+    ]
+    app = next(c for c in definition["containerDefinitions"] if c["name"] == "api")
+    environment = {item["name"]: item["value"] for item in app.get("environment", [])}
+    if environment.get("WORKSHOP_EXECUTION_BACKEND") != "sandbox-package-v1":
+        require_drained_consumers(cluster)
+    print("Required consumer infrastructure is configured; no services or schema were changed.")
+
+
+def require_drained_consumers(cluster):
+    names = ["api", *json.loads((ROOT / "docker/worker-topology.json").read_text())]
+    for name in names:
+        service = describe_service(cluster, name)
+        if any(service.get(key, 0) for key in ("desiredCount", "runningCount", "pendingCount")):
+            raise RuntimeError(
+                f"The schema cutover requires drained, stopped consumers; {name} is active. "
+                "Follow scripts/workshop-rollout.md before migrating."
+            )
 
 
 def migration_request(definition, service, *, task_definition, cluster):
@@ -140,7 +239,7 @@ def describe_service(cluster, service):
     response = aws("ecs", "describe-services", "--cluster", cluster, "--services", service)
     if response.get("failures") or len(response.get("services", [])) != 1:
         raise RuntimeError(
-            f"Service {service!r} is absent. Provision the reviewed landing capacity plan "
+            f"Service {service!r} is absent. Apply it in cloud-platform (Terraform) "
             "before this release; no producer has been deployed."
         )
     return response["services"][0]
@@ -148,12 +247,12 @@ def describe_service(cluster, service):
 
 def register(cluster, service_name, image):
     service = describe_service(cluster, service_name)
-    definition = aws(
-        "ecs",
-        "describe-task-definition",
-        "--task-definition",
-        service["taskDefinition"],
-    )["taskDefinition"]
+    # Terraform (cloud-platform) registers env, secret and role changes as new
+    # revisions without moving the service; the family name resolves to the latest.
+    family = service["taskDefinition"].rsplit("/", 1)[-1].rsplit(":", 1)[0]
+    definition = aws("ecs", "describe-task-definition", "--task-definition", family)[
+        "taskDefinition"
+    ]
     rendered = render_task_definition(
         definition, service=service_name, image=image, cluster=cluster
     )
@@ -162,6 +261,7 @@ def register(cluster, service_name, image):
 
 
 def migrate(cluster, image):
+    preflight(cluster)
     service, definition = register(cluster, "api", image)
     response = aws(
         "ecs",
@@ -190,9 +290,49 @@ def migrate(cluster, image):
     print(f"Migration completed: {arn}")
 
 
-def deploy(cluster, service_name, image, timeout=4200):
+def drain_io(cluster, image, timeout=4200):
+    service, definition = register(cluster, "api", image)
+    request = migration_request(
+        definition, service, task_definition=definition["taskDefinitionArn"], cluster=cluster
+    )
+    request["overrides"]["containerOverrides"][0]["command"] = [
+        "python",
+        "-m",
+        "overbae.worker_drain",
+        "--timeout",
+        str(timeout),
+    ]
+    result = aws("ecs", "run-task", payload=request)
+    if result.get("failures") or len(result.get("tasks", [])) != 1:
+        raise RuntimeError("IO drain task was not accepted; worker deployment stopped")
+    arn = result["tasks"][0]["taskArn"]
+    deadline = time.monotonic() + timeout + 180
+    while time.monotonic() < deadline:
+        task = aws("ecs", "describe-tasks", "--cluster", cluster, "--tasks", arn)["tasks"][0]
+        if task["lastStatus"] == "STOPPED":
+            app = next(c for c in task["containers"] if c["name"] == "api")
+            if app.get("exitCode") != 0:
+                raise RuntimeError(f"IO drain failed in {arn}; worker deployment stopped")
+            print(f"Mixed IO consumers drained: {arn}", flush=True)
+            return
+        time.sleep(10)
+    raise TimeoutError(f"IO drain did not complete: {arn}; worker deployment stopped")
+
+
+def deploy(cluster, service_name, image, timeout=4200, desired_count=None):
+    if desired_count is not None and desired_count < 1:
+        raise ValueError("Deployment requires a positive desired count.")
+    current = describe_service(cluster, service_name)
+    if not current.get("desiredCount") and desired_count is None:
+        raise ValueError(
+            "Restore the recorded service capacity with --desired-count after cutover."
+        )
     _, definition = register(cluster, service_name, image)
     arn = definition["taskDefinitionArn"]
+    if service_name == "celery-io-worker":
+        drain_io(cluster, image, timeout)
+    count = desired_count
+    options = ["--desired-count", str(count)] if count is not None else []
     aws(
         "ecs",
         "update-service",
@@ -202,6 +342,7 @@ def deploy(cluster, service_name, image, timeout=4200):
         service_name,
         "--task-definition",
         arn,
+        *options,
     )
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -240,7 +381,7 @@ def deploy(cluster, service_name, image, timeout=4200):
             service,
             tasks,
             task_definition=arn,
-            require_health=service_name in HEALTH_CHECKED_QUEUES,
+            require_health=service_name in HEALTH_CHECKED_QUEUES or service_name == "sandbox",
         ):
             print(f"Ready: {service_name} {arn}")
             return
@@ -250,7 +391,7 @@ def deploy(cluster, service_name, image, timeout=4200):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["migrate", "deploy"])
+    parser.add_argument("action", choices=["migrate", "deploy", "preflight"])
     parser.add_argument(
         "--cluster",
         default=os.environ.get("ECS_CLUSTER"),
@@ -259,14 +400,21 @@ def main():
     parser.add_argument(
         "--image",
         default=os.environ.get("IMAGE_URI"),
-        required=not os.environ.get("IMAGE_URI"),
     )
     parser.add_argument("--service", default=os.environ.get("SERVICE", "api"))
+    parser.add_argument(
+        "--desired-count", type=int, help="Explicitly restore recorded cutover capacity"
+    )
     args = parser.parse_args()
+    if args.action == "preflight":
+        preflight(args.cluster)
+        return
+    if not args.image:
+        parser.error("--image or IMAGE_URI is required for deployment")
     if args.action == "migrate":
         migrate(args.cluster, args.image)
     else:
-        deploy(args.cluster, args.service, args.image)
+        deploy(args.cluster, args.service, args.image, desired_count=args.desired_count)
 
 
 if __name__ == "__main__":

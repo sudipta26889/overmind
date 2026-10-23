@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import sys
 from datetime import timedelta
@@ -19,6 +20,19 @@ SECRET_KEY = os.environ.get(
 )
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "False") == "True"
+
+WORKSHOP_PROJECT_CONCURRENCY = int(os.environ.get("WORKSHOP_PROJECT_CONCURRENCY", "2"))
+DATASET_LANDING_MAX_IN_FLIGHT = int(os.environ.get("DATASET_LANDING_MAX_IN_FLIGHT", "8"))
+DATASET_QUERY_TIMEOUT_SECONDS = float(os.environ.get("DATASET_QUERY_TIMEOUT_SECONDS", "10"))
+DATASET_QUERY_MAX_IN_FLIGHT = int(os.environ.get("DATASET_QUERY_MAX_IN_FLIGHT", "8"))
+DATASET_QUERY_PROJECT_CONCURRENCY = int(os.environ.get("DATASET_QUERY_PROJECT_CONCURRENCY", "2"))
+if (
+    DATASET_QUERY_TIMEOUT_SECONDS <= 0
+    or not math.isfinite(DATASET_QUERY_TIMEOUT_SECONDS)
+    or DATASET_QUERY_PROJECT_CONCURRENCY < 1
+    or DATASET_QUERY_MAX_IN_FLIGHT < DATASET_QUERY_PROJECT_CONCURRENCY
+):
+    raise ImproperlyConfigured("Dataset query timeout and concurrency budgets must be positive.")
 
 # Deployments set their own path so the admin is not at a guessable URL.
 ADMIN_URL_PATH = os.environ.get("DJANGO_ADMIN_PATH", "admin").strip("/") + "/"
@@ -175,13 +189,10 @@ MEDIA_URL = "media/"
 # /data/media on the EFS volume.
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", BASE_DIR / "media"))
 
-# The single EFS volume ECS mounts at /data; MEDIA_ROOT lives under it.
 DATA_ROOT = Path(os.environ.get("DATA_ROOT", BASE_DIR / "data"))
-TMPDIR = str(DATA_ROOT / "tmp")
+TMPDIR = os.environ.get("TMPDIR", str(DATA_ROOT / "tmp"))
 
-# The Fargate container root filesystem is read-only, so /data/tmp is the only
-# place mkstemp / NamedTemporaryFile can write. Every process that imports
-# settings needs this wiring.
+# Read-only containers need an explicitly mounted writable scratch directory.
 import tempfile  # noqa: E402 — intentional late import
 
 os.makedirs(TMPDIR, exist_ok=True)
@@ -293,15 +304,6 @@ STRIPE_PRO_PRICE_ID = os.environ.get("STRIPE_PRO_PRICE_ID")
 # One-time price of a single Overmind Credit ($0.01); top-up quantity = credits bought.
 STRIPE_CREDIT_PRICE_ID = os.environ.get("STRIPE_CREDIT_PRICE_ID")
 
-# The hosted GLiNER endpoint handles unstructured PII (PERSON/LOCATION/ORG);
-# structured secrets stay on the local regex/checksum validators.
-PII_NER_ENDPOINT_URL = os.environ.get("PII_NER_ENDPOINT_URL", "")
-PII_NER_TOKEN = os.environ.get("PII_NER_TOKEN", "")
-# Minimum GLiNER confidence, applied at decode by the endpoint so changing it
-# needs no redeploy. Calibrated on the medical corpus: 0.80 drops zero-shot false
-# positives such as anatomy read as LOCATION while keeping real named entities.
-PII_NER_MIN_SCORE = float(os.environ.get("PII_NER_MIN_SCORE", "0.8"))
-
 AUTH_USER_MODEL = "overbae.User"
 
 REST_FRAMEWORK = {
@@ -349,7 +351,6 @@ SPECTACULAR_SETTINGS = {
     "COMPONENT_SPLIT_REQUEST": True,
     "SCHEMA_PATH_PREFIX": r"/api/",
     "ENUM_NAME_OVERRIDES": {
-        "DecisionPolicyBackendEnum": [("jev", "jev"), ("generative", "generative")],
         "BackendEnum": [("together", "together"), ("baseten", "baseten"), ("modal", "modal")],
         "IntentEnum": "overbae.models.datasets.Dataset.Intent",
         "CellStateEnum": "overbae.models.datasets.Cell.State",
@@ -363,21 +364,15 @@ SPECTACULAR_SETTINGS = {
         ],
         "CapabilityStatusEnum": "overbae.models.capabilities.Capability.Status",
         "SpanTypeEnum": "overbae.models.traces.Span.SpanType",
-        "BacktestRunStatusEnum": "overbae.models.traces.BacktestRun.RunStatus",
         "FinetuningJobStatusEnum": "overbae.models.finetuning.FinetuningJob.Status",
         "SignOnMethodEnum": "overbae.models.iam.SignOnMethod",
-        "ModelRefProviderEnum": "overbae.models.evaluation.ModelRef.Provider",
-        "EvaluatorKindEnum": "overbae.models.evaluation.Evaluator.Kind",
-        "EvaluatorScopeEnum": "overbae.models.evaluation.Evaluator.Scope",
+        "ModelRefProviderEnum": "overbae.models.innermind.ModelRef.Provider",
         # EvalRun.Status is absent on purpose: its members match another status
         # enum and it reuses that component.
-        "EvalRunDataSourceEnum": "overbae.models.evaluation.EvalRun.DataSource",
-        "EvalVariantModeEnum": "overbae.models.evaluation.EvalVariant.Mode",
-        # Evaluator.ScoreType shares members with Score.DataType, so this one
-        # override name covers both.
-        "ScoreDataTypeEnum": "overbae.models.evaluation.Score.DataType",
-        "ScoreFailureRoleEnum": "overbae.models.evaluation.Score.FailureRole",
-        "ScoreSourceEnum": "overbae.models.evaluation.Score.Source",
+        "EvalRunModeEnum": "overbae.models.innermind.EvalRun.Mode",
+        "EvalMatrixTypeEnum": "overbae.models.innermind.EvalMatrix.Type",
+        "EvalRunRowStateEnum": "overbae.models.innermind.EvalRunRow.State",
+        "EvalScoreSourceTypeEnum": "overbae.models.innermind.EvalScore.SourceType",
         "DatasetSourceKindEnum": "overbae.models.datasets.Dataset.SourceKind",
     },
     "APPEND_COMPONENTS": {
@@ -409,6 +404,9 @@ CACHES = {
 
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", CELERY_BROKER_URL)
+# Redis hands a message unacknowledged this long to another worker. Late-ack tasks
+# hold theirs for their whole run, so this must exceed every such time limit.
+CELERY_BROKER_TRANSPORT_OPTIONS = {"visibility_timeout": 2 * 60 * 60}
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_ACCEPT_CONTENT = ["json"]
@@ -416,9 +414,8 @@ CELERY_TIMEZONE = "UTC"
 
 # Workers are resource profiles, queues are fairness classes. Only prefork
 # enforces time_limit and revoke(terminate=True), so every time-limited task
-# routes to a prefork lane; test_celery_topology asserts it. io_traces is a
-# second queue on the io worker, not a second worker: round-robin keeps an
-# unbounded trace burst from queueing ahead of user-started eval scoring. Landing
+# routes to a prefork lane; test_celery_topology asserts it. io_traces has its own
+# worker so trace scoring cannot occupy preparation and serving slots. Landing
 # has its own process pool: fair scheduling cannot preempt six occupied bulk slots.
 CELERY_TASK_DEFAULT_QUEUE = "control"
 
@@ -428,38 +425,64 @@ QUEUE_METRICS_CLUSTER = os.environ.get("QUEUE_METRICS_CLUSTER", "")
 
 # Admission is a provider-spend/concurrency budget, independent of sample count.
 EVAL_MAX_IN_FLIGHT = int(os.environ.get("EVAL_MAX_IN_FLIGHT", "12"))
+EVAL_MAX_IN_FLIGHT_PER_PROJECT = int(os.environ.get("EVAL_MAX_IN_FLIGHT_PER_PROJECT", "4"))
 EVAL_MAX_IN_FLIGHT_PER_RUN = int(os.environ.get("EVAL_MAX_IN_FLIGHT_PER_RUN", "2"))
-DATASET_IMPORT_MAX_QUEUE_SECONDS = int(os.environ.get("DATASET_IMPORT_MAX_QUEUE_SECONDS", "3600"))
+DATASET_IMPORT_MAX_QUEUE_SECONDS = int(os.environ.get("DATASET_IMPORT_MAX_QUEUE_SECONDS", "0"))
+LIVE_SCORING_MAX_IN_FLIGHT = int(os.environ.get("LIVE_SCORING_MAX_IN_FLIGHT", "16"))
+LIVE_SCORING_MAX_PER_PROJECT = int(os.environ.get("LIVE_SCORING_MAX_PER_PROJECT", "2"))
 
 CELERY_TASK_ROUTES = {
+    "overbae.tasks.datasets.check_pipeline_runtime": {"queue": "interactive"},
+    "overbae.tasks.datasets.refresh_pipeline_bindings": {"queue": "batch"},
+    "overbae.tasks.training_experiments.prepare_experiment": {"queue": "batch"},
+    "overbae.tasks.data_exploration.run": {"queue": "batch"},
+    "overbae.tasks.data_partitions.build_plan": {"queue": "batch"},
+    "overbae.tasks.decision_performance.measure": {"queue": "batch"},
+    "overbae.tasks.native_evaluation.advance_plan": {"queue": "batch"},
+    "overbae.tasks.native_evaluation.refresh_monitor": {"queue": "batch"},
     "overbae.tasks.training_preparation.inspect_preparation": {"queue": "io"},
-    "overbae.tasks.datasets.run": {"queue": "interactive"},
-    "overbae.tasks.datasets.turn": {"queue": "interactive"},
-    "overbae.tasks.datasets.diagnose": {"queue": "interactive"},
-    "overbae.tasks.eval.prepare_sample": {"queue": "batch"},
-    # Model warm-up and judge authoring block for minutes; control stays free for
-    # reconcilers and metrics.
-    "overbae.tasks.eval.run_eval_run": {"queue": "io"},
-    "overbae.tasks.eval.preload_capability_eval_set": {"queue": "io"},
+    "overbae.tasks.innermind.generate_row": {"queue": "batch"},
+    "overbae.tasks.innermind.score_eval_run": {"queue": "batch"},
+    # Model warm-up blocks for minutes; control stays free for reconcilers and metrics.
+    "overbae.tasks.innermind.run_eval_run": {"queue": "io"},
     "overbae.tasks.datasets.land": {"queue": "landing"},
+    "overbae.tasks.datasets.execute_pipeline": {"queue": "interactive"},
     "overbae.tasks.connector_sync.sync_connector_chunk": {"queue": "batch"},
-    "overbae.tasks.eval.execute_evaluator": {"queue": "io"},
     "overbae.tasks.model_deployment.advance_model_deployment": {"queue": "io"},
+    "overbae.tasks.inference_requests.inspect_inference_request": {"queue": "io"},
+    "overbae.tasks.inference_requests.collect_operation_progress": {"queue": "io"},
     "overbae.tasks.connector_sync.poll_connectors": {"queue": "io"},
     "overbae.tasks.connector_sync.sweep_abandoned_drafts": {"queue": "io"},
     "overbae.tasks.capability_rebind.rebind_unbound_spans": {"queue": "io"},
-    "overbae.tasks.behaviour.rebind_parked_executions": {"queue": "io"},
-    "overbae.tasks.trace_scoring.score_trace": {"queue": "io_traces"},
+    "overbae.tasks.innermind.dispatch_live_scoring": {"queue": "control"},
+    "overbae.tasks.innermind.execute_live_scoring": {"queue": "io_traces"},
+    "overbae.tasks.innermind.score_spans": {"queue": "io_traces"},
+    "overbae.tasks.innermind.sweep_unscored_spans": {"queue": "io_traces"},
+    "overbae.tasks.innermind.score_trajectories": {"queue": "io_traces"},
+    "overbae.tasks.innermind.run_signals": {"queue": "io_traces"},
 }
 
+# Share of traces live scoring judges, chosen by trace id; 1 scores every trace.
+TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE") or "1")
+
 CELERY_BEAT_SCHEDULE = {
+    "workshop-bindings": {
+        "task": "overbae.tasks.datasets.refresh_pipeline_bindings",
+        "schedule": 30.0,
+        "options": {"expires": 25.0},
+    },
+    "workshop-runtime-health": {
+        "task": "overbae.tasks.datasets.check_pipeline_runtime",
+        "schedule": 15.0,
+        "options": {"expires": 14.0},
+    },
     "reconcile-dataset-imports": {
         "task": "overbae.tasks.datasets.reconcile_imports",
         "schedule": 30.0,
         "options": {"expires": 25.0},
     },
     "dispatch-evaluation-generation": {
-        "task": "overbae.tasks.eval.dispatch_generation",
+        "task": "overbae.tasks.innermind.dispatch_generation",
         "schedule": 30.0,
         "options": {"expires": 25.0},
     },
@@ -467,6 +490,30 @@ CELERY_BEAT_SCHEDULE = {
         "task": "overbae.tasks.queue_metrics.publish",
         "schedule": 60.0,
         "options": {"expires": 55.0},
+    },
+    "inference-request-reconcile": {
+        "task": "overbae.tasks.inference_requests.reconcile_inference_requests",
+        "schedule": 15.0,
+    },
+    "training-experiment-preparation": {
+        "task": "overbae.tasks.training_experiments.reconcile",
+        "schedule": 30.0,
+    },
+    "data-exploration-reconcile": {
+        "task": "overbae.tasks.data_exploration.reconcile",
+        "schedule": 30.0,
+    },
+    "data-partition-reconciliation": {
+        "task": "overbae.tasks.data_partitions.reconcile",
+        "schedule": 60.0,
+    },
+    "decision-performance-reconcile": {
+        "task": "overbae.tasks.decision_performance.reconcile",
+        "schedule": 60.0,
+    },
+    "native-evaluation-reconciliation": {
+        "task": "overbae.tasks.native_evaluation.reconcile",
+        "schedule": 30.0,
     },
     "training-preparation": {
         "task": "overbae.tasks.training_preparation.reconcile",
@@ -482,10 +529,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "overbae.tasks.baseten_billing_sync.sync_baseten_finetuning_costs",
         "schedule": 3600.0,
     },
-    # Reaps runs stuck in RUNNING with no DB progress, i.e. a lost chord barrier.
+    # Fails runs stuck in RUNNING with no row progress and no healthy generation wait.
     "reap-stalled-eval-runs": {
-        "task": "overbae.tasks.eval_watchdog.reap_stalled_eval_runs",
-        "schedule": 600.0,
+        "task": "overbae.tasks.innermind.reap_stalled_runs",
+        "schedule": 300.0,
     },
     # Reaps notebook runs orphaned by a killed worker.
     "reap-stuck-dataset-runs": {
@@ -517,10 +564,26 @@ CELERY_BEAT_SCHEDULE = {
         "task": "overbae.tasks.inference_controller.reconcile_deployments",
         "schedule": 15.0,
     },
-    # Backstop for stragglers whose live scoring enqueue was lost.
-    "sweep-unscored-traces": {
-        "task": "overbae.tasks.trace_scoring.sweep_unscored_traces",
+    # Re-drives spans still waiting for an ancestor, stale claims and lost enqueues.
+    "admit-live-scoring": {
+        "task": "overbae.tasks.innermind.dispatch_live_scoring",
+        "schedule": 15.0,
+        "options": {"expires": 14.0},
+    },
+    "sweep-unscored-spans": {
+        "task": "overbae.tasks.innermind.sweep_unscored_spans",
         "schedule": 120.0,
+        "options": {"expires": 110.0},
+    },
+    "score-trajectories": {
+        "task": "overbae.tasks.innermind.score_trajectories",
+        "schedule": 300.0,
+        "options": {"expires": 290.0},
+    },
+    "run-signals": {
+        "task": "overbae.tasks.innermind.run_signals",
+        "schedule": 300.0,
+        "options": {"expires": 290.0},
     },
     # This cadence is only the outer tick: per-credential pacing and backoff are
     # gated by ConnectorCredential.next_poll_at. Kept at 60s so the fastest
@@ -539,7 +602,6 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-CURSOR_API_KEY = os.environ.get("CURSOR_API_KEY", "")
 
 # Feedback-channel incoming webhook; blank disables the notification.
 SLACK_FEEDBACK_WEBHOOK_URL = os.environ.get("SLACK_FEEDBACK_WEBHOOK_URL", "")
@@ -670,7 +732,6 @@ AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
 FINETUNING_BACKEND = os.environ.get("FINETUNING_BACKEND", "modal")
 
 # Must be `modal deploy`-ed before FINETUNING_BACKEND=modal can submit jobs.
-MODAL_SFT_APP_NAME = os.environ.get("MODAL_SFT_APP_NAME", "overmind-sft")
 
 if FINETUNING_BACKEND != "modal":
     raise ImproperlyConfigured("FINETUNING_BACKEND must be modal")
@@ -680,7 +741,12 @@ INFERENCE_API_URL: str = os.environ.get("INFERENCE_API_URL", "")
 # Must match INFERENCE_API_KEY in the Modal overmind-inference secret.
 INFERENCE_API_KEY: str = os.environ.get("INFERENCE_API_KEY", "")
 
+SANDBOX_URL = os.environ.get("SANDBOX_URL", "").rstrip("/")
+SANDBOX_TOKEN = os.environ.get("SANDBOX_TOKEN", "")
+
 _REQUIRED_KEYS = {
+    "SANDBOX_URL": "the isolated Workshop sandbox",
+    "SANDBOX_TOKEN": "the isolated Workshop sandbox",
     "OPENROUTER_API_KEY": "judges, evals, trace scoring and the Data Workshop",
     "MODAL_TOKEN_ID": "Modal training and serving workers",
     "MODAL_TOKEN_SECRET": "Modal training and serving workers",

@@ -35,7 +35,7 @@ from overbae.api.streaming import (
     AsyncStream,
     iter_keeping_idle_alive,
 )
-from overbae.core.model_registry import inference_models, is_inference_model
+from overbae.core.model_registry import OPENROUTER_BASE_URL, inference_models, is_inference_model
 from overbae.models import (
     APIToken,
     BillingService,
@@ -144,7 +144,7 @@ def _process_stream_chunk(raw: str, captured: dict[str, Any], include_usage: boo
     return raw
 
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 _OPENROUTER_TIMEOUT = 120
 
 # Model-comparison runs send this header to reach ANY OpenRouter-served slug;
@@ -322,6 +322,16 @@ def _resolve_alias(request: Request, model_id: str) -> tuple[DeployedModel | Non
             status=status.HTTP_404_NOT_FOUND,
         )
 
+    if deployed.inference_contract == "decision":
+        return Response(
+            {
+                "error": {
+                    "message": "This model returns decision probabilities. Call POST /api/v1/systemone.",
+                    "type": "invalid_request_error",
+                }
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     if deployed.status != DeployedModel.Status.READY:
         # Name both ids: the alias alone hides which deployment is stuck.
         return None, Response(
@@ -755,6 +765,7 @@ def _deployed_model_to_dict(m: DeployedModel) -> dict:
         "finetuned": True,
         "status": m.status,
         "base_model": m.base_model_id,
+        "inference_contract": m.inference_contract,
     }
 
 

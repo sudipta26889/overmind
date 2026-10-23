@@ -59,7 +59,9 @@ def test_call_llm_sends_the_response_schema(fake_llm):
     content, _ = call_llm("hello", system_prompt="system", model="gpt-5", response_format=_Status)
     request = fake_llm.requests[-1]
     assert request.model == "openai/gpt-5"
-    assert request.system == "system"
+    # The schema also rides in the prompt for gateways that drop response_format.
+    assert request.system.startswith("system\n\n")
+    assert '"status"' in request.system
     assert request.schema_name == "_Status"
     assert _Status.model_validate_json(content)
 
@@ -154,4 +156,4 @@ def test_a_credential_error_fails_on_the_first_attempt(fake_llm, slept, message)
 def test_every_catalog_row_names_a_vendor_and_a_tier():
     assert "gemini-3.1-pro-preview" in MODELS_BY_NAME
     for m in CATALOG:
-        assert m.vendor and m.tier and (m.slug or m.priced_as)
+        assert m.vendor and m.tier and m.slug

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { DateTime } from "@/components/ui/datetime";
 import { Icon } from "@/components/ui/icons";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Spinner } from "@/components/ui/spinner";
+import { LoadingState } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { navigateToJob, useRunningJobs } from "@/hooks/use-running-jobs";
 import { StatusBadge } from "@/lib/job-status";
@@ -22,8 +22,8 @@ function kindLabel(kind: RunningJobItem["kind"]): string {
 
 /** Each glyph must match the title icon of the page the row navigates to. */
 function JobKindIcon({ kind }: { kind: RunningJobItem["kind"] }) {
-  // Two-tone header glyphs need pixelated + dark:invert (see PageHeader call sites).
-  const titleIconClass = "size-4 shrink-0 [image-rendering:pixelated] dark:invert";
+  // Two-tone header glyphs need pixelated + invert (see PageHeader call sites).
+  const titleIconClass = "size-4 shrink-0 [image-rendering:pixelated] invert";
   if (kind === "finetuning") {
     return <Icon.finetuning className={titleIconClass} />;
   }
@@ -135,10 +135,7 @@ export function RunningJobsButton() {
             Choose a project to see running jobs.
           </p>
         ) : isLoading ? (
-          <div className="flex items-center justify-center gap-2 px-3 py-8 text-sm text-muted-foreground">
-            <Spinner size="sm" />
-            Loading…
-          </div>
+          <LoadingState label="Loading jobs" />
         ) : running.length === 0 && finishedInPanel.length === 0 ? (
           <div className="flex flex-col items-center gap-2 px-3 py-10 text-center">
             <Icon.bell className="size-5 text-muted-foreground" />

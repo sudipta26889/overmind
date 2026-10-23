@@ -1,25 +1,42 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
+import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from contextlib import suppress
+from threading import Event
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
-from factories import make_user
-from mcp_fixtures import EXPECTED_TOOL_NAMES
+from asgiref.sync import sync_to_async
+from django.db import connection, transaction
+from mcp_fixtures import EXPECTED_TOOL_NAMES, MAX_MANIFEST_BYTES
 from starlette.testclient import TestClient
 
-from overbae.models import APIToken, Capability, Project, ProjectMembership, Span
+from overbae.models import APIToken, Capability, Project, ProjectMembership, Span, User
 from overbae.services.mcp.server import create_mcp_application
+from overbae.services.mcp.tools_projects import accessible_projects
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 MCP_URL = "/api/mcp/"
 
 
+def _user() -> User:
+    return User.objects.create_user(
+        email=f"mcp-{uuid.uuid4().hex[:8]}@test.com",
+        password="pw",
+        clerk_user_id=f"clerk_{uuid.uuid4().hex}",
+    )
+
+
 def _token(*, permission: list[str] | None = None) -> tuple[str, APIToken]:
-    user = make_user()
+    user = _user()
     project = Project.objects.create(name="MCP", slug=f"mcp-{uuid.uuid4().hex[:8]}")
     ProjectMembership.objects.create(user=user, project=project)
     return APIToken.create_for_user(user, project=project, permission=permission)
@@ -95,6 +112,39 @@ def test_ping_is_protocol_level_and_catalog_lists_curated_tools():
     assert ping.json()["result"] == {}
 
 
+def test_slow_tool_does_not_block_another_callers_authenticated_request(monkeypatch):
+    slow_key, slow_token = _token()
+    other_key, other_token = _token()
+    entered, release = Event(), Event()
+
+    def delayed_projects(context):
+        if context.token.pk == slow_token.pk:
+            entered.set()
+            assert release.wait(10), "The test did not release the slow request"
+        return accessible_projects(context)
+
+    monkeypatch.setattr("overbae.services.mcp.tools_projects.accessible_projects", delayed_projects)
+    body = _rpc("tools/call", {"name": "list_projects", "arguments": {}})
+    with TestClient(_application()) as client, ThreadPoolExecutor(max_workers=2) as pool:
+        slow = pool.submit(_post, client, slow_key, body)
+        other_response = None
+        try:
+            assert entered.wait(5), "The slow request did not reach its domain operation"
+            other = pool.submit(_post, client, other_key, body)
+            with suppress(TimeoutError):
+                other_response = other.result(timeout=3)
+        finally:
+            release.set()
+        slow_response = slow.result(timeout=5)
+
+    assert other_response is not None, "An independent authenticated request was blocked"
+    for response, token in [(slow_response, slow_token), (other_response, other_token)]:
+        assert response.status_code == 200
+        result = response.json()["result"]
+        assert not result.get("isError"), result
+        assert [p["id"] for p in result["structuredContent"]["projects"]] == [str(token.project_id)]
+
+
 def test_tools_list_is_permission_filtered_and_stays_within_manifest_budget():
     read_raw, _ = _token(permission=["read"])
     full_raw, _ = _token()
@@ -109,7 +159,7 @@ def test_tools_list_is_permission_filtered_and_stays_within_manifest_budget():
     assert full_response.status_code == 200
     assert read_names < {tool["name"] for tool in full_tools}
     assert len(full_tools) == len(EXPECTED_TOOL_NAMES)
-    assert len(full_response.content) <= 40 * 1024
+    assert len(full_response.content) <= MAX_MANIFEST_BYTES
 
 
 def test_resources_and_prompts_list_over_streamable_http():
@@ -254,3 +304,71 @@ def test_origin_is_validated_on_initialize():
 
     assert response.status_code == 403
     assert response.json()["error"]["code"] == "origin_not_allowed"
+
+
+def _hold_token_row(
+    token: APIToken, holder: list[int], locked: threading.Event, release: threading.Event
+) -> None:
+    try:
+        with transaction.atomic():
+            APIToken.objects.select_for_update().get(pk=token.pk)
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                holder.append(cursor.fetchone()[0])
+            locked.set()
+            release.wait(30)
+    finally:
+        connection.close()
+
+
+def _a_request_waits_behind(holder_pid: int) -> bool:
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT 1 FROM pg_stat_activity WHERE %s = ANY(pg_blocking_pids(pid))",
+                    [holder_pid],
+                )
+                if cursor.fetchone():
+                    return True
+            time.sleep(0.05)
+        return False
+    finally:
+        connection.close()
+
+
+@pytest.mark.asyncio
+async def test_a_request_blocked_in_the_database_does_not_hold_up_other_requests():
+    raw_blocked, blocked = await sync_to_async(_token)()
+    raw_free, _ = await sync_to_async(_token)()
+    holder_pid: list[int] = []
+    locked, release = threading.Event(), threading.Event()
+    holder = threading.Thread(target=_hold_token_row, args=(blocked, holder_pid, locked, release))
+    holder.start()
+    assert await asyncio.to_thread(locked.wait, 10)
+
+    app = _application()
+    body = _rpc("ping")
+    headers = {"Accept": "application/json", "Host": "testserver"}
+    try:
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client,
+        ):
+            stuck = asyncio.create_task(
+                client.post(MCP_URL, json=body, headers={**headers, "X-Api-Key": raw_blocked})
+            )
+            assert await asyncio.to_thread(_a_request_waits_behind, holder_pid[0])
+            free = await asyncio.wait_for(
+                client.post(MCP_URL, json=body, headers={**headers, "X-Api-Key": raw_free}), 10
+            )
+            assert free.status_code == 200
+            assert not stuck.done()
+            release.set()
+            assert (await asyncio.wait_for(stuck, 10)).status_code == 200
+    finally:
+        release.set()
+        await asyncio.to_thread(holder.join)

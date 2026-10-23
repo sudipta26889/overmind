@@ -10,12 +10,14 @@ export const MCP_CLIENTS: { id: McpClient; label: string; destination: string }[
 ];
 
 export const API_KEY_PLACEHOLDER = "<your-api-key>";
+export const MIN_ONBOARDING_SDK_VERSION = "0.1.104";
+export const SDK_PREFLIGHT_COMMAND = "python -m overmind --version";
+
+const HOSTED_API_URL = "https://api.overmindlab.ai";
 
 export function mcpClientMeta(client: McpClient) {
   return MCP_CLIENTS.find((c) => c.id === client) ?? MCP_CLIENTS[0];
 }
-
-export type SdkInstallChannel = "pypi" | "editable";
 
 function apiHost(apiUrl: string): string {
   try {
@@ -25,128 +27,39 @@ function apiHost(apiUrl: string): string {
   }
 }
 
-function isLocalApiHost(host: string): boolean {
+function isLocal(apiUrl: string): boolean {
+  const host = apiHost(apiUrl);
   return host === "localhost" || host === "127.0.0.1";
 }
 
-function isStagingApiHost(host: string): boolean {
-  return host.includes("staging");
+/** Local checkout from `VITE_SDK_EDITABLE_PATH`; only honoured against a local API. */
+function localSdkPath(apiUrl: string): string {
+  return isLocal(apiUrl) ? config.sdkEditablePath : "";
 }
 
-/**
- * Console API host → SDK install source:
- * - all hosts → PyPI
- * - localhost + `VITE_SDK_EDITABLE_PATH` → editable checkout
- *
- * `VITE_SDK_EDITABLE_PATH` applies only on localhost — never on staging or production builds.
- */
-export function sdkInstallChannel(apiUrl = config.apiUrl): SdkInstallChannel {
-  const host = apiHost(apiUrl);
-  if (isLocalApiHost(host) && config.sdkEditablePath) {
-    return "editable";
-  }
-  return "pypi";
-}
-
-/**
- * Example `pip install` for manual terminal blocks — not the agent prompt path.
- * PyPI everywhere; localhost + `VITE_SDK_EDITABLE_PATH` → editable.
- */
-export function sdkPipInstall(apiUrl = config.apiUrl, extra?: "tracing"): string {
-  const channel = sdkInstallChannel(apiUrl);
-  if (channel === "editable") {
-    const suffix = extra === "tracing" ? "[tracing]" : "";
-    return `pip install -e "${config.sdkEditablePath}${suffix}"`;
-  }
-  const spec = extra === "tracing" ? "overmind[tracing]" : "overmind";
-  return extra === "tracing" ? `pip install "${spec}"` : `pip install ${spec}`;
-}
-
-/** Maps Console API host onto `overmind init --env` (local / staging / production). */
+/** Maps Console API host onto `overmind init --env`. */
 export function mcpInitEnvFlag(apiUrl: string): string {
-  const host = apiHost(apiUrl);
-  if (isLocalApiHost(host)) return " --env local";
-  if (isStagingApiHost(host)) return " --env staging";
+  if (isLocal(apiUrl)) return " --env local";
+  if (apiHost(apiUrl).includes("staging")) return " --env staging";
   return "";
 }
 
-/** `--ide` plus `--env` when the Console host is not production. */
-export function initCliFlags(client: McpClient, apiUrl = config.apiUrl): string {
-  const envFlag = mcpInitEnvFlag(apiUrl);
-  return `--ide ${client}${envFlag}`;
+function initFlags(client: McpClient, apiUrl: string): string {
+  return `--ide ${client}${mcpInitEnvFlag(apiUrl)}`;
 }
 
-/** Human-readable package source label for agent prompts. */
-function sdkInstallSource(apiUrl = config.apiUrl): string {
-  const channel = sdkInstallChannel(apiUrl);
-  if (channel === "editable") {
-    return `overmind editable install (${config.sdkEditablePath})`;
-  }
-  return "overmind from PyPI";
+/** The local checkout against a local API, PyPI otherwise. */
+function installSpec(apiUrl: string, extra?: "tracing"): string {
+  const path = localSdkPath(apiUrl);
+  const suffix = extra ? `[${extra}]` : "";
+  return path ? `-e "${path}${suffix}"` : `"overmind${suffix}>=${MIN_ONBOARDING_SDK_VERSION}"`;
 }
 
-function sdkInstallChannelRule(channel: SdkInstallChannel): string {
-  if (channel === "pypi") {
-    return "Use the published PyPI package only — do not install from git or a local checkout.";
-  }
-  return `Use the local checkout at ${config.sdkEditablePath} only — do not use PyPI or git.`;
+export function sdkPipInstall(apiUrl = config.apiUrl, extra?: "tracing"): string {
+  return `python -m pip install ${installSpec(apiUrl, extra)}`;
 }
 
-function dependencyCommands(channel: SdkInstallChannel): {
-  poetryAdd: string;
-  requirementsLine: string;
-  uvAdd: string;
-} {
-  if (channel === "editable") {
-    const path = config.sdkEditablePath;
-    return {
-      poetryAdd: `poetry add --editable "${path}"`,
-      requirementsLine: `-e "${path}"`,
-      uvAdd: `uv add --editable "${path}"`,
-    };
-  }
-  return {
-    poetryAdd: "poetry add overmind",
-    requirementsLine: "overmind",
-    uvAdd: "uv add overmind",
-  };
-}
-
-/** Install instructions for coding-agent prompts — manifest-aware, not venv-only. */
-export function projectDependencyInstallGuidance(apiUrl = config.apiUrl): string {
-  const channel = sdkInstallChannel(apiUrl);
-  const packageSource = sdkInstallSource(apiUrl);
-  const { poetryAdd, requirementsLine, uvAdd } = dependencyCommands(channel);
-
-  return [
-    `Install overmind (${packageSource}). ${sdkInstallChannelRule(channel)}`,
-    "Record it in the project dependency manifest using this repo's package manager — detect uv.lock, poetry.lock, pyproject.toml, or requirements.txt before choosing; do not assume pip.",
-    "Do not use venv-only installs that leave the manifest unchanged (e.g. uv pip install, bare pip install into an active venv).",
-    `When uv is the toolchain: ${uvAdd}, not uv pip install.`,
-    `When poetry is the toolchain: ${poetryAdd}.`,
-    `For requirements.txt-only repos: add ${requirementsLine}, then install from that file.`,
-  ].join(" ");
-}
-
-/** Env exports, `overmind init`, and optional first sync to mint the console project. */
-export function projectInitShellBlock(
-  client: McpClient,
-  apiKey: string,
-  apiUrl = config.apiUrl,
-  projectId?: string,
-  initialSync = false
-): string {
-  const url = apiUrl.replace(/\/$/, "");
-  const lines = [
-    `export OVERMIND_API_URL=${url}`,
-    ...(projectId ? [`export OVERMIND_PROJECT_ID=${projectId}`] : []),
-    `export OVERMIND_API_KEY=${apiKey}`,
-    `overmind init ${initCliFlags(client, url)}`,
-    ...(initialSync ? ["overmind sync"] : []),
-  ];
-  return lines.join("\n");
-}
-
+/** Install, preflight, exports, `overmind init`, then `overmind sync` to create the project. */
 export function mcpInitCommand(
   client: McpClient,
   apiKey: string,
@@ -156,47 +69,28 @@ export function mcpInitCommand(
 ): string {
   return [
     sdkPipInstall(apiUrl, extra),
+    SDK_PREFLIGHT_COMMAND,
+    `export OVERMIND_API_URL=${apiUrl.replace(/\/$/, "")}`,
     ...(projectId ? [`export OVERMIND_PROJECT_ID=${projectId}`] : []),
     `export OVERMIND_API_KEY=${apiKey}`,
-    `overmind init ${initCliFlags(client, apiUrl)}`,
-    "overmind sync",
-  ].join("\n");
+    `python -m overmind init ${initFlags(client, apiUrl)}`,
+    "python -m overmind sync",
+  ].join(" &&\n");
 }
 
-/** Manual terminal block: example install line plus init exports. */
-export function manualSetupCommand(
-  client: McpClient,
-  apiKey: string,
-  apiUrl = config.apiUrl,
-  projectId?: string
+/** One line that hands the coding agent the hosted setup guide; sign-in happens through MCP OAuth. */
+export function onboardingPrompt(
+  origin: string,
+  apiUrl: string,
+  data?: { projectId: string; datasetId: string }
 ): string {
-  return `${sdkPipInstall(apiUrl)}
-${projectInitShellBlock(client, apiKey, apiUrl, projectId, true)}`;
-}
-
-const OVERMIND_SKILL_ONBOARD = "references/onboard.md";
-
-/** Langfuse-style paste — install, export credentials, init, then follow onboard skill. */
-export function onboardWithAiBootstrapPrompt(
-  client: McpClient,
-  apiKey: string,
-  apiUrl = config.apiUrl
-): string {
+  const guide = `${origin.replace(/\/$/, "")}/setup.md`;
   const url = apiUrl.replace(/\/$/, "");
-  const env = `OVERMIND_API_URL=${url} OVERMIND_API_KEY=${apiKey}`;
-  const reload =
-    client === "claude"
-      ? "Then ask the user to exit Claude Code and run `claude -c` to continue with the Overmind MCP server loaded."
-      : "Reload the IDE once after sync.";
-  return [
-    projectDependencyInstallGuidance(url),
-    "Run all Overmind and Python commands in this project's environment: use uv run for uv, poetry run for Poetry, or the project's virtual-environment executables. Do not use a globally installed overmind.",
-    "The account-scoped API key below is a temporary bootstrap credential. Shell exports may not persist between commands, so prefix each command with it as shown; do not write it into project files.",
-    `${env} overmind init ${initCliFlags(client, url)}`,
-    `Before the first sync, open ${OVERMIND_SKILL_ONBOARD} and references/onboarding-progress.md from the installed overmind skill. Show the full onboarding roadmap and data disclosure, then use its numbered progress updates throughout.`,
-    `Run \`${env} overmind sync\`. It creates the project, stores the final project-scoped credential locally, and updates this IDE's MCP configuration. ${reload} Do not pass the bootstrap key again or run init again.`,
-    `After reload, reopen ${OVERMIND_SKILL_ONBOARD} from the installed overmind skill and continue the remaining workflow without repeating bootstrap sync.`,
-  ].join("\n\n");
+  const subject = data
+    ? `Set me up on Overmind with my uploaded data\n(project_id: ${data.projectId},\ndataset_id: ${data.datasetId})`
+    : "Set me up on Overmind";
+  const endpoint = url === HOSTED_API_URL ? "" : `using the API at ${url}`;
+  return `${subject}\n\n${endpoint}: ${guide}`;
 }
 
 /** Instruction handed to the coding agent, addressed to the agent the user picked. */
@@ -204,10 +98,10 @@ export function telemetrySetupPrompt(client: McpClient): string {
   const meta = mcpClientMeta(client);
   return [
     `Instrument this repository using the Overmind MCP and skill setup in ${meta.label}. Do not rerun \`overmind init\` for an already configured client. If ${meta.label} has no Overmind MCP entry and onboarding sync has completed, run \`overmind init --ide ${client}\` once; it reuses the saved project credential. If MCP authentication is pending, stop and ask the user to complete onboarding with \`overmind sync\`, then reload ${meta.label} once; never configure MCP with the temporary account bootstrap key.`,
-    "Install `overmind[tracing]` if tracing is not already importable, using the repository's dependency manifest and its existing package manager.",
+    "Install `overmind[tracing]` if tracing is not already importable, with the installer the project already uses.",
     "For local runs, the tracing SDK reuses the credential saved by `overmind sync`; deployed processes still require `OVERMIND_API_KEY` in their runtime secret configuration.",
-    "Follow `references/telemetry.md`. Call `get_instrumentation_plan` with no capability for project-wide work or the supplied capability for scoped work. If it returns `human_action` or no placements, report the instruction and stop this attempt.",
-    "Apply every placement as an exact ticket. When delegating, compute touched files from `target.file` and every `required_spans[].target.file`, coalesce overlapping tickets under one owner, and never let two workers edit the same file. Preserve every ticket field verbatim, including `key`, `behaviour_id`, `version_id`, `version_analyzed_sha`, `contract_fingerprint`, `capability`, `capability_id`, `placement_mode`, `allowed_keys`, `grain`, `target`, `required_scope`, `required_spans`, and `required_identity`.",
-    "After applying the tickets, report the changed files and checks, generate a unique verification correlation, and ask the user to choose Real run (recommended) or Smoke run. Present the exact command or input, capability, environment, provider/model, expected side effects, correlation value, and approved attempt count; mark unknown fields as needing user input. Do not run either mode before explicit approval. Stamp the approved correlation as `conversation.id` with the application's existing mechanism or `overmind.set_conversation_id`, run only the approved input, flush, and poll `query_traces(session=<correlation>, all_spans=false, limit=2)` within a fixed bound. Require `page.total == 1` and pass that row's `trace_id` to `verify_instrumentation(trace_id=...)`; the server grades the ingested spans. Real-run retries require fresh approval unless an exact input and bounded attempt count were approved. Report application outcome separately from instrumentation status.",
+    "Follow the “Instrumentation” section of the installed overmind-observability skill. Call `get_instrumentation_plan` with no capability for project-wide work or the supplied capability for scoped work. If it returns `human_action` or no placements, report the instruction and stop this attempt.",
+    "Apply each placement's `required_decorator` verbatim at `target.qualname` in `target.file`, keeping `capability_id` exact. Expectations that describe one span go on `@overmind.observe(expectations=[...])`; capability-wide expectations belong in the eval matrix, not the code. When delegating, give each file one owner so two workers never edit the same file.",
+    "After applying the placements, report the changed files and checks, generate a unique verification correlation, and ask the user to choose Real run (recommended) or Smoke run. Present the exact command or input, capability, environment, provider/model, expected side effects, correlation value, and approved attempt count; mark unknown fields as needing user input. Do not run either mode before explicit approval. Stamp the approved correlation as `conversation.id` with the application's existing mechanism or `overmind.set_conversation_id`, run only the approved input, flush, and poll `query_traces(session=<correlation>, all_spans=false, limit=2)` within a fixed bound. Require `page.total == 1` and pass that row's `trace_id` to `verify_instrumentation(trace_id=...)`; the server grades the ingested spans. Real-run retries require fresh approval unless an exact input and bounded attempt count were approved. Report application outcome separately from instrumentation status.",
   ].join(" ");
 }

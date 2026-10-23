@@ -42,20 +42,15 @@ def _inline_dataset_tasks():
 
 
 @pytest.fixture(autouse=True)
-def _rubric_compiler():
-    yield
-
-
-@pytest.fixture(autouse=True)
 def _journey_db(transactional_db):
     yield
 
 
 @pytest.fixture(autouse=True)
 def _only_fake_providers(monkeypatch):
-    from overbae.core.model_registry import WORKSHOP_KEY_ENVS
+    from overbae.core.model_registry import PROVIDERS
 
-    for env in WORKSHOP_KEY_ENVS:
+    for env in {provider.key_env for provider in PROVIDERS.values()}:
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-fake")
 
@@ -76,10 +71,23 @@ def _worker_ledger():
         yield ledger
 
 
+def _release_connector_chunks(ledger) -> None:
+    from overbae.models import ConnectorCredential
+
+    # A live chunk publishes its continuation with an eta. drain() ignores those,
+    # and one already past its active check still calls out after the next test
+    # installs a different vendor mock.
+    ConnectorCredential.objects.filter(is_active=True).update(is_active=False)
+    deadline = time.monotonic() + 8
+    while ledger.unfinished("sync_connector_chunk") and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 @pytest.fixture
 def worker(_worker_ledger):
     failed_before = set(_worker_ledger.failed())
     yield _worker_ledger
+    _release_connector_chunks(_worker_ledger)
     drain(_worker_ledger)
     failed = {k: v for k, v in _worker_ledger.failed().items() if k not in failed_before}
     assert not failed, f"Background tasks failed: {failed}"
@@ -143,30 +151,11 @@ def answer_turn(request) -> dict:
 GOOD_REPLY = "Order 42 was delivered. Your refund is on its way."
 
 
-def _judged_output(request) -> str:
-    return request.text.split("\noutput:\n", 1)[-1]
-
-
 @pytest.fixture
-def rubric_judges(fake_llm):
-    fake_llm.on_json(
-        lambda r: r.schema_name == "JudgeResult",
-        lambda r: {"score": 1.0 if GOOD_REPLY in r.text else 0.0, "reasoning": "fake judge"},
-    )
-    fake_llm.on_json(
-        lambda r: r.schema_name == "ChecklistResult",
-        lambda r: {
-            "items": [
-                {
-                    "id": item,
-                    "reasoning": "fake judge",
-                    "not_applicable": False,
-                    "verdict": GOOD_REPLY in _judged_output(r),
-                }
-                for item in re.findall(r"^- \(([^)]+)\)", r.text, re.M)
-            ],
-            "reasoning": "fake judge",
-        },
+def judges(fake_llm):
+    """Jev meets an expectation only when the judged output is the good reply."""
+    fake_llm.decide = lambda key, question, state: (
+        "yes" if GOOD_REPLY in str(state.get("output") or "") else "no"
     )
 
 
@@ -231,7 +220,7 @@ def _digest(path: Path) -> str:
 
 
 @pytest.fixture
-def workshop(cli, mcp_for, sample_agent, worker, fake_llm, rubric_judges):
+def workshop(cli, mcp_for, sample_agent, worker, fake_llm, judges):
     fake_llm.extra_models.append("fake/candidate")
     fake_llm.on(lambda r: r.model == "fake/candidate", GOOD_REPLY)
     cli.scan(sample_agent)

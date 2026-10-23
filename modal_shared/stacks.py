@@ -24,6 +24,11 @@ TRAIN_U2026_8_TF515 = "u2026_8_tf515"
 TRAIN_U2026_8_GPOS = "u2026_8_gptoss"
 TRAIN_U2026_8_18 = "u2026_8_18"
 TRAIN_U2026_9_2 = "u2026_9_2"
+TRAIN_U2026_10_7 = "u2026_10_7"
+TRAIN_DECISION = "u2026_10_3_decision"
+
+# Chat images eligible as a native decision foundation.
+NATIVE_FOUNDATION_STACKS = frozenset({TRAIN_U2026_8_18, TRAIN_U2026_10_7})
 
 TRAIN_STACKS: tuple[str, ...] = (
     TRAIN_U2026_7,
@@ -32,6 +37,8 @@ TRAIN_STACKS: tuple[str, ...] = (
     TRAIN_U2026_8_GPOS,
     TRAIN_U2026_8_18,
     TRAIN_U2026_9_2,
+    TRAIN_U2026_10_7,
+    TRAIN_DECISION,
 )
 
 # Historical FamilySpec / models.json keys. Lookup must normalize.
@@ -47,18 +54,21 @@ TRAIN_STACK_ALIASES: dict[str, str] = {
     TRAIN_U2026_8_GPOS: TRAIN_U2026_8_GPOS,
     TRAIN_U2026_8_18: TRAIN_U2026_8_18,
     TRAIN_U2026_9_2: TRAIN_U2026_9_2,
+    TRAIN_U2026_10_7: TRAIN_U2026_10_7,
 }
 
 # Deployed Modal Function = sft_{stack}. One name per Image.
 TRAIN_FUNCTION_NAMES: dict[str, str] = {s: f"sft_{s}" for s in TRAIN_STACKS}
 
 TRAIN_STACK_PINS: dict[str, str] = {
+    TRAIN_DECISION: "unsloth==2026.10.3 / unsloth_zoo==2026.10.3 / torch==2.10.0 / transformers==5.17.0 / trl==1.13.0",
     TRAIN_U2026_7: "unsloth[cu128-torch270]==2026.7.5 / torch==2.7.0 / transformers>=5.2 / trl v1.10.0",
     TRAIN_U2026_8_TF510: "unsloth[cu128-torch2100]==2026.8.5 / torch==2.10.0 / transformers>=5.10.2 / trl v1.10.0",
     TRAIN_U2026_8_TF515: "unsloth[cu128-torch2100]==2026.8.5 / torch==2.10.0 / transformers>=5.15 / trl v1.10.0",
     TRAIN_U2026_8_GPOS: "unsloth[cu128-torch2100]==2026.8.5 / torch==2.10.0 / Unsloth transformers pin / kernels>=0.12,<0.15 / trl v1.10.0",
     TRAIN_U2026_8_18: "unsloth[cu128-torch2100]==2026.8.18 / unsloth_zoo==2026.8.12 / torch==2.10.0 / transformers>=5.10.2 / trl v1.10.0",
     TRAIN_U2026_9_2: "unsloth[cu128-torch2100]==2026.9.2 / unsloth_zoo==2026.9.1 / torch==2.10.0 / transformers>=5.10.2 / trl v1.10.0",
+    TRAIN_U2026_10_7: "unsloth[cu128-torch2100]==2026.10.7 / unsloth_zoo==2026.10.7 / torch==2.10.0 / transformers==5.17.0 / trl v1.10.0",
 }
 
 
@@ -154,9 +164,10 @@ class TrainCanary:
 
 
 TRAIN_CANARIES: tuple[TrainCanary, ...] = (
-    # Default cutover target (Qwen / Llama / LFM / …).
-    TrainCanary(TRAIN_U2026_8_18, "Qwen/Qwen3-0.6B", "Lora", 0.6, "pr"),
-    TrainCanary(TRAIN_U2026_8_18, "Qwen/Qwen3-0.6B", "Full", 0.6, "pr"),
+    TrainCanary(TRAIN_DECISION, "Qwen/Qwen3-0.6B", "Lora", 0.6, "pr"),
+    # Qwen and Llama. LFM and the other default-image families stay on 8.18.
+    TrainCanary(TRAIN_U2026_10_7, "Qwen/Qwen3-0.6B", "Lora", 0.6, "pr"),
+    TrainCanary(TRAIN_U2026_10_7, "Qwen/Qwen3-0.6B", "Full", 0.6, "pr"),
     TrainCanary(TRAIN_U2026_9_2, "Qwen/Qwen3-0.6B", "Lora", 0.6, "pr"),
     TrainCanary(TRAIN_U2026_9_2, "Qwen/Qwen3-0.6B", "Full", 0.6, "pr"),
     TrainCanary(TRAIN_U2026_8_18, "LiquidAI/LFM2.5-230M", "Lora", 0.23, "pr"),

@@ -68,14 +68,30 @@ model when available, the Overmind destination, and the data included in sync.
 Before sync it summarizes the destination, payload, credential checks, and
 configuration to review. Setup finishes after `overmind sync` succeeds with
 the mapped capabilities, outstanding verification, and one recommended next
-action. Instrumentation, application runs, and server-side evaluator preparation
+action. Instrumentation, application runs, and server-side eval set preparation
 remain separate work.
 
-Use the project's runner for these commands (`uv run overmind` or
-`poetry run overmind`) so an older global installation cannot supply the
-skills. An editable SDK install does not refresh skill copies already installed
+Onboarding requires Python 3.10+. Always install or upgrade to the latest `overmind`
+through the project's package manager, for example `uv pip install --upgrade overmind`.
+Before creating a project, check the CLI with `uv run python -m overmind --version`;
+repeat it after the coding-agent reload, before scanning.
+Keep the endpoint explicit on later syncs: `python -m overmind sync --api-url <saved-base-url>`
+with the selected runner. A saved credential cannot be used against a different
+endpoint; sync rejects that combination before sending a request.
+Use `uv run python -m overmind`, `poetry run python -m overmind`, or the project's
+virtual-environment Python for every CLI command. `uv run overmind` can still
+find a global executable when the project package has no CLI.
+If application dependencies conflict, use
+`uv tool run --isolated --refresh --python 3.11 --from overmind python`
+in place of the project Python for the version check, scanning, conversion and sync.
+Keep the repository root as the working directory and reuse this runner after
+reload. Preserve the existing connection; do not recreate the project. This tool
+environment is explicitly allowed and does not change application dependencies.
+Verify tracing separately in the application environment before adding decorators;
+if incompatible, complete capability sync and report instrumentation as pending.
+An editable SDK install does not refresh skill copies already installed
 in a repository. Refresh them with
-`uv run overmind skills sync overmind --ide <cursor|claude|opencode|codex>`
+`uv run python -m overmind skills sync overmind --ide <cursor|claude|opencode|codex>`
 (or the equivalent project runner), then start a new conversation so the agent
 reads the updated instructions.
 
@@ -117,7 +133,7 @@ def call_model(messages: list[dict]) -> dict: ...
 
 That is the whole integration: no init guards (everything no-ops without a key), no hand-rolled scrubbing (captured payloads redact secret-named keys and base64 blobs automatically, text is kept in full), and no evidence bookkeeping (`deliver()` grounds itself in the environment-provenance spans of the run — pass `grounded_by=[...]` to override). On `KeyboardInterrupt`/cancellation the entry-point span flushes before re-raising, so interrupted runs still land.
 
-Decorators: `entry_point`, `workflow`, `tool`, `retrieval`, and the general `observe` (sync and async). All accept `capture=` (`"auto"` scrubbed args/result, `"none"`, `"messages"`), `ignore=` (argument names never captured), `format_input=` / `format_output=` hooks for custom payload shapes, `provenance=`, `unit=`, and `capability=`. `start_span(...)` is the context-manager companion; `set_tag`, `set_user`, `set_conversation_id`, and `capture_exception` annotate the current span Sentry-style.
+Decorators: `entry_point`, `workflow`, `tool`, `retrieval`, and the general `observe` (sync and async). All accept `capture=` (`"auto"` scrubbed args/result, `"none"`, `"messages"`), `ignore=` (argument names never captured), `self_attrs=` (instance attributes recorded as inputs), `format_input=` / `format_output=` hooks for custom payload shapes, `provenance=`, `unit=`, and `capability=`. `start_span(...)` is the context-manager companion; `set_tag`, `set_user`, `set_conversation_id`, and `capture_exception` annotate the current span Sentry-style.
 
 The span name may be a callable receiving the call's arguments — for polymorphic dispatchers, where one function executes named actions and each invocation must emit its own tool span (`tool.name` follows the resolved name):
 
@@ -130,7 +146,7 @@ class Tools:
 
 Spans declare evidence provenance for the platform's evaluation judges: tool and retrieval spans are tagged `overmind.provenance = "environment"` and LLM spans `"agent"` automatically; pass `provenance=` (`user` / `agent` / `environment` / `harness`) to override. `@entry_point` spans are run roots (`overmind.unit_kind = "run"`) — one per trace: a run declared inside an open trace resolves to `turn`. `unit="turn"` marks an independently scorable decision cycle — each turn becomes one scored task execution. Internal fan-out or iteration spans (parallel sub-queries, retries, loop bodies) must not declare `unit`; handoffs stamp their own `turn` automatically. A `function` span that starts a trace outside any run boundary is an orphan fragment and is not exported by default (`init(export_orphan_spans=True)` overrides).
 
-The wire-level attribute contract is **pinned** in [`docs/tracing-attributes.md`](docs/tracing-attributes.md); nothing there is renamed. The telemetry skill (`skills/overmind/references/telemetry.md`) is the integrator's guide — run vs. turn, deliver placement, handoffs, and the anchor-decoration rule. When traces don't show up: `init(debug=True)` prints the endpoint, identity, enabled instrumentors, and export mode.
+The wire-level attribute contract is **pinned** in [`docs/tracing-attributes.md`](docs/tracing-attributes.md); nothing there is renamed. The observability skill (`skills/overmind-observability/SKILL.md`) is the integrator's guide — run vs. turn, deliver placement, handoffs, and the anchor-decoration rule. When traces don't show up: `init(debug=True)` prints the endpoint, identity, enabled instrumentors, and export mode.
 
 Multi-capability agents scope identity with `overmind.capability` — a context manager or decorator that stamps `overmind.capability.id` / `.name` on every span created inside and restores the outer identity on exit (`capability="..."` on any decorator is shorthand for the name-only scope):
 
@@ -206,11 +222,11 @@ The Codex, Cursor and Claude Code plugin manifests package that same connection
 and the shared workflow skills. They add installation, branding, workflow guidance and
 links to the normal Console. They do not add a separate UI or another API.
 
-| Client      | Install the plugin                                                                      |
-| ----------- | --------------------------------------------------------------------------------------- |
+| Client      | Install the plugin                                                                         |
+| ----------- | ------------------------------------------------------------------------------------------ |
 | Claude Code | `/plugin marketplace add overmind-core/overmind`, then `/plugin install overmind@overmind` |
 | Codex       | `codex plugin marketplace add overmind-core/overmind`, then enable it in `/plugins`        |
-| Cursor      | Add `overmind-core/overmind` as a plugin marketplace, then install Overmind              |
+| Cursor      | Add `overmind-core/overmind` as a plugin marketplace, then install Overmind                |
 
 The bundled `mcp.json` connects to the hosted API through OAuth account sign-in.
 Access continues until revoked, with automatic token refresh. Standalone MCP
@@ -260,21 +276,27 @@ repositories.
 `overmind init` installs the complete skill set. Plugins bundle the same source;
 `overmind skills sync` refreshes selected skills in an existing installation.
 
-| Skill                    | What it does                                                       |
-| ------------------------ | ------------------------------------------------------------------ |
-| `overmind`               | Local setup, repository discovery and workflows across surfaces    |
-| `overmind-agent`         | Inspect capabilities, behaviour coverage and repository provenance |
-| `overmind-observability` | Investigate traces, failures, latency and instrumentation gaps     |
-| `overmind-datasets`      | Prepare, verify, generate and export Data Workshop versions        |
-| `overmind-evaluations`   | Author evaluators, prepare runs and compare results                |
-| `overmind-optimiser`     | Run prompt/code experiments and model comparisons                  |
-| `overmind-training`      | Prepare exact inputs, estimate costs and inspect fine-tuning       |
-| `overmind-inference`     | Inspect serving metrics, worker state and live routing             |
-| `overmind-integrations`  | Configure provider mappings and verify imported traces             |
+| Skill                    | What it does                                                    |
+| ------------------------ | --------------------------------------------------------------- |
+| `overmind`               | Local setup, repository discovery and workflows across surfaces |
+| `overmind-agent`         | Inspect capabilities, eval coverage and repository provenance   |
+| `overmind-observability` | Investigate traces, failures, latency and instrumentation gaps  |
+| `overmind-datasets`      | Prepare, verify, generate and export Data Workshop versions     |
+| `overmind-evaluations`   | Author eval matrix rows, prepare runs and compare results       |
+| `overmind-optimiser`     | Run prompt/code experiments and model comparisons               |
+| `overmind-training`      | Prepare exact inputs, estimate costs and inspect fine-tuning    |
+| `overmind-inference`     | Inspect serving metrics, worker state and live routing          |
+| `overmind-integrations`  | Configure provider mappings and verify imported traces          |
 
 ## Anonymous usage analytics
 
-The SDK and CLI send anonymous product-analytics events to PostHog so we can
+PostHog is optional: plain `overmind` and `overmind[tracing]` installations do
+not require it. Install `pip install "overmind[analytics]"` to include it, or
+`pip install "overmind[tracing,analytics]"` for both extras. Without PostHog,
+usage analytics is disabled; the CLI, tracing and API client still work.
+
+When PostHog is available (including from the host application's dependencies),
+the SDK and CLI send product-analytics events so we can
 see how the package is adopted. Each CLI process emits one `cli.invoked` event
 on exit (`command` = full redacted argv like `overmind skills list`,
 `command_path` = nested path like `skills list`, exit code, duration), via
@@ -299,6 +321,40 @@ Analytics is also off when `CI` is set in env.
 
 ## CLI reference
 
+Dataset upload/export can use a saved account connection outside a repository.
+Store `api-key` and `base-url` together in
+`$XDG_CONFIG_HOME/overmind/connection.toml` (default
+`~/.config/overmind/connection.toml`) with permissions `0600`, using the same
+authorized account and API as MCP. Do not put this credential file in a repository.
+Explicit and repository credentials take precedence. Saved account and repository
+keys are bound to their API address; overriding only the address is rejected
+before a request is sent, including re-supplying the same repository key.
+Account connections still need
+`--project-id` for upload; choose it with MCP `list_projects`.
+MCP login alone does not configure local file-transfer authentication.
+
+Workspace MCP settings can override a global connection. Verify from the actual
+workspace as well as a repository-free directory; an existing hosted project
+binding must not be reused for a local project. Select the project again from
+the connected MCP catalogue after changing deployments.
+
+For global Codex setup, `overmind connection configure --api-url URL --project-id PROJECT --json` verifies and saves the same account connection for MCP and local
+transfer. It requires the account key to be available locally, never in chat.
+Projects remain per-operation. Reload the MCP client after configuration.
+
+`overmind connection check --project-id PROJECT --json` checks MCP, project access,
+the transfer protocol and read/write permissions from the invoking environment.
+It does not grant network access or certify another sandbox. Use the host's scoped
+approval mechanism for a confirmed permission denial; do not disable the sandbox.
+
+Upload automatically preflights, hashes the file and recovers a durable transfer
+from its file/destination-derived key. Repeat the same command after interruption.
+`--request-key` supplies an explicit identity (changed inputs conflict). The JSON
+result retains the transfer receipt; inspect it through MCP `get_job` with
+`kind=dataset_transfer`, then read `dataset_run` for extraction progress.
+For a wrapped JSON object, `--json-rows-field pairs` explicitly selects the
+top-level `pairs` array. The original file and selection provenance remain retained.
+
 ```text
 overmind init [OPTIONS]             Skills, slash commands, MCP; seed overmind.toml
 overmind sync [up|down]             Push/pull overmind.toml with the server
@@ -317,6 +373,11 @@ overmind skills sync <name>...      Sync one or more skills to the latest versio
 The Console Agent header identifies the repository snapshot behind the capability map. `overmind chassis` records the checkout before scanning; conversion verifies that it stayed unchanged and saves its provenance in `overmind.toml`. `overmind sync` preserves the scan revision and time, with a separate server sync timestamp. Run `/overmind setup` to refresh the map. Live traces may come from other revisions.
 
 Run `overmind <command> --help` for full flag documentation.
+
+Checkpoint downloads use the same endpoint-bound account connection as dataset
+transfers when no explicit or repository key is supplied. Metadata and artifact
+redirects are refused; the API key is sent only to the metadata endpoint. Existing
+output files are never overwritten.
 
 ## Licence
 

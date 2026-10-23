@@ -32,6 +32,7 @@ def test_routing_headers_roundtrip():
         "serve_image": "vllm",
         "adapter_path": "",
         "lora_rank": 16,
+        "base_identity": "",
     }
 
 
@@ -129,6 +130,7 @@ def _chat(deployed=None, **routing):
         model_id=getattr(deployed, "model_id", "ft-abc"),
         messages=[{"role": "user", "content": "hi"}],
         deployed=deployed,
+        max_tokens=32,
         **routing,
     )
 
@@ -141,12 +143,46 @@ def test_inference_client_posts_routing_headers(gateway):
     assert headers[MAX_MODEL_LEN_HEADER.lower()] == "32768"
 
 
+def test_a_stored_gemma_e2b_l4_is_raised_to_l40s(gateway):
+    deployed = _deployed(
+        "ft-e2b",
+        gpu_type="L4",
+        weights_path="/weights/.base_models/unsloth--gemma-4-E2B-it",
+        max_model_len=16384,
+        base_model_id="google/gemma-4-E2B-it",
+        is_lora=True,
+        lora_rank=32,
+    )
+    _chat(deployed)
+    assert _sent(gateway)[GPU_TYPE_HEADER.lower()] == "L40S"
+    deployed.refresh_from_db()
+    assert deployed.gpu_type == "L40S"
+
+
 def test_inference_client_posts_routing_from_deployed(gateway):
     _chat(_deployed("ft-row", gpu_type="L4", weights_path="/weights/ft-row", max_model_len=4096))
     headers = _sent(gateway)
     assert headers[GPU_TYPE_HEADER.lower()] == "L4"
     assert headers[WEIGHTS_PATH_HEADER.lower()] == "/weights/ft-row"
     assert headers[MAX_MODEL_LEN_HEADER.lower()] == "4096"
+
+
+def test_an_adapter_deployment_sends_the_saved_engine_identity(gateway):
+    from modal_shared.shared import BASE_IDENTITY_HEADER
+
+    identity = "a" * 64
+    deployed = _deployed(
+        "ft-id",
+        gpu_type="L4",
+        weights_path="/weights/.base_models/Qwen--Qwen3-0.6B",
+        max_model_len=4096,
+        is_lora=True,
+        lora_rank=16,
+        adapter_path="/weights/.adapters/ft-id",
+        serving_runtime={"base_identity": identity},
+    )
+    _chat(deployed)
+    assert _sent(gateway)[BASE_IDENTITY_HEADER.lower()] == identity
 
 
 def test_an_adapter_deployment_routes_to_its_adapter_on_the_shared_base(gateway):

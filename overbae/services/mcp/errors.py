@@ -30,26 +30,29 @@ ErrorCode = Literal[
     "dataset_not_found",
     "dataset_busy",
     "dataset_invalid",
+    "pipeline_package_required",
+    "revision_conflict",
+    "request_key_conflict",
+    "source_conflict",
     "cell_not_found",
     "query_invalid",
+    "query_capacity_busy",
+    "query_capacity_unavailable",
     "dataset_build_not_found",
     "dataset_build_invalid",
     "dataset_build_conflict",
     "dataset_intent_mismatch",
     "dataset_locked",
     "eval_set_not_found",
-    "evaluator_not_found",
-    "evaluator_invalid",
+    "eval_set_invalid",
+    "eval_matrix_row_not_found",
+    "eval_matrix_row_invalid",
     "evaluation_not_ready",
     "evaluation_dispatch_failed",
     "eval_run_not_found",
-    "eval_sample_not_found",
-    "annotation_not_found",
-    "annotation_invalid",
     "invalid_trace_selection",
     "no_failures_found",
     "insufficient_credits",
-    "plan_limit_exceeded",
     "model_not_found",
     "finetune_not_found",
     "finetune_invalid",
@@ -127,7 +130,33 @@ def error_payload(error: MCPError) -> dict[str, Any]:
     return error.data.model_dump(mode="json")
 
 
+def serializer_fields(detail) -> dict[str, str]:
+    fields = {}
+
+    def visit(value, path):
+        if len(fields) >= 20:
+            return
+        if isinstance(value, dict):
+            for key, child in value.items():
+                visit(child, f"{path}.{key}" if path else str(key))
+        elif isinstance(value, list):
+            if all(not isinstance(child, (dict, list)) for child in value):
+                fields[path or "request"] = " ".join(map(str, value))[:500]
+            else:
+                for index, child in enumerate(value):
+                    visit(child, f"{path}.{index}" if path else str(index))
+        else:
+            fields[path or "request"] = str(value)[:500]
+
+    visit(detail, "")
+    return fields
+
+
 _DATASET_ERROR_CODES: dict[str, ErrorCode] = {
+    "pipeline_package_required": "pipeline_package_required",
+    "revision_conflict": "revision_conflict",
+    "conflict": "request_key_conflict",
+    "source_conflict": "source_conflict",
     "intent": "dataset_intent_mismatch",
     "running": "dataset_busy",
     "landing": "dataset_busy",
@@ -143,7 +172,9 @@ def dataset_mcp_error(error) -> MCPError:
     message = str(getattr(error, "detail", None) or error)
     if code == "dataset_busy":
         return MCPError(
-            code, f"{message} Poll get_job with kind dataset_run until it is idle.", retryable=True
+            code,
+            f"{message} Read inspect_dataset.next_actions for the exact operation to poll.",
+            retryable=True,
         )
     return MCPError(code, message)
 
@@ -179,7 +210,7 @@ def mcp_dataset(context, reference: str):
 def mcp_cell(dataset, ref: str | None):
     """Optional cell/version; blank means the caller should use the active cell."""
     from overbae.services.datasets.lifecycle import DatasetError
-    from overbae.services.datasets.notebook.agent import resolve_cell
+    from overbae.services.datasets.versions import resolve_cell
 
     if not ref:
         return None

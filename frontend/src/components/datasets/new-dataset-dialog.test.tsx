@@ -3,7 +3,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { NewDatasetButton } from "./new-dataset-button";
 import { NewDatasetDialog } from "./new-dataset-dialog";
 
 const mocks = vi.hoisted(() => ({
@@ -60,18 +59,6 @@ function choose(label: string, option: string) {
 }
 
 describe("new dataset sources", () => {
-  it("offers only upload and trace sources before opening the dialog", () => {
-    const onSelect = vi.fn();
-    render(<NewDatasetButton onSelect={onSelect} />);
-    fireEvent.keyDown(screen.getByRole("button", { name: "New dataset" }), { key: "ArrowDown" });
-    expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
-      " Upload file",
-      " Data from traces",
-    ]);
-    fireEvent.click(screen.getByRole("menuitem", { name: "Data from traces" }));
-    expect(onSelect).toHaveBeenCalledWith("traces");
-  });
-
   it("shows the chosen trace source without a second source selector", () => {
     render(
       <NewDatasetDialog initialSource="traces" onOpenChange={vi.fn()} open projectId="project" />
@@ -84,7 +71,7 @@ describe("new dataset sources", () => {
 });
 
 describe("dataset file dialog", () => {
-  it("requires a purpose and offers no automatic purpose", async () => {
+  it("allows exploration before choosing a purpose and resets that choice when reopened", async () => {
     const props = {
       initialFiles: [new File(["a"], "first.csv")],
       onOpenChange: vi.fn(),
@@ -93,10 +80,14 @@ describe("dataset file dialog", () => {
     const view = render(<NewDatasetDialog {...props} open />);
     await within(screen.getByRole("list", { name: "Selected files" })).findByText("7 rows");
     const create = screen.getByRole("button", { name: "Create dataset" }) as HTMLButtonElement;
-    expect(create.disabled).toBe(true);
-    expect(screen.getByRole("combobox", { name: "Purpose" }).textContent).toBe("Select purpose");
+    expect(create.disabled).toBe(false);
+    expect(screen.getByRole("combobox", { name: "Purpose" }).textContent).toBe(
+      "Choose in workshop"
+    );
     fireEvent.keyDown(screen.getByRole("combobox", { name: "Purpose" }), { key: "ArrowDown" });
     expect(screen.getAllByRole("option").map((option) => option.textContent)).toEqual([
+      "Choose in workshop",
+      "Data exploration",
       "Evaluation",
       "Training",
       "Train + eval",
@@ -105,7 +96,9 @@ describe("dataset file dialog", () => {
     expect(create.disabled).toBe(false);
     view.rerender(<NewDatasetDialog {...props} open={false} />);
     view.rerender(<NewDatasetDialog {...props} open />);
-    expect(screen.getByRole("combobox", { name: "Purpose" }).textContent).toBe("Select purpose");
+    expect(screen.getByRole("combobox", { name: "Purpose" }).textContent).toBe(
+      "Choose in workshop"
+    );
     expect(
       (screen.getByRole("button", { name: "Create dataset" }) as HTMLButtonElement).disabled
     ).toBe(true);
@@ -161,6 +154,7 @@ describe("dataset file dialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create dataset" }));
     await waitFor(() =>
       expect(mocks.create).toHaveBeenCalledWith({
+        brief: "",
         capabilityId: "cap",
         intent: "eval",
         name: "Support data",
@@ -196,6 +190,7 @@ describe("dataset file dialog", () => {
     fireEvent.click(screen.getByRole("button", { name: "Create datasets" }));
     await waitFor(() =>
       expect(mocks.split).toHaveBeenCalledWith({
+        brief: "",
         capabilityId: undefined,
         deduplicate: true,
         evalPercent: 40,

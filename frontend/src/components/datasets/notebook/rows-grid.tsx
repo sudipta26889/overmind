@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 
 import { diffText } from "@/components/datasets/notebook/diff";
 import { Badge } from "@/components/ui/badge";
@@ -63,7 +63,7 @@ function ChangedValue({
 }) {
   const ops = diffText(cellText(before), cellText(after));
   return (
-    <span className={wrap ? "whitespace-pre-wrap break-words" : "whitespace-pre"}>
+    <span className={wrap ? "whitespace-pre-wrap break-words" : "whitespace-nowrap"}>
       {ops.map((op, i) =>
         op.kind === "same" ? (
           op.text
@@ -123,6 +123,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 /** One column's profile: fill, distinct values, range or lengths, and the
  *  values that occur most, each with its share of the rows. */
 function ColumnStatsCard({ column, total }: { column: ColumnStat; total: number }) {
+  const denominator = column.approximate ? column.sampleRows : total;
   const filled = Math.round((1 - column.nullRate) * 100);
   const numeric = column.mean !== undefined && column.mean !== null;
   const stats: Array<{ label: string; value: string }> = [
@@ -160,10 +161,16 @@ function ColumnStatsCard({ column, total }: { column: ColumnStat; total: number 
           <span className="pixel-label ml-auto text-xs text-muted-foreground">{column.type}</span>
         </div>
         <div className="mt-2.5 flex flex-col gap-1">
+          {column.approximate && (
+            <p className="text-xs text-muted-foreground">
+              Sample: {column.sampleRows.toLocaleString()} of {column.totalRows.toLocaleString()}{" "}
+              rows. Statistics describe this sample.
+            </p>
+          )}
           <div className="flex items-center justify-between text-xs">
             <span className="pixel-label text-muted-foreground">Filled</span>
             <span className="font-mono tabular-nums text-foreground">
-              {filled}% of {total.toLocaleString()}
+              {filled}% of {denominator.toLocaleString()}
             </span>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-xs bg-muted">
@@ -237,61 +244,79 @@ function FilterAdd({ columns, onAdd }: { columns: string[]; onAdd: (f: RowFilter
   return (
     <Popover onOpenChange={setOpen} open={open}>
       <PopoverTrigger asChild>
-        <Button size="xs" variant="outline">
+        <Button
+          className="relative -ml-px rounded-l-none focus-visible:z-10"
+          size="xs"
+          variant="outline"
+        >
           <Icon.filter />
           Filter
         </Button>
       </PopoverTrigger>
-      <PopoverContent align="start" className="w-80 p-3">
-        <div className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2 text-xs">
+      <PopoverContent
+        align="start"
+        aria-label="Filter rows"
+        className="w-72 max-w-[calc(100vw-2rem)] p-0 text-xs"
+      >
+        <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 border-b border-border/70 px-2.5 py-1.5">
           <span className="text-muted-foreground">Column</span>
           <Select onValueChange={(v) => setDraft({ ...draft, field: v })} value={draft.field}>
-            <SelectTrigger aria-label="Column" className="w-full" size="sm">
+            <SelectTrigger
+              aria-label="Column"
+              className="w-full border-border bg-transparent hover:bg-accent/50"
+              size="xs"
+            >
               <SelectValue placeholder="Column" />
             </SelectTrigger>
             <SelectContent>
               {columns.map((c) => (
-                <SelectItem key={c} value={c}>
+                <SelectItem className="text-xs" key={c} value={c}>
                   {c}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
+        </div>
+        <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 border-b border-border/70 px-2.5 py-1.5">
           <span className="text-muted-foreground">Condition</span>
           <Select
             onValueChange={(v) => setDraft({ ...draft, op: v as RowFilter["op"] })}
             value={draft.op}
           >
-            <SelectTrigger aria-label="Condition" className="w-full" size="sm">
+            <SelectTrigger
+              aria-label="Condition"
+              className="w-full border-border bg-transparent hover:bg-accent/50"
+              size="xs"
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {FILTER_OPS.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
+                <SelectItem className="text-xs" key={o.value} value={o.value}>
                   {o.label}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
-          {needsValue && (
-            <>
-              <span className="text-muted-foreground">Value</span>
-              <Input
-                aria-label="Value"
-                autoFocus
-                onChange={(e) => setDraft({ ...draft, value: e.target.value })}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") add();
-                }}
-                size="sm"
-                value={draft.value ?? ""}
-              />
-            </>
-          )}
         </div>
-        <div className="mt-3 flex justify-end">
-          <Button onClick={add} size="sm">
-            Add
+        {needsValue && (
+          <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-2 border-b border-border/70 px-2.5 py-1.5">
+            <span className="text-muted-foreground">Value</span>
+            <Input
+              aria-label="Value"
+              className="border-border"
+              onChange={(e) => setDraft({ ...draft, value: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") add();
+              }}
+              size="xs"
+              value={draft.value ?? ""}
+            />
+          </div>
+        )}
+        <div className="flex justify-end px-2.5 py-1.5">
+          <Button onClick={add} size="xs" variant="secondary">
+            Add filter
           </Button>
         </div>
       </PopoverContent>
@@ -303,6 +328,7 @@ export interface RowsGridProps {
   datasetId: string;
   /** The cell whose frame is shown. */
   cellId: string;
+  initialColumns?: { name: string; type: string }[];
   /** Mark rows added and values changed against the cell before. */
   diff?: boolean;
   pageSize?: number;
@@ -316,6 +342,7 @@ export interface RowsGridProps {
 export function RowsGrid({
   datasetId,
   cellId,
+  initialColumns,
   diff = false,
   pageSize = 10,
   className,
@@ -357,13 +384,13 @@ export function RowsGrid({
 
   const data = rowsQuery.data;
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new page has new rows
-  useEffect(() => setOpenRow(null), [data]);
+  useEffect(() => setOpenRow(null), [cellId, page, limit, debouncedSearch, filters, sort]);
   const columns = useMemo(
     () =>
-      (data?.columns ?? [])
+      (data?.columns ?? initialColumns ?? [])
         .filter(isVisibleDatasetColumn)
         .map((c) => ({ name: c.name, type: c.type })),
-    [data?.columns]
+    [data?.columns, initialColumns]
   );
   const rows = (data?.rows ?? []) as Row[];
   const marks = data?.marks ?? {};
@@ -386,19 +413,25 @@ export function RowsGrid({
   return (
     <div className={cn("flex min-h-0 flex-col", className)}>
       <div className="flex flex-wrap items-center gap-1.5 px-2.5 py-1">
-        <SearchInput
-          className="w-44"
-          label="Search rows"
-          onChange={(e) => setSearch(e.target.value)}
-          onClear={() => setSearch("")}
-          placeholder="Search"
-          size="xs"
-          value={search}
-        />
-        <FilterAdd
-          columns={columns.map((c) => c.name)}
-          onAdd={(f) => setFilters([...filters, f])}
-        />
+        <div
+          aria-label="Search and filter rows"
+          className="flex min-w-0 max-w-full items-center [&_input]:rounded-r-none [&_input]:border-border"
+          role="group"
+        >
+          <SearchInput
+            className="flex w-44 min-w-0 focus-within:z-10"
+            label="Search rows"
+            onChange={(e) => setSearch(e.target.value)}
+            onClear={() => setSearch("")}
+            placeholder="Search"
+            size="xs"
+            value={search}
+          />
+          <FilterAdd
+            columns={columns.map((c) => c.name)}
+            onAdd={(f) => setFilters([...filters, f])}
+          />
+        </div>
         {filters.map((f, i) => (
           <Badge
             className="max-w-full gap-1 rounded-sm border-border font-mono"
@@ -448,21 +481,23 @@ export function RowsGrid({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto border-t border-border/70">
-        {rowsQuery.isPending ? (
-          <div className="flex flex-col gap-1.5 p-2">
-            <Skeleton className="h-5 w-full" />
-            <Skeleton className="h-5 w-full" />
-            <Skeleton className="h-5 w-2/3" />
-          </div>
-        ) : rowsQuery.isError ? (
+      {rowsQuery.isPending && (
+        <span className="sr-only" role="status">
+          Loading rows
+        </span>
+      )}
+      <div className="nowheel min-h-0 flex-1 overflow-auto border-t border-border/70">
+        {rowsQuery.isError && !data ? (
           <p className="p-2 text-xs text-muted-foreground">{errorMessage(rowsQuery.error)}</p>
-        ) : rows.length === 0 ? (
+        ) : !rowsQuery.isPending && rows.length === 0 ? (
           <p className="p-2 text-xs text-muted-foreground">
             {narrowing ? "No rows match." : "No rows."}
           </p>
         ) : (
-          <table className="w-max min-w-full border-separate border-spacing-0 text-xs">
+          <table
+            aria-busy={rowsQuery.isFetching}
+            className="w-max min-w-full border-separate border-spacing-0 text-xs"
+          >
             <thead className="sticky top-0 z-10 bg-wash-raised">
               <tr>
                 <th className="w-9 border-r border-b border-border/70 px-2 py-1.5 text-left font-normal text-muted-foreground">
@@ -473,20 +508,25 @@ export function RowsGrid({
                   const active = sort?.field === c.name;
                   return (
                     <th
+                      aria-sort={
+                        active ? (sort?.dir === "asc" ? "ascending" : "descending") : "none"
+                      }
                       className="max-w-[26rem] border-r border-b border-border/70 px-2 py-1.5 text-left font-normal last:border-r-0"
                       key={c.name}
                       scope="col"
                     >
                       <span className="flex items-center gap-1">
-                        <TypeMark type={c.type} />
                         <button
+                          aria-label={`Sort by ${c.name}`}
                           className={cn(
-                            "flex items-center gap-1 text-foreground hover:underline",
+                            "flex min-h-6 flex-1 items-center gap-1 text-left text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                             active && "font-semibold"
                           )}
+                          disabled={rowsQuery.isPending}
                           onClick={() => toggleSort(c.name)}
                           type="button"
                         >
+                          <TypeMark type={c.type} />
                           {c.name}
                           {active ? (
                             sort?.dir === "asc" ? (
@@ -503,7 +543,23 @@ export function RowsGrid({
                 })}
               </tr>
             </thead>
-            <tbody>
+            <tbody aria-hidden={rowsQuery.isPending || undefined}>
+              {rowsQuery.isPending &&
+                Array.from({ length: Math.min(limit, 10) }, (_, index) => (
+                  <tr key={`loading-${index}`}>
+                    <td className="w-9 border-r border-b border-border/60 px-2 py-1">
+                      <Skeleton className="h-4 w-4" />
+                    </td>
+                    {columns.map((column) => (
+                      <td
+                        className="border-r border-b border-border/60 px-2 py-1 last:border-r-0"
+                        key={column.name}
+                      >
+                        <Skeleton className="h-4 w-24 max-w-full" />
+                      </td>
+                    ))}
+                  </tr>
+                ))}
               {rows.map((row, rowIndex) => {
                 const sourceRow = row.source_row;
                 const mark =
@@ -511,49 +567,103 @@ export function RowsGrid({
                     ? undefined
                     : marks[String(sourceRow)];
                 const open = openRow === rowIndex;
+                const evidence =
+                  (
+                    row._overmind_provenance as {
+                      evidence?: Array<{ filename: string; page?: number; element?: string }>;
+                    } | null
+                  )?.evidence ?? [];
                 return (
-                  <tr
-                    aria-expanded={open}
-                    className={cn(
-                      "cursor-pointer hover:bg-accent/40",
-                      mark?.added && "bg-success/10",
-                      open && "bg-accent/40"
-                    )}
-                    key={row._index}
-                    onClick={() => setOpenRow(open ? null : rowIndex)}
-                  >
-                    <td className="border-r border-b border-border/60 px-2 py-1 font-mono tabular-nums text-muted-foreground">
-                      {row._index}
-                    </td>
-                    {columns.map((c) => {
-                      const value = row[c.name];
-                      const text = open ? fullText(value) : cellText(value);
-                      const before = mark?.before && c.name in mark.before ? mark.before : null;
-                      return (
-                        <td
-                          className={cn(
-                            "max-w-[26rem] border-r border-b border-border/60 px-2 py-1 align-top last:border-r-0",
-                            // Open: the same cells, wrapped to their full text.
-                            open ? "whitespace-pre-wrap break-words" : "truncate",
-                            c.type === "number" || c.type === "integer"
-                              ? "text-right tabular-nums"
-                              : "",
-                            text === "" && !before && "italic text-muted-foreground"
-                          )}
-                          key={c.name}
-                          title={!open && text.length > 80 ? text.slice(0, 400) : undefined}
+                  <Fragment key={row._index}>
+                    <tr
+                      aria-expanded={open}
+                      className={cn(
+                        "cursor-pointer hover:bg-accent/40",
+                        mark?.added && "bg-success/10",
+                        open && "bg-accent/40"
+                      )}
+                      onClick={(event) => {
+                        if (
+                          open &&
+                          event.target instanceof Element &&
+                          event.target.closest('[role="region"]')
+                        )
+                          return;
+                        setOpenRow(open ? null : rowIndex);
+                      }}
+                    >
+                      <td className="border-r border-b border-border/60 px-2 py-1 font-mono tabular-nums text-muted-foreground">
+                        <button
+                          aria-expanded={open}
+                          aria-label={`${open ? "Collapse" : "Inspect"} row ${row._index}`}
+                          className="w-full text-left hover:text-foreground"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setOpenRow(open ? null : rowIndex);
+                          }}
+                          type="button"
                         >
-                          {before ? (
-                            <ChangedValue after={value} before={before[c.name]} wrap={open} />
-                          ) : text === "" ? (
-                            "null"
-                          ) : (
-                            text
-                          )}
+                          {row._index}
+                        </button>
+                      </td>
+                      {columns.map((c) => {
+                        const value = row[c.name];
+                        const text = open ? fullText(value) : cellText(value);
+                        const before = mark?.before && c.name in mark.before ? mark.before : null;
+                        return (
+                          <td
+                            className={cn(
+                              "max-w-[26rem] border-r border-b border-border/60 px-2 py-1 align-top last:border-r-0",
+                              c.type === "number" || c.type === "integer"
+                                ? "text-right tabular-nums"
+                                : "",
+                              text === "" && !before && "italic text-muted-foreground"
+                            )}
+                            key={c.name}
+                            title={!open && text.length > 80 ? text.slice(0, 400) : undefined}
+                          >
+                            <div
+                              aria-label={open ? `Row ${row._index}, ${c.name}` : undefined}
+                              className={cn(
+                                open
+                                  ? "max-h-48 select-text overflow-auto whitespace-pre-wrap break-words"
+                                  : "truncate"
+                              )}
+                              role={open ? "region" : undefined}
+                              tabIndex={open ? 0 : undefined}
+                            >
+                              {before ? (
+                                <ChangedValue after={value} before={before[c.name]} wrap={open} />
+                              ) : text === "" ? (
+                                "null"
+                              ) : (
+                                text
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    {open && evidence.length > 0 && (
+                      <tr>
+                        <td
+                          className="border-b border-border/60 bg-wash-raised px-3 py-2"
+                          colSpan={columns.length + 1}
+                        >
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                            <span>Source evidence</span>
+                            {evidence.map((item, index) => (
+                              <span key={`${item.filename}-${index}`}>
+                                {item.filename}
+                                {item.page ? ` · page ${item.page}` : ""}
+                                {item.element ? ` · ${item.element}` : ""}
+                              </span>
+                            ))}
+                          </div>
                         </td>
-                      );
-                    })}
-                  </tr>
+                      </tr>
+                    )}
+                  </Fragment>
                 );
               })}
             </tbody>

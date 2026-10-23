@@ -177,6 +177,28 @@ def test_an_import_that_keeps_losing_its_worker_is_blocked_with_its_source(impor
     assert files.upload_data_path(imported_source[1]).exists()
 
 
+def test_stale_import_cannot_write_or_publish_landing_progress(imported_source, monkeypatch):
+    from overbae.services.datasets import imports
+
+    dataset, run = create_import(imported_source)
+    assert imports.claim(run.pk) is not None
+    stale = DatasetImport.objects.get(pk=run.pk)
+    original_spec = dataset.source_spec
+    DatasetImport.objects.filter(pk=run.pk).update(owner=uuid.uuid4())
+    published = []
+    monkeypatch.setattr(imports.events, "publish", lambda *args: published.append(args))
+    imports._read_parts(stale, [dataset])
+    dataset.refresh_from_db()
+    assert dataset.source_spec == original_spec
+    assert published == []
+
+    run.refresh_from_db()
+    imports._read_parts(run, [dataset])
+    dataset.refresh_from_db()
+    assert dataset.source_spec["landing_progress"]["completed"] == 1
+    assert published
+
+
 def test_a_live_import_renews_its_lease_only_up_to_the_execution_limit(imported_source):
     from overbae.services.datasets import imports
 
@@ -286,27 +308,29 @@ def test_split_outputs_share_one_durable_import(imported_source):
     assert len(deliveries) == 1
 
 
-def test_real_csv_lands_once_and_retains_no_source_after_commit(imported_source, monkeypatch):
+def test_real_csv_lands_once_and_retains_original_without_automatic_preparation(
+    imported_source, monkeypatch
+):
     from overbae.services.datasets import imports, paths, store
 
     dataset, run = create_import(imported_source)
-    handoffs = []
-    monkeypatch.setattr(
-        dataset_tasks.diagnose, "apply_async", lambda **kwargs: handoffs.append(kwargs)
-    )
     result = imports.execute(str(run.pk), run.inputs)
     assert result == {"status": "ok", "rows": 2}
     dataset.refresh_from_db()
     run.refresh_from_db()
-    assert dataset.state == "diagnosing" and run.state == "complete"
+    assert dataset.state == "idle" and run.state == "complete"
     assert dataset.cells.count() == 1
     frame = store.read_frame(paths.cell_path(dataset.pk, dataset.source.pk))
     assert frame["passenger_id"].tolist() == [1, 2]
     assert frame["survived"].tolist() == [0, 1]
     assert not files.upload_data_path(imported_source[1]).exists()
-    assert len(handoffs) == 1
+    retained = dataset.source_spec["sources"][0]
+    assert (
+        paths.source_path(dataset.pk, retained["id"]).read_bytes()
+        == b"passenger_id,survived\n1,0\n2,1\n"
+    )
     assert imports.execute(str(run.pk), run.inputs) == {"status": "complete"}
-    assert dataset.cells.count() == 1 and len(handoffs) == 1
+    assert dataset.cells.count() == 1
 
 
 def test_existing_run_action_resumes_blocked_source_import(imported_source, monkeypatch):
@@ -317,10 +341,9 @@ def test_existing_run_action_resumes_blocked_source_import(imported_source, monk
     imports.fail(claim, "The worker stopped before publication.")
     dataset.refresh_from_db()
     assert dataset.state == "error" and dataset.source is None
-    dataset = dispatch.run_dataset(dataset, None)
+    dataset = imports.resume_dataset(dataset)
     run.refresh_from_db()
     assert dataset.state == "landing" and run.state == "queued"
-    monkeypatch.setattr(dataset_tasks.diagnose, "apply_async", lambda **kwargs: None)
     assert imports.execute(str(run.pk), run.inputs) == {"status": "ok", "rows": 2}
 
 
@@ -370,66 +393,6 @@ def test_legacy_error_delivery_preserves_source_without_restarting(imported_sour
     assert dataset.state == "error" and dataset.source is None
     assert run.failure_code == "legacy_interrupted"
     assert files.upload_data_path(upload_id).exists() and not deliveries
-
-
-def test_concurrent_handoff_publisher_cannot_publish_the_same_turn(imported_source, monkeypatch):
-    from overbae.services.datasets import imports
-
-    dataset, run = create_import(imported_source)
-    handoffs = []
-
-    def publish(**kwargs):
-        handoffs.append(kwargs)
-        imports.publish_handoffs(run.pk)
-
-    monkeypatch.setattr(dataset_tasks.diagnose, "apply_async", publish)
-    assert imports.execute(str(run.pk), run.inputs)["status"] == "ok"
-    assert len(handoffs) == 1
-    task_id = handoffs[0]["task_id"]
-    assert imports.claim_diagnosis(dataset.pk, task_id)
-    assert not imports.claim_diagnosis(dataset.pk, task_id)
-
-
-def test_split_handoff_retry_only_publishes_the_unacknowledged_target(imported_source, monkeypatch):
-    from overbae.services.datasets import imports
-
-    project, upload_id, _filename, _deliveries = imported_source
-    train, evaluation = dispatch.create_split(
-        project=project,
-        user=None,
-        name="Pair",
-        source={"uploads": [upload_id]},
-        eval_percent=50,
-        position="head",
-    )
-    run = DatasetImport.objects.get(dataset=train)
-    handoffs = []
-
-    def publish(**kwargs):
-        handoffs.append(kwargs)
-        if kwargs["kwargs"]["dataset_id"] == str(evaluation.pk):
-            raise ConnectionError("broker disconnected after the first split target")
-
-    monkeypatch.setattr(dataset_tasks.diagnose, "apply_async", publish)
-    assert imports.execute(str(run.pk), run.inputs)["status"] == "ok"
-    assert len(handoffs) == 2
-    run.refresh_from_db()
-    assert run.handoff_pending
-    DatasetImport.objects.filter(pk=run.pk).update(
-        handoff_lease_until=timezone.now() - timedelta(seconds=1)
-    )
-    monkeypatch.setattr(
-        dataset_tasks.diagnose, "apply_async", lambda **kwargs: handoffs.append(kwargs)
-    )
-    imports.publish_handoffs(run.pk)
-    assert [item["kwargs"]["dataset_id"] for item in handoffs] == [
-        str(train.pk),
-        str(evaluation.pk),
-        str(evaluation.pk),
-    ]
-    assert handoffs[1]["task_id"] == handoffs[2]["task_id"]
-    run.refresh_from_db()
-    assert not run.handoff_pending
 
 
 def test_receipt_adoption_cannot_be_overwritten_by_a_stale_reaper(imported_source):
@@ -505,3 +468,107 @@ def test_late_broker_ack_cannot_acknowledge_a_resumed_import(imported_source, mo
     assert len(deliveries) == 2
     assert run.state == "queued" and run.published_at is None
     assert run.failure_code == "dispatch_failed"
+
+
+def test_fair_queue_wait_is_not_a_worker_failure_without_an_explicit_wait_budget(imported_source):
+    from overbae.models import DatasetLandingWork
+    from overbae.services.datasets import admission, imports
+
+    dataset, run = create_import(imported_source)
+    work = admission.enqueue(run.inputs, run.pk)
+    old = timezone.now() - timedelta(hours=4)
+    DatasetImport.objects.filter(pk=run.pk).update(queued_at=old)
+    DatasetLandingWork.objects.filter(pk=work.pk).update(queued_at=old)
+    assert imports.reconcile() == {"processed": 0}
+    messages = []
+    admission.reconcile(lambda **message: messages.append(message))
+    result = dataset_tasks.land.apply(
+        kwargs=messages[0]["kwargs"], task_id=messages[0]["task_id"], headers=messages[0]["headers"]
+    ).get()
+    assert result == {"status": "ok", "rows": 2}
+    dataset.refresh_from_db()
+    work.refresh_from_db()
+    assert dataset.state == "idle" and dataset.source.rows == 2
+    assert work.state == "finished"
+    assert admission.status(dataset)["queue_seconds"] >= 4 * 60 * 60
+
+
+def test_failed_fair_import_retains_source_and_never_reports_finished(imported_source):
+    from overbae.services.datasets import admission
+
+    dataset, run = create_import(imported_source)
+    work = admission.enqueue(run.inputs, run.pk)
+    messages = []
+    admission.dispatch(lambda **message: messages.append(message))
+    files.upload_data_path(imported_source[1]).write_bytes(b"source changed")
+    result = dataset_tasks.land.apply(
+        kwargs=messages[0]["kwargs"], task_id=messages[0]["task_id"], headers=messages[0]["headers"]
+    ).get()
+    work.refresh_from_db()
+    dataset.refresh_from_db()
+    assert result["status"] == "failed"
+    assert work.state == "failed" and work.error
+    assert dataset.operation["state"] == "failed"
+    assert dataset.state == "error" and not dataset.cells.exists()
+    assert files.upload_data_path(imported_source[1]).exists()
+
+
+def test_cancelled_fair_import_is_cancelled_in_its_execution_receipt(imported_source):
+    from overbae.services.datasets import admission, operations
+
+    dataset, run = create_import(imported_source)
+    work = admission.enqueue(run.inputs, run.pk)
+    admission.dispatch(lambda **message: None)
+    work.refresh_from_db()
+    assert admission.claim(work.pk, work.owner)
+    operations.cancel(dataset.pk)
+    admission.finish(
+        work.pk, work.owner, {"status": "failed", "error": "Source import was cancelled."}
+    )
+    work.refresh_from_db()
+    dataset.refresh_from_db()
+    assert work.state == "cancelled" and not work.error
+    assert dataset.operation["state"] == "cancelled"
+    assert not dataset.cells.exists()
+
+
+def test_recovery_repairs_a_missing_execution_finish_after_actual_publication(imported_source):
+    from overbae.models import DatasetLandingWork
+    from overbae.services.datasets import admission
+
+    dataset, run = create_import(imported_source)
+    work = admission.enqueue(run.inputs, run.pk)
+    messages = []
+    admission.dispatch(lambda **message: messages.append(message))
+    dataset_tasks.land.apply(
+        kwargs=messages[0]["kwargs"], task_id=messages[0]["task_id"], headers=messages[0]["headers"]
+    ).get()
+    DatasetLandingWork.objects.filter(pk=work.pk).update(
+        state="running", lease_until=timezone.now() - timedelta(seconds=1), finished_at=None
+    )
+    admission.reconcile(lambda **message: pytest.fail("Replayed a published source"))
+    work.refresh_from_db()
+    dataset.refresh_from_db()
+    assert work.state == "finished" and not work.error
+    assert dataset.state == "idle" and dataset.operation["state"] == "completed"
+    assert dataset.cells.count() == 1 and dataset.source.rows == 2
+
+
+def test_rolling_deploy_accepts_dataset_inserts_without_ocr_language_field(imported_source):
+    from django.db import connection
+
+    dataset, _ = create_import(imported_source)
+    legacy_id = uuid.uuid4()
+    columns = [
+        field.column
+        for field in Dataset._meta.local_concrete_fields
+        if field.name not in {"id", "ocr_languages"}
+    ]
+    names = ", ".join(connection.ops.quote_name(name) for name in columns)
+    table = connection.ops.quote_name(Dataset._meta.db_table)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f'INSERT INTO {table} ("id", {names}) SELECT %s, {names} FROM {table} WHERE "id" = %s',
+            [legacy_id, dataset.pk],
+        )
+    assert Dataset.objects.get(pk=legacy_id).ocr_languages == []

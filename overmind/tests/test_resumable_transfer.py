@@ -1,0 +1,457 @@
+import hashlib
+import json
+import time
+
+import pytest
+import requests
+from typer.testing import CliRunner
+
+from overmind.__main__ import app
+from overmind.dataset_cmd import upload_file
+from overmind.transfer_connection import TransferError
+
+
+class Response:
+    def __init__(self, data, status=200):
+        self.data, self.status_code = data, status
+        self.ok = 200 <= status < 300
+        self.headers = {}
+
+    def json(self):
+        return self.data
+
+
+class TransferServer:
+    def __init__(self, *, chunk_bytes=8, put_failures=()):
+        self.chunk_bytes = chunk_bytes
+        self.put_failures = list(put_failures)
+        self.headers = {}
+        self.content = bytearray()
+        self.receipt = None
+        self.publications = 0
+        self.lose_completion = False
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        assert kwargs["allow_redirects"] is False
+        self.calls.append((method, url, kwargs))
+        if url.endswith("/api/mcp/"):
+            request = kwargs["json"]
+            method = request["method"]
+            if method == "initialize":
+                return Response({"result": {"protocolVersion": "2025-06-18", "serverInfo": {"name": "overmind"}}})
+            if method == "notifications/initialized":
+                return Response({}, 202)
+            if method == "tools/call":
+                return Response({
+                    "result": {"structuredContent": {"projects": [{"id": "project-1"}], "next_offset": None}}
+                })
+            return Response({
+                "result": {
+                    "contents": [
+                        {
+                            "text": json.dumps({
+                                "contract_version": "4.1.0",
+                                "transfer_protocol_version": 1,
+                                "catalog_sha256": "catalog",
+                                "connection": {"mcp_url": "http://localhost:8000/api/mcp/"},
+                            })
+                        }
+                    ]
+                }
+            })
+        if "/readiness/" in url:
+            return Response({
+                "protocol_version": 1,
+                "credential_scope": "account",
+                "project_id": "project-1",
+                "user_id": "user-1",
+                "can_upload": True,
+                "can_export": True,
+                "mcp_url": "http://localhost:8000/api/mcp/",
+            })
+        if method == "POST" and url.endswith("/api/dataset-transfers/"):
+            spec = kwargs["json"]
+            if self.receipt is None:
+                self.receipt = {
+                    "id": "transfer-1",
+                    "state": "uploading",
+                    "received": 0,
+                    "size": spec["size"],
+                    "sha256": spec["sha256"],
+                    "request_key": spec["request_key"],
+                    "chunk_bytes": self.chunk_bytes,
+                    "max_bytes": 2 * 1024**3,
+                    "result": {},
+                }
+            elif spec["sha256"] != self.receipt["sha256"]:
+                return Response({"code": "request_key_conflict", "detail": "Different file"}, 409)
+            return Response(dict(self.receipt), 201)
+        if method == "PUT":
+            failure = self.put_failures.pop(0) if self.put_failures else None
+            if failure == "denied":
+                raise requests.ConnectionError("private secret-key") from PermissionError(13, "denied")
+            if failure == "before":
+                raise requests.ConnectionError("private secret-key")
+            offset, data = kwargs["params"]["offset"], kwargs["data"]
+            if offset < len(self.content):
+                assert bytes(self.content[offset : offset + len(data)]) == data
+            else:
+                assert offset == len(self.content)
+                self.content.extend(data)
+            self.receipt["received"] = len(self.content)
+            if failure == "after":
+                raise requests.ConnectionError("private secret-key")
+        if url.endswith("/complete/"):
+            if self.receipt["state"] != "published":
+                assert hashlib.sha256(self.content).hexdigest() == self.receipt["sha256"]
+                self.publications += 1
+                self.receipt.update(state="published", result={"id": "dataset-1", "state": "landing"})
+            if self.lose_completion:
+                self.lose_completion = False
+                raise requests.ConnectionError("response lost secret-key")
+        return Response(dict(self.receipt))
+
+    def close(self):
+        pass
+
+    def get(self, url, **kwargs):
+        assert url.endswith("/api/datasets/dataset-1/")
+        return Response({"state": "error", "error": "Source landing stopped; retained bytes are available."})
+
+
+def test_batch_upload_retries_a_lost_chunk_and_completion_without_republishing(tmp_path, monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda _: None)
+
+    class BatchServer(TransferServer):
+        def __init__(self):
+            super().__init__()
+            self.parts = [bytearray(), bytearray()]
+            self.lost_chunk = self.lost_complete = False
+
+        def request(self, method, url, **kwargs):
+            if url.endswith("/api/mcp/"):
+                return super().request(method, url, **kwargs)
+            if "/readiness/" in url:
+                result = super().request(method, url, **kwargs)
+                result.data["max_batch_files"] = 100
+                return result
+            if url.endswith("/api/dataset-transfers/"):
+                spec = kwargs["json"]
+                if self.receipt is None:
+                    self.spec = spec
+                    self.receipt = {
+                        "id": "batch-1",
+                        "state": "uploading",
+                        "chunk_bytes": 8,
+                        "files": [{**item, "received": 0} for item in spec["files"]],
+                        "result": {},
+                    }
+                assert spec == self.spec
+            elif method == "PUT":
+                index, offset = kwargs["params"]["file_index"], kwargs["params"]["offset"]
+                content = self.parts[index]
+                chunk = kwargs["data"]
+                if offset < len(content):
+                    assert content[offset : offset + len(chunk)] == chunk
+                else:
+                    assert offset == len(content)
+                    content.extend(chunk)
+                self.receipt["files"][index]["received"] = len(content)
+                if index == 1 and not self.lost_chunk:
+                    self.lost_chunk = True
+                    raise requests.ConnectionError("lost chunk acknowledgement")
+            elif url.endswith("/complete/"):
+                assert all(
+                    hashlib.sha256(part).hexdigest() == item["sha256"]
+                    for part, item in zip(self.parts, self.spec["files"], strict=True)
+                )
+                if self.receipt["state"] != "published":
+                    self.publications += 1
+                    self.receipt.update(state="published", result={"id": "dataset-1", "state": "landing"})
+                if not self.lost_complete:
+                    self.lost_complete = True
+                    raise requests.ConnectionError("lost publication acknowledgement")
+            return Response(json.loads(json.dumps(self.receipt)))
+
+    paths = [tmp_path / "first.csv", tmp_path / "second.csv"]
+    for index, path in enumerate(paths):
+        path.write_text(f"value\n{index}\n{index + 2}\n")
+    server = BatchServer()
+    kwargs = dict(project_id="project-1", api_key="secret-key", api_url="http://localhost:8000", session=server)
+    with pytest.raises(TransferError, match="API connection failed"):
+        upload_file(paths, **kwargs)
+    result = upload_file(paths, **kwargs)
+    assert result["id"] == "dataset-1" and server.publications == 1
+    assert [bytes(part) for part in server.parts] == [path.read_bytes() for path in paths]
+    assert result["transfer"]["state"] == "published"
+
+
+def test_landing_failure_retains_published_transfer_for_explicit_recovery(tmp_path, monkeypatch):
+    path = tmp_path / "rows.json"
+    path.write_text('[{"input":"one"}]')
+    server = TransferServer()
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    result = CliRunner().invoke(
+        app,
+        [
+            "dataset",
+            "upload",
+            str(path),
+            "--project-id",
+            "project-1",
+            "--api-key",
+            "secret-key",
+            "--api-url",
+            "http://localhost:8000",
+            "--wait",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    error = json.loads(result.output)["error"]
+    assert error["stage"] == "landing" and error["next_action"] == "inspect_dataset_import"
+    assert error["transfer"]["id"] == "transfer-1"
+    assert error["transfer"]["result"]["id"] == "dataset-1"
+    assert error["transfer"]["state"] == "published" and server.publications == 1
+    assert "secret-key" not in result.output
+
+
+def test_command_restart_recovers_published_transfer_without_duplicate(tmp_path):
+    path = tmp_path / "rows.json"
+    path.write_text('[{"input":"one"},{"input":"two"}]')
+    server = TransferServer()
+    server.lose_completion = True
+    params = dict(project_id="project-1", api_key="secret-key", api_url="http://localhost:8000", session=server)
+    with pytest.raises(Exception) as failed:
+        upload_file(path, **params)
+    assert "secret-key" not in str(failed.value)
+    result = upload_file(path, **params)
+    assert result["id"] == "dataset-1"
+    assert result["transfer"]["id"] == "transfer-1"
+    assert result["state_scope"] == "at_publication"
+    assert server.publications == 1
+    assert bytes(server.content) == path.read_bytes()
+    assert result["next_mcp_actions"][0]["arguments"]["project_id"] == "project-1"
+
+
+def test_recovered_upload_does_not_present_saved_landing_state_as_current(tmp_path, monkeypatch):
+    path = tmp_path / "rows.json"
+    path.write_text('[{"text":"retained"}]')
+    server = TransferServer()
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    argv = [
+        "dataset",
+        "upload",
+        str(path),
+        "--project-id",
+        "project-1",
+        "--api-key",
+        "secret-key",
+        "--api-url",
+        "http://localhost:8000",
+    ]
+    first = CliRunner().invoke(app, argv)
+    assert first.exit_code == 0, first.output
+    recovered = CliRunner().invoke(app, argv)
+    assert recovered.exit_code == 0, recovered.output
+    assert "is landing" not in recovered.output
+    assert "get_job" in recovered.output
+    assert server.publications == 1
+
+
+@pytest.mark.parametrize("code", ["file_too_large", ["file_too_large"]])
+def test_document_limit_has_actionable_safe_error_without_a_transfer(tmp_path, code):
+    path = tmp_path / "large.pdf"
+    path.write_bytes(b"PDF fixture")
+    server = TransferServer()
+    request = server.request
+
+    def reject(method, url, **kwargs):
+        if method == "POST" and url.endswith("/api/dataset-transfers/"):
+            return Response({"code": code, "detail": "untrusted secret-key"}, 400)
+        return request(method, url, **kwargs)
+
+    server.request = reject
+    with pytest.raises(Exception) as failure:
+        upload_file(path, project_id="project-1", api_key="secret-key", api_url="http://localhost:8000", session=server)
+    record = failure.value.record()
+    assert record["code"] == "file_too_large"
+    assert record["next_action"] == "split_or_reduce_file"
+    assert "secret-key" not in json.dumps(record)
+    assert server.receipt is None and server.publications == 0
+
+
+def test_readiness_reports_denied_transport_without_mutation_or_secrets(monkeypatch):
+    server = TransferServer()
+
+    def denied(method, url, **kwargs):
+        raise requests.ConnectionError("private path and secret-key") from PermissionError(1, "Operation not permitted")
+
+    server.request = denied
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    result = CliRunner().invoke(
+        app,
+        [
+            "connection",
+            "check",
+            "--api-key",
+            "secret-key",
+            "--api-url",
+            "http://localhost:8000",
+            "--project-id",
+            "project-1",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    body = json.loads(result.output)
+    assert not body["ready"]
+    assert body["error"]["code"] == "network_permission_denied"
+    assert body["error"]["next_action"] == "request_host_network_permission"
+    assert "secret-key" not in result.output and "private path" not in result.output
+    assert server.publications == 0
+
+
+def test_readiness_checks_both_transports_and_project_from_this_process(monkeypatch):
+    server = TransferServer()
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    result = CliRunner().invoke(
+        app,
+        [
+            "connection",
+            "check",
+            "--api-key",
+            "secret-key",
+            "--api-url",
+            "http://localhost:8000",
+            "--project-id",
+            "project-1",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.output)
+    assert body["ready"] and body["project_id"] == "project-1"
+    assert body["mcp"]["status"] == body["transfer"]["status"] == "ready"
+    assert not any(url.endswith("/api/dataset-transfers/") for _, url, _ in server.calls)
+
+
+@pytest.mark.parametrize(
+    "status,code", [(401, "authentication_failed"), (403, "permission_denied"), (302, "redirect_refused")]
+)
+def test_readiness_preserves_auth_permission_and_redirect_failures(monkeypatch, status, code):
+    server = TransferServer()
+    server.request = lambda *args, **kwargs: Response({"detail": "secret-key"}, status)
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    result = CliRunner().invoke(
+        app,
+        [
+            "connection",
+            "check",
+            "--api-key",
+            "secret-key",
+            "--api-url",
+            "http://localhost:8000",
+            "--project-id",
+            "project-1",
+            "--json",
+        ],
+    )
+    body = json.loads(result.output)
+    assert result.exit_code == 1
+    assert body["error"]["code"] == code
+    assert "secret-key" not in result.output
+
+
+def test_global_setup_uses_one_connection_without_pinning_a_project(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    import tomllib
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("OVERMIND_API_KEY", "secret-key")
+    server = TransferServer()
+    monkeypatch.setattr(requests, "Session", lambda: server)
+    result = CliRunner().invoke(
+        app, ["connection", "configure", "--api-url", "http://localhost:8000", "--project-id", "project-1", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    saved = tmp_path / "config/overmind/connection.toml"
+    mcp = tomllib.loads((tmp_path / ".codex/config.toml").read_text())["mcp_servers"]["overmind"]
+    profile = tomllib.loads(saved.read_text())
+    assert profile["api-key"] == mcp["http_headers"]["X-Api-Key"] == "secret-key"
+    assert profile["base-url"] + "/api/mcp/" == mcp["url"]
+    assert "project-id" not in profile
+    assert saved.stat().st_mode & 0o777 == 0o600
+    assert "secret-key" not in result.output
+    assert json.loads(result.output)["mcp_client_reload_required"] is True
+
+
+def test_changed_bytes_under_an_explicit_key_report_the_conflict(tmp_path):
+    from overmind.transfer_connection import TransferError
+
+    path = tmp_path / "rows.json"
+    path.write_text('[{"input":"one"}]')
+    server = TransferServer()
+    params = dict(
+        project_id="project-1",
+        api_key="secret-key",
+        api_url="http://localhost:8000",
+        request_key="fixed",
+        session=server,
+    )
+    upload_file(path, **params)
+    path.write_text('[{"input":"two"}]')
+    with pytest.raises(TransferError) as failure:
+        upload_file(path, **params)
+    assert failure.value.code == "request_key_conflict"
+    assert failure.value.next_action == "use_original_inputs_or_new_request_key"
+    assert server.publications == 1
+
+
+@pytest.mark.parametrize("failure", ["before", "after"])
+def test_upload_recovers_interrupted_chunk_without_duplicate_bytes(tmp_path, monkeypatch, failure):
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    path = tmp_path / "rows.csv"
+    path.write_bytes(b"retained-row\n" * (1024 * 1024))
+    server = TransferServer(chunk_bytes=4 * 1024 * 1024, put_failures=[failure])
+    result = upload_file(
+        path, project_id="project-1", api_key="secret-key", api_url="http://localhost:8000", session=server
+    )
+    chunks = [call for call in server.calls if call[0] == "PUT"]
+    assert chunks[0][2]["params"]["offset"] == chunks[1][2]["params"]["offset"] == 0
+    assert len(chunks[0][2]["data"]) == 4 * 1024 * 1024
+    assert len(chunks[1][2]["data"]) == 2 * 1024 * 1024
+    assert bytes(server.content) == path.read_bytes()
+    assert server.publications == 1 and result["transfer"]["id"] == "transfer-1"
+    assert result["transfer"]["received"] == path.stat().st_size
+    assert sleeps == [1]
+
+
+@pytest.mark.parametrize(
+    "failure,expected_code,attempts",
+    [
+        ("before", "connection_unavailable", 6),
+        ("denied", "network_permission_denied", 1),
+    ],
+)
+def test_chunk_recovery_is_bounded_and_never_retries_confirmed_denial(
+    tmp_path, monkeypatch, failure, expected_code, attempts
+):
+    sleeps = []
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+    path = tmp_path / "rows.csv"
+    path.write_bytes(b"retained-row\n" * (1024 * 1024))
+    server = TransferServer(chunk_bytes=4 * 1024 * 1024, put_failures=[failure] * 6)
+    with pytest.raises(Exception) as failed:
+        upload_file(path, project_id="project-1", api_key="secret-key", api_url="http://localhost:8000", session=server)
+    record = failed.value.record()
+    assert record["code"] == expected_code and record["transfer"]["id"] == "transfer-1"
+    assert record["transport_error"] == "ConnectionError"
+    assert "secret-key" not in json.dumps(record) and "private" not in json.dumps(record)
+    assert len([call for call in server.calls if call[0] == "PUT"]) == attempts
+    assert len(sleeps) == attempts - 1
+    assert server.publications == 0 and not server.content

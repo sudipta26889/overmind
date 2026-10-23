@@ -18,6 +18,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import type { ModelCatalog } from "@/hooks/use-finetuning";
 import type {
   Dataset,
+  FinetuningEstimateResponse,
   FinetuningEvidence,
   FinetuningExperiment,
   FinetuningRecommendationResponse,
@@ -145,6 +146,36 @@ const cards = () =>
   within(screen.getByRole("list", { name: "Experiments" })).getAllByRole("listitem");
 
 describe("candidate list", () => {
+  it("omits unmeasured estimates while keeping measured duration ranges", () => {
+    setup({
+      drafts: [{ ...DRAFTS[0], evidence: [], match: null }, DRAFTS[1]],
+      estimates: new Map([
+        [
+          DRAFTS[0].id,
+          {
+            forecast: { basis: "unmeasured_recipe", training_seconds: null },
+            timeEstimate: { human: "Unmeasured recipe", seconds: null },
+          } as unknown as FinetuningEstimateResponse,
+        ],
+        [
+          DRAFTS[1].id,
+          {
+            forecast: { basis: "measured_recipe", training_seconds: [60, 120] },
+            timeEstimate: { human: "1–2 min", seconds: null },
+          } as unknown as FinetuningEstimateResponse,
+        ],
+      ]),
+    });
+    const [ungraded, measured] = cards();
+    expect(
+      within(ungraded).queryByText(
+        /Not graded|Unmeasured recipe|Cost uncalibrated|Ranked below|other costs pending/
+      )
+    ).toBeNull();
+    expect(within(measured).getByText("~1–2 min")).toBeTruthy();
+    expect(within(measured).getByText("Match 98.00/100")).toBeTruthy();
+  });
+
   it("shows the serving reservation separately from training parameters", () => {
     const candidate = {
       ...CANDIDATES[0],
@@ -222,10 +253,10 @@ describe("analysis strip", () => {
 
   it("keeps an unresolved capability task distinct from a dataset classification", () => {
     setup({ rec: { ...REC, skillWeights: {}, taskType: "unknown", taskTypeSource: "unknown" } });
-    expect(screen.getByText("Unknown").getAttribute("title")).toBe(
-      "Capability task could not be classified from codebase context"
+    expect(screen.getByText("Not classified").getAttribute("title")).toBe(
+      "Task has not been classified from available context"
     );
-    expect(screen.getByText("Capability context")).toBeTruthy();
+    expect(screen.queryByText("Capability context")).toBeNull();
     expect(screen.getByText("No skill weights")).toBeTruthy();
   });
 

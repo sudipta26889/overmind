@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+import time_machine
 from django.utils import timezone
 from factories import make_connector, sync_until_live
 from fakes.vendors import LangfuseAPI, Step
@@ -167,6 +169,29 @@ def test_the_poller_queues_only_due_active_auto_syncing_connectors(credential, c
     assert continuations == [str(credential.id)]
 
 
+def test_the_poller_leaves_a_running_chunk_alone_until_its_time_limit_has_passed(
+    credential, langfuse, continuations, monkeypatch
+):
+    _traces(langfuse, 1)
+    ConnectorCredential.objects.filter(id=credential.id).update(auto_sync_enabled=True)
+    langfuse.status = 429
+    still_running = timedelta(seconds=connector_sync.sync_connector_chunk.time_limit - 60)
+    polled: list[int] = []
+
+    def vendor_backoff(_seconds):
+        if polled:
+            return
+        langfuse.status = 200
+        with time_machine.travel(timezone.now() + still_running):
+            polled.append(connector_sync.poll_connectors()["enqueued"])
+
+    monkeypatch.setattr(time, "sleep", vendor_backoff)
+    _chunk(credential)
+
+    assert polled == [0]
+    assert _spans(credential) == 1
+
+
 def test_a_manual_sync_runs_with_auto_sync_off(credential, langfuse):
     _traces(langfuse, 3)
     assert credential.auto_sync_enabled is False
@@ -177,17 +202,16 @@ def test_a_manual_sync_runs_with_auto_sync_off(credential, langfuse):
     assert _spans(credential) == 3
 
 
-def test_an_import_queues_scoring_for_every_trace_it_lands(credential, langfuse, monkeypatch):
-    queued = []
-    monkeypatch.setattr(
-        "overbae.tasks.trace_scoring.score_trace.delay", lambda **kw: queued.append(kw["trace_id"])
-    )
+def test_an_import_queues_scoring_for_every_span_it_lands(credential, langfuse):
+    from overbae.models import LiveScoringWork
+
     _traces(langfuse, 3)
-
     sync_until_live(credential)
-
-    roots = Span.objects.filter(project=credential.project, parent_span_id__isnull=True)
-    assert sorted(queued) == sorted(roots.values_list("trace_id", flat=True))
+    landed = Span.objects.filter(project=credential.project)
+    queued = LiveScoringWork.objects.filter(project=credential.project, kind="span")
+    assert sorted(queued.values_list("key", flat=True)) == sorted(
+        landed.values_list("span_id", flat=True)
+    )
 
 
 def test_a_sync_request_restarts_a_backfill_that_imported_nothing(credential):

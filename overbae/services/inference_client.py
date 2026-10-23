@@ -15,20 +15,19 @@ from django.conf import settings
 from django.db.models import Q
 from django.utils import timezone
 
-from modal_shared.context_budget import reserve_output
+from modal_shared.context_budget import (
+    CONTEXT_BUDGET_MESSAGE,
+    is_context_limit_error,
+    reserve_output,
+)
 from modal_shared.modelfam import serve_image_key
 from modal_shared.shared import WEIGHTS_PATH_HEADER
 from modal_shared.shared import routing_headers as _routing_headers
+from overbae.services.deployment import saved_base_identity, serving_gpu
 
 
 class InferenceClientError(Exception):
     pass
-
-
-CONTEXT_BUDGET_MESSAGE = (
-    "The input and reserved output exceed the deployed context. "
-    "Reduce the request or redeploy with a larger serving context."
-)
 
 
 class ContextBudgetError(InferenceClientError):
@@ -58,7 +57,11 @@ class InferenceClient:
 
     def _headers_for(self, deployed=None, **routing) -> dict[str, str]:
         headers = dict(self._headers)
-        gpu_type = routing.get("gpu_type") or getattr(deployed, "gpu_type", "") or ""
+        gpu_type = routing.get("gpu_type") or ""
+        if not gpu_type and getattr(deployed, "pk", None):
+            gpu_type = serving_gpu(deployed)
+        elif not gpu_type:
+            gpu_type = getattr(deployed, "gpu_type", "") or ""
         weights_path = routing.get("weights_path") or getattr(deployed, "weights_path", "") or ""
         max_model_len = routing.get("max_model_len")
         if max_model_len is None:
@@ -71,6 +74,9 @@ class InferenceClient:
             )
         adapter_path = routing.get("adapter_path") or getattr(deployed, "adapter_path", "") or ""
         lora_rank = routing.get("lora_rank") or getattr(deployed, "lora_rank", 0) or 0
+        identity = routing.get("base_identity") or (
+            saved_base_identity(deployed) if deployed is not None else ""
+        )
         if gpu_type and weights_path and max_model_len is not None:
             headers.update(
                 _routing_headers(
@@ -80,6 +86,7 @@ class InferenceClient:
                     serve_image=serve_image,
                     adapter_path=adapter_path,
                     lora_rank=int(lora_rank),
+                    base_identity=identity,
                 )
             )
         return headers
@@ -129,6 +136,12 @@ class InferenceClient:
         except ValueError as exc:
             raise InferenceClientError(str(exc)) from exc
 
+        context_limit = (
+            max_model_len if max_model_len is not None else getattr(deployed, "max_model_len", None)
+        )
+        if context_limit and payload["max_tokens"] >= context_limit:
+            raise ContextBudgetError(CONTEXT_BUDGET_MESSAGE)
+
         url = f"{self._base_url}/v1/chat/completions"
         headers = self._headers_for(
             deployed,
@@ -148,15 +161,7 @@ class InferenceClient:
             raise InferenceClientError(f"Request to InferenceAPIServer failed: {exc}") from exc
 
         if not resp.ok:
-            if resp.status_code == 400 and any(
-                marker in resp.text.lower()
-                for marker in (
-                    "context length",
-                    "max_model_len",
-                    "max_tokens",
-                    "max_completion_tokens",
-                )
-            ):
+            if is_context_limit_error(resp.status_code, resp.text):
                 raise ContextBudgetError(CONTEXT_BUDGET_MESSAGE)
             raise InferenceClientError(
                 f"InferenceAPIServer returned {resp.status_code}: {resp.text[:400]}"
@@ -165,6 +170,8 @@ class InferenceClient:
             return resp
         result = resp.json()
         if isinstance(result, dict) and "error" in result:
+            if is_context_limit_error(resp.status_code, result):
+                raise ContextBudgetError(CONTEXT_BUDGET_MESSAGE)
             raise InferenceClientError(f"InferenceAPIServer failed: {result['error']}")
         return result
 
@@ -198,6 +205,10 @@ class InferenceClient:
             for line in resp.iter_lines(chunk_size=1):
                 if line:
                     decoded = line.decode("utf-8") if isinstance(line, bytes) else line
+                    if decoded.startswith("data:") and is_context_limit_error(
+                        resp.status_code, decoded.removeprefix("data:").strip()
+                    ):
+                        raise ContextBudgetError(CONTEXT_BUDGET_MESSAGE)
                     yield decoded + "\n\n"
         finally:
             resp.close()
@@ -232,7 +243,7 @@ class InferenceClient:
         elif not weights_path and row is not None:
             weights_path = row.weights_path
 
-        if self._base_url:
+        if self._base_url and not (row is not None and row.inference_contract == "decision"):
             try:
                 del_headers = dict(self._headers)
                 if weights_path:

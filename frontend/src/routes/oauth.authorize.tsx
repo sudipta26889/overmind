@@ -9,7 +9,7 @@ import { ConnectionPanel, ConnectionScene, connectionHeading } from "@/component
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/ui/page-header";
-import { Spinner } from "@/components/ui/spinner";
+import { LoadingState, Spinner } from "@/components/ui/spinner";
 import { useAuthContext } from "@/contexts/auth-context";
 
 export const Route = createFileRoute("/oauth/authorize")({
@@ -50,7 +50,9 @@ function AuthorizeConnection() {
       </div>
       <ConnectionPanel>
         {!request ? <Alert variant="destructive">Missing connection request.</Alert> : null}
-        {request && (!ready || details.isPending) ? <Spinner /> : null}
+        {request && (!ready || details.isPending) ? (
+          <LoadingState label="Loading connection" />
+        ) : null}
         {details.isError ? (
           <Alert variant="destructive">
             This request is unavailable. Start the connection again from your MCP client.
@@ -79,7 +81,7 @@ function AuthorizeConnection() {
               </ul>
               <p className="text-muted-foreground">Access continues until revoked.</p>
             </div>
-            <div className="space-y-1 border-t border-border pt-4 text-xs leading-relaxed">
+            <div className="-mx-5 space-y-1 border-t border-border px-5 pt-4 text-xs leading-relaxed sm:-mx-7 sm:px-7">
               <p className="text-muted-foreground">Return address</p>
               <p className="break-all">{details.data.redirectUri}</p>
             </div>

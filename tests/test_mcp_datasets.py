@@ -6,23 +6,57 @@ import uuid
 from datetime import timedelta
 
 import pytest
-from conftest import frozen_dataset
-from fakes.llm import tool_call
-from mcp_fixtures import mcp_context
 
 from overbae.models import (
+    APIToken,
     Capability,
     Cell,
     Dataset,
     Project,
+    ProjectMembership,
     Span,
+    User,
 )
 from overbae.services.datasets import land, paths, store
-from overbae.services.datasets.notebook import agent
+from overbae.services.mcp import tools_datasets
 from overbae.services.mcp.catalog import CATALOG
 from overbae.services.mcp.context import MCPContext
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+def test_start_dataset_preserves_brief_and_exposes_source_handoff():
+    context = _context()
+    result = _call(
+        "start_dataset", {"brief": "Explore source documents before choosing a task."}, context
+    )
+    assert not result.isError, result.structuredContent
+    dataset_id = result.structuredContent["dataset"]["id"]
+    inspected = _call("inspect_dataset", {"dataset": dataset_id}, context)
+    assert not inspected.isError, inspected.structuredContent
+    detail = inspected.structuredContent
+    assert detail["brief"] == "Explore source documents before choosing a task."
+    assert detail["source_kind"] == "pending" and detail["capability"] is None
+    assert detail["human_action"]["arguments"]["dataset"] == dataset_id
+
+
+def _context(*, permission: str | list[str] = ("read", "write")) -> MCPContext:
+    user = User.objects.create_user(
+        email=f"mcp-dataset-{uuid.uuid4().hex[:8]}@test.com",
+        password="pw",
+        clerk_user_id=f"clerk_{uuid.uuid4().hex}",
+    )
+    project = Project.objects.create(name="Datasets", slug=f"datasets-{uuid.uuid4().hex[:8]}")
+    ProjectMembership.objects.create(user=user, project=project)
+    permissions = [permission] if isinstance(permission, str) else list(permission)
+    token = APIToken(
+        scope={
+            "scope": "project",
+            "resourceIds": [str(project.id)],
+            "permission": permissions,
+        }
+    )
+    return MCPContext(user=user, token=token, project=project)
 
 
 def _call(name: str, arguments: dict, context: MCPContext):
@@ -55,61 +89,8 @@ def _ran_cell(dataset: Dataset, *, position: int = 0, title: str = "Source") -> 
     )
 
 
-def test_approving_a_later_proposal_preserves_earlier_proposals_and_saved_data():
-    context = mcp_context(("read", "write"))
-    dataset = _dataset(context)
-    land.land_rows(
-        dataset,
-        [{"input": "one", "expected_output": "yes"}, {"input": "two", "expected_output": "no"}],
-    )
-    dataset.refresh_from_db()
-    tools = agent.Tools(dataset.id, context.user, lambda _: None)
-    earlier = tools.add_cell(
-        {"title": "Alternative", "script": "df['expected_output'] = 'unknown'", "kind": "semantic"}
-    )
-    selected = tools.add_cell(
-        {"title": "Keep eligible rows", "script": "df = df.iloc[:1]", "kind": "semantic"}
-    )
-    source = dataset.source
-    fingerprint = store.file_sha256(paths.cell_path(dataset.id, source.id))
-    result = _call(
-        "run_dataset", {"dataset": str(dataset.id), "proposal_cell": selected["id"]}, context
-    )
-    assert not result.isError, result.structuredContent
-    dataset.refresh_from_db()
-    assert str(dataset.active_cell.id) == selected["id"]
-    assert dataset.active_cell.rows == 1
-    assert dataset.cells.get(pk=earlier["id"]).state == Cell.State.PROPOSED
-    assert list(dataset.cells.values_list("position", flat=True)) == [0, 1, 2]
-    assert store.file_sha256(paths.cell_path(dataset.id, source.id)) == fingerprint
-
-
-def test_a_proposal_can_be_denied_but_a_saved_cell_cannot():
-    context = mcp_context(("read", "write"))
-    dataset = _dataset(context)
-    land.land_rows(dataset, [{"input": "one", "expected_output": "yes"}])
-    dataset.refresh_from_db()
-    proposed = agent.Tools(dataset.id, context.user, lambda _: None).add_cell(
-        {"title": "Alternative", "script": "df['expected_output'] = 'unknown'", "kind": "semantic"}
-    )
-    source = dataset.source
-    refused = _call(
-        "run_dataset",
-        {"dataset": str(dataset.id), "proposal_cell": str(source.id), "decision": "deny"},
-        context,
-    )
-    denied = _call(
-        "run_dataset",
-        {"dataset": str(dataset.id), "proposal_cell": proposed["id"], "decision": "deny"},
-        context,
-    )
-    assert refused.isError is True
-    assert denied.isError is False, denied.structuredContent
-    assert list(dataset.cells.values_list("id", flat=True)) == [source.id]
-
-
 def test_list_datasets_is_project_scoped_filtered_paginated_and_uses_uuids():
-    context = mcp_context(("read", "write"))
+    context = _context()
     capability = Capability.objects.create(project=context.project, name="Support", slug="support")
     first = _dataset(context, "Alpha", capability=capability)
     _dataset(context, "Beta", intent=Dataset.Intent.TRAIN)
@@ -134,39 +115,8 @@ def test_list_datasets_is_project_scoped_filtered_paginated_and_uses_uuids():
     uuid.UUID(result.structuredContent["datasets"][0]["id"])
 
 
-def test_inspection_and_job_report_saved_generation_progress():
-    context = mcp_context(("read", "write"))
-    dataset = _dataset(
-        context,
-        state="diagnosing",
-        chat=[
-            {
-                "role": "agent",
-                "text": "",
-                "status": "running",
-                "progress": {
-                    "stage": "generating",
-                    "label": "Generating examples",
-                    "detail": "Cover rare cases",
-                    "rows_before": 270,
-                    "target_rows": 500,
-                    "generated_rows": 50,
-                    "cell_id": "generated-cell",
-                },
-            }
-        ],
-    )
-    result = _call("inspect_dataset", {"dataset": str(dataset.id)}, context)
-    assert not result.isError
-    assert result.structuredContent["recent_chat"][-1]["progress"]["generated_rows"] == 50
-    assert result.structuredContent["recent_chat"][-1]["progress"]["cell_id"] == "generated-cell"
-    job = _call("get_job", {"kind": "dataset_run", "id": str(dataset.id)}, context)
-    assert not job.isError
-    assert job.structuredContent["details"]["latest_turn"]["status"] == "running"
-
-
 def test_inspection_exposes_the_workshops_source_families_and_consumer_requirements():
-    context = mcp_context(("read", "write"))
+    context = _context()
     dataset = _dataset(context)
     land.land_rows(
         dataset,
@@ -191,47 +141,8 @@ def test_inspection_exposes_the_workshops_source_families_and_consumer_requireme
     assert "not the application" in preparation["consumers"]["model_evaluation"]["execution"]
 
 
-def test_requested_generation_is_active_and_queryable_without_an_mcp_approval_step(fake_llm):
-    context = mcp_context(("read", "write"))
-    dataset = _dataset(context)
-    land.land_rows(dataset, [{"input": "seed", "expected_output": "yes"}])
-    fake_llm.stream_rounds(
-        [
-            (
-                [
-                    tool_call("seed_examples", {"target_rows": 2, "instruction": "Cover variants"}),
-                    tool_call(
-                        "add_synthetic_rows",
-                        {
-                            "examples": [
-                                {"seed_row": 0, "row": {"input": "new", "expected_output": "no"}}
-                            ]
-                        },
-                    ),
-                ],
-                "Adding a contrasting example.",
-            ),
-            ([], "One example added."),
-        ]
-    )
-    list(agent.follow_up(dataset.id, "Generate and add one example"))
-    result = _call("inspect_dataset", {"dataset": str(dataset.id)}, context)
-    assert not result.isError
-    body = result.structuredContent
-    assert body["active"]["rows"] == 2
-    assert all(cell["state"] != "proposed" for cell in body["cells"])
-    assert all(action["tool"] != "run_dataset" for action in body["next_actions"])
-    turn = body["recent_chat"][-1]
-    assert turn["progress"]["cell_id"] == body["active"]["id"]
-    assert turn["cells"][0]["action"] == "ran"
-    queried = _call(
-        "query_dataset", {"dataset": str(dataset.id), "sql": "SELECT count(*) AS n FROM t"}, context
-    )
-    assert not queried.isError and queried.structuredContent["rows"] == [{"n": 2}]
-
-
-def test_inspect_is_bounded_ordered_and_refuses_an_ambiguous_name():
-    context = mcp_context(("read", "write"))
+def test_inspect_is_bounded_ordered_and_refuses_an_ambiguous_name(monkeypatch):
+    context = _context()
     dataset = _dataset(
         context,
         "Named dataset",
@@ -239,7 +150,6 @@ def test_inspect_is_bounded_ordered_and_refuses_an_ambiguous_name():
             {"capability_id": str(uuid.uuid4()), "name": f"Capability {n}", "score": n}
             for n in range(25)
         ],
-        chat=[{"role": "user", "text": str(n), "at": f"t{n}"} for n in range(35)],
     )
     active = _ran_cell(dataset, position=0)
     dataset.active = active
@@ -248,10 +158,12 @@ def test_inspect_is_bounded_ordered_and_refuses_an_ambiguous_name():
         dataset=dataset,
         position=1,
         title="Proposal",
-        state=Cell.State.PROPOSED,
+        state=Cell.State.FAILED,
         script="return df",
     )
-    result = _call("inspect_dataset", {"dataset": str(dataset.id), "chat_limit": 30}, context)
+    monkeypatch.setattr("pathlib.Path.exists", lambda _path: False)
+
+    result = _call("inspect_dataset", {"dataset": str(dataset.id), "cell_limit": 20}, context)
     by_name = _call("inspect_dataset", {"dataset": dataset.name}, context)
 
     assert result.isError is False
@@ -259,18 +171,9 @@ def test_inspect_is_bounded_ordered_and_refuses_an_ambiguous_name():
     assert [cell["position"] for cell in body["cells"]] == [0, 1]
     assert body["active"]["id"] == str(active.id)
     assert len(body["capability_rank"]) == 20
-    assert len(body["recent_chat"]) == 30
-    assert body["recent_chat"][0]["text"] == "5"
-    assert body["next_actions"] == [
-        {
-            "tool": "run_dataset",
-            "reason": "User must approve or deny (decision=deny) this proposed cell.",
-            "arguments": {
-                "dataset": str(dataset.id),
-                "proposal_cell": str(dataset.cells.get(position=1).id),
-            },
-        }
-    ]
+    assert "recent_chat" not in body
+    assert body["next_actions"][0]["tool"] == "check_evaluation_readiness"
+    assert body["next_actions"][0]["arguments"]["cell"] == str(active.id)
     assert by_name.isError is False
     assert by_name.structuredContent["id"] == str(dataset.id)
     Dataset.objects.create(project=context.project, name=dataset.name)
@@ -283,13 +186,12 @@ def test_inspect_is_bounded_ordered_and_refuses_an_ambiguous_name():
     ("state", "tool"),
     [
         (Dataset.State.LANDING, "get_job"),
-        (Dataset.State.DIAGNOSING, "get_job"),
         (Dataset.State.RUNNING, "get_job"),
-        (Dataset.State.ERROR, "message_dataset_agent"),
+        (Dataset.State.ERROR, "inspect_dataset_workbench"),
     ],
 )
 def test_inspect_next_action_follows_dataset_state(state: str, tool: str):
-    context = mcp_context(("read", "write"))
+    context = _context()
     dataset = _dataset(context, state=state, error="/private/tmp/secret.parquet")
 
     result = _call("inspect_dataset", {"dataset": str(dataset.id)}, context)
@@ -298,14 +200,19 @@ def test_inspect_next_action_follows_dataset_state(state: str, tool: str):
     assert "/private/tmp" not in json.dumps(result.structuredContent)
 
 
-def test_query_is_project_and_cell_scoped_read_only_and_capped():
-    context = mcp_context(("read", "write"))
-    dataset = frozen_dataset(
-        context.project, [{"input": str(n), "expected_output": "x"} for n in range(150)]
-    )
-    cell = dataset.active_cell
+def test_query_is_project_and_cell_scoped_read_only_and_capped(monkeypatch):
+    context = _context()
+    dataset = _dataset(context)
+    cell = _ran_cell(dataset)
     foreign_dataset = _dataset(context, "Foreign dataset")
     foreign_cell = _ran_cell(foreign_dataset)
+    calls = []
+
+    def query(sql, *, limit, **tables):
+        calls.append((sql, limit, tables))
+        return {"columns": ["input"], "rows": [{"input": str(n)} for n in range(limit)]}
+
+    monkeypatch.setattr(tools_datasets.store, "query", query)
     ok = _call(
         "query_dataset",
         {"dataset": str(dataset.id), "cell": str(cell.id), "sql": "select input from t"},
@@ -326,6 +233,7 @@ def test_query_is_project_and_cell_scoped_read_only_and_capped():
     assert len(ok.structuredContent["rows"]) == 100
     assert ok.structuredContent["columns"] == ["input"]
     assert ok.structuredContent["truncated"] is True
+    assert calls[0][1] == 101
     assert foreign.structuredContent["error"]["code"] == "cell_not_found"
     assert write.structuredContent["error"]["code"] == "query_invalid"
 
@@ -345,7 +253,7 @@ def _root_span(project, trace_id: str) -> Span:
 
 
 def test_trace_creation_refuses_unknown_filters_mixed_sources_and_empty_selections():
-    context = mcp_context(("read", "write"))
+    context = _context()
     unknown = _call(
         "create_dataset_from_traces",
         {"name": "Trace set", "filters": {"capability_name": "x"}},
@@ -371,7 +279,7 @@ def test_trace_creation_refuses_unknown_filters_mixed_sources_and_empty_selectio
 @pytest.mark.parametrize("split", [False, True])
 @pytest.mark.parametrize("choice", ["automatic", "none", "selected"])
 def test_trace_creation_respects_the_capability_choice(split, choice):
-    context = mcp_context(("read", "write"))
+    context = _context()
     matched = Capability.objects.create(project=context.project, name="Matched", slug="matched")
     selected = Capability.objects.create(project=context.project, name="Selected", slug="selected")
     trace_ids = [uuid.uuid4().hex for _ in range(4)]
@@ -397,10 +305,23 @@ def test_trace_creation_respects_the_capability_choice(split, choice):
         assert dataset.capability_rank[0]["capability_id"] == str(matched.id)
 
 
-def test_trace_creation_returns_a_dataset_run_receipt():
-    context = mcp_context(("read", "write"))
+def test_trace_creation_returns_a_dataset_run_receipt(monkeypatch):
+    context = _context()
     Capability.objects.create(project=context.project, name="Support", slug="support")
     _root_span(context.project, "b" * 32)
+    sources = []
+
+    def create_dataset(**kwargs):
+        sources.append(kwargs["source"])
+        return _dataset(
+            context,
+            kwargs["name"],
+            capability=kwargs.get("capability"),
+            intent=kwargs.get("intent") or Dataset.Intent.PENDING,
+            state=Dataset.State.LANDING,
+        )
+
+    monkeypatch.setattr(tools_datasets.dispatch, "create_dataset", create_dataset)
 
     traces = _call(
         "create_dataset_from_traces",
@@ -418,89 +339,11 @@ def test_trace_creation_returns_a_dataset_run_receipt():
             link["uri"] for link in body["resource_links"]
         }
         assert body["traces"] == 1
-    dataset = Dataset.objects.get(pk=traces.structuredContent["dataset"]["id"])
-    assert dataset.state == Dataset.State.IDLE, dataset.error
-    assert dataset.active_cell.rows == 1
-
-
-def test_message_agent_refuses_busy_then_queues_one_turn(monkeypatch):
-    context = mcp_context(("read", "write"))
-    dataset = _dataset(context, state=Dataset.State.LANDING)
-    queued = []
-    monkeypatch.setattr(
-        "overbae.tasks.datasets.turn.apply_async",
-        lambda **kwargs: queued.append(kwargs),
-    )
-
-    busy = _call(
-        "message_dataset_agent",
-        {"dataset": str(dataset.id), "message": "Shape this"},
-        context,
-    )
-    Dataset.objects.filter(pk=dataset.pk).update(state=Dataset.State.IDLE)
-    queued_result = _call(
-        "message_dataset_agent",
-        {"dataset": str(dataset.id), "message": "Shape this"},
-        context,
-    )
-
-    dataset.refresh_from_db()
-    assert busy.structuredContent["error"]["code"] == "dataset_busy"
-    assert queued_result.isError is False
-    assert dataset.state == Dataset.State.DIAGNOSING
-    assert len(queued) == 1
-
-
-def test_run_accepts_only_a_proposal_from_that_dataset(monkeypatch):
-    context = mcp_context(("read", "write"))
-    dataset = _dataset(context)
-    land.land_rows(dataset, [{"input": "question", "expected_output": "answer"}])
-    dataset.refresh_from_db()
-    proposed = agent.Tools(dataset.id, None, lambda _: None).add_cell(
-        {"title": "Proposal", "script": "df['expected_output'] = 'unknown'", "kind": "semantic"}
-    )
-    proposal = dataset.cells.get(pk=proposed["id"])
-    other = _dataset(context, "Other")
-    foreign = Cell.objects.create(
-        dataset=other,
-        position=0,
-        title="Foreign proposal",
-        state=Cell.State.PROPOSED,
-    )
-    queued = []
-    monkeypatch.setattr(
-        "overbae.tasks.datasets.run.apply_async",
-        lambda **kwargs: queued.append(kwargs),
-    )
-
-    rejected = _call(
-        "run_dataset",
-        {"dataset": str(dataset.id), "proposal_cell": str(foreign.id)},
-        context,
-    )
-    accepted = _call(
-        "run_dataset",
-        {"dataset": str(dataset.id), "proposal_cell": str(proposal.id)},
-        context,
-    )
-
-    assert rejected.structuredContent["error"]["code"] == "cell_not_found"
-    assert accepted.isError is False
-    assert accepted.structuredContent["dataset"]["state"] == Dataset.State.RUNNING
-    assert len(queued) == 1
-    repeated = _call(
-        "run_dataset",
-        {"dataset": str(dataset.id), "proposal_cell": str(proposal.id)},
-        context,
-    )
-    assert repeated.isError is False
-    assert len(queued) == 1
-    definition = next(d for d in CATALOG.definitions() if d.name == "run_dataset")
-    assert definition.cost_class == "llm"
+    assert sources == [{"traces": {"trace_ids": ["b" * 32]}}]
 
 
 def test_dataset_tool_text_is_complete_structured_json():
-    context = mcp_context(("read", "write"))
+    context = _context()
     _dataset(context)
 
     result = _call("list_datasets", {}, context)
@@ -509,7 +352,7 @@ def test_dataset_tool_text_is_complete_structured_json():
 
 
 def test_list_and_inspect_map_legacy_ft_intent():
-    context = mcp_context(("read", "write"))
+    context = _context()
     dataset = _dataset(context, name="Old train", intent="ft")
 
     listed = _call("list_datasets", {}, context)
@@ -550,7 +393,7 @@ def _llm_span(project, capability, text="hello"):
 
 
 def test_llm_call_creation_refuses_an_empty_selection():
-    context = mcp_context(("read", "write"))
+    context = _context()
     capability = Capability.objects.create(project=context.project, name="Support", slug="support")
     result = _call(
         "create_dataset_from_llm_calls",
@@ -569,7 +412,7 @@ def test_llm_call_creation_refuses_an_empty_selection():
 def test_llm_call_creation_lands_one_row_per_call():
     from django.utils import timezone
 
-    context = mcp_context(("read", "write"))
+    context = _context()
     capability = Capability.objects.create(project=context.project, name="Support", slug="support")
     _llm_span(context.project, capability, text="recorded")
     result = _call(

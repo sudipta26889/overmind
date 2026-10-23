@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import timedelta
 from typing import Any
 
@@ -12,12 +11,12 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.db.models import Q
 from django.utils import timezone
 
+from overbae.api.otlp import enqueue_scoring
 from overbae.services.connectors.schema import CONNECTOR_VERSION_ATTR
 from overbae.services.span_pricing import stamp_span_cost
 
 logger = logging.getLogger(__name__)
 
-_LEASE_SECONDS = int(os.environ.get("CONNECTOR_LEASE_SECONDS", "600"))
 _BACKOFF_BASE_SECONDS = 30
 # Generous enough that a user reading docs mid-setup never loses their draft.
 _DRAFT_TTL = timedelta(hours=24)
@@ -25,6 +24,9 @@ _BACKOFF_CAP_SECONDS = 3600
 _MAX_SYNC_RETRIES = 12
 _CHUNK_HARD_TIME_LIMIT = 60 * 20
 _CHUNK_SOFT_TIME_LIMIT = 60 * 18
+# A lease that ends before the hard limit lets the poller start a second chunk on
+# the same cursor while the first still runs.
+_LEASE_SECONDS = _CHUNK_HARD_TIME_LIMIT + 120
 
 
 def _match_capabilities_by_name(project, spans: list) -> None:
@@ -149,12 +151,10 @@ def _upsert_spans(project, span_dicts: list[dict[str, Any]], credential=None, jo
         Span.objects.bulk_update(updated_spans, [*_UPDATE_FIELDS, "conversation"])
 
     if new_spans:
-        from overbae.api.otlp import enqueue_trace_scoring
-
         _match_capabilities_by_name(project, new_spans)
         _stamp_conversations(project, new_spans)
         Span.objects.bulk_create(new_spans, ignore_conflicts=True)
-        enqueue_trace_scoring(new_spans)
+        enqueue_scoring(new_spans)
     return len(new_spans)
 
 
@@ -224,6 +224,16 @@ def _apply_backoff(credential, exc: Exception) -> dict:
         exc,
     )
     return {"status": "error", "retry_after": delay, "error": str(exc)}
+
+
+def _schedule_next_chunk(credential) -> None:
+    from overbae.models import ConnectorCredential
+
+    # The chunk that is already running passed the active check at entry.
+    # Deactivation has to stop the continuation it is about to publish.
+    if not ConnectorCredential.objects.filter(pk=credential.pk, is_active=True).exists():
+        return
+    sync_connector_chunk.apply_async(args=[str(credential.id)], countdown=2)
 
 
 def _run_adapter_chunk(credential, cursor: dict) -> dict:
@@ -330,7 +340,7 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
         last_synced_at=timezone.now(),
         next_poll_at=None,
     )
-    sync_connector_chunk.apply_async(args=[str(credential.id)], countdown=2)
+    _schedule_next_chunk(credential)
     return {
         "status": "live_continuing" if page.mode == "live" else "backfilling",
         "imported": imported if page.mode == "live" else new_traces,
@@ -374,7 +384,7 @@ def sync_connector_chunk(credential_id: str) -> dict:
         return _run_adapter_chunk(credential, cursor)
     except SoftTimeLimitExceeded:
         ConnectorCredential.objects.filter(pk=credential.pk).update(next_poll_at=None)
-        sync_connector_chunk.apply_async(args=[str(credential.id)], countdown=2)
+        _schedule_next_chunk(credential)
         return {"status": "soft_timeout_resumed"}
     except Exception as exc:
         return _apply_backoff(credential, exc)

@@ -1,8 +1,7 @@
 """Landing: rows arrive verbatim as cell 0, stamped with ``source_row``.
 
-A trace source lands one row per trace: the traces-table facts, the wire
-transcript, the delivered I/O and the trace's score. Landing never rejects a
-row and never triggers scoring. It proposes the capability rank and the intent.
+A trace source lands one row per trace, scoped to the selected capability when
+present. Ambiguous invocations fail before publication. Landing never triggers scoring.
 """
 
 from __future__ import annotations
@@ -10,19 +9,31 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import shutil
 import tempfile
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 from django.db import transaction
 from django.utils import timezone
 
-from overbae.models import Cell, Dataset, TaskExecution
+from overbae.models import Cell, Dataset
 from overbae.models.traces import Span
-from overbae.services.datasets import alignment, contract, files, measure, paths, selection, store
+from overbae.services.datasets import (
+    alignment,
+    contract,
+    documents,
+    files,
+    measure,
+    operations,
+    paths,
+    selection,
+    store,
+)
 from overbae.services.datasets.partition import preserve_lineage, split_rows
 
 logger = logging.getLogger(__name__)
@@ -39,7 +50,7 @@ SPLIT_POSITIONS = ("head", "tail", "random")
 class Landing:
     """A source read once: the rows and how they arrived."""
 
-    rows: list[dict[str, Any]]
+    rows: Iterable[dict[str, Any]]
     kind: str = "file"
     spec: dict[str, Any] = field(default_factory=dict)
     manifest: list[dict] | None = None
@@ -67,10 +78,12 @@ class Landing:
         return replace(self, rows=train, spec=spec), replace(self, rows=evaluation, spec=spec)
 
 
-def _stamp_source_rows(rows: list[dict[str, Any]]) -> None:
+def _stamp_source_rows(rows):
     for offset, row in enumerate(rows):
+        row = dict(row)
         row[store.SOURCE_ROW] = offset
         row["_overmind_provenance"] = preserve_lineage(row)
+        yield row
 
 
 @dataclass
@@ -80,22 +93,39 @@ class PreparedLanding:
     path: Path
     dataset_fields: dict[str, Any]
     cell_fields: dict[str, Any]
+    sources: list[dict]
 
 
 def prepare(dataset, landing, *, path, state=Dataset.State.IDLE, infer_capability=True):
-    rows = landing.rows
-    _stamp_source_rows(rows)
     manifest = landing.manifest
     if manifest and not any(column["name"] == "_overmind_provenance" for column in manifest):
         manifest = [*manifest, {"name": "_overmind_provenance", "type": "json"}]
-    store.write_rows(path, rows, manifest)
-    df = store.read_frame(path)
+
+    def checked_rows():
+        for index, row in enumerate(_stamp_source_rows(landing.rows)):
+            if index % 1000 == 0:
+                operations.check_cancelled(dataset.id)
+            yield row
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    store.write_rows(path, checked_rows(), manifest)
+    operations.check_cancelled(dataset.id)
+    sources = landing.spec.get("sources", [])
     fields = {
         "source_kind": landing.kind,
-        "source_spec": {**landing.spec, "landed_at": timezone.now().isoformat()},
+        "source_spec": {
+            **landing.spec,
+            "sources": [
+                {key: value for key, value in source.items() if key != "staged_path"}
+                for source in sources
+            ],
+            "landed_at": timezone.now().isoformat(),
+        },
         "state": state,
         "error": "",
-        "capability_rank": alignment.rank(dataset.project_id, df),
+        "capability_rank": alignment.rank(
+            dataset.project_id, pd.DataFrame.from_records(store.head(path, 500))
+        ),
     }
     measured = Dataset.objects.select_related("capability").get(pk=dataset.pk)
     if infer_capability and measured.capability_id is None and fields["capability_rank"]:
@@ -103,10 +133,6 @@ def prepare(dataset, landing, *, path, state=Dataset.State.IDLE, infer_capabilit
         if best["score"] > 0:
             fields["capability_id"] = best["capability_id"]
             measured.capability_id = best["capability_id"]
-    report = contract.measure(df)
-    if measured.intent == Dataset.Intent.PENDING:
-        fields["intent"] = contract.propose_intent(df, report)
-        measured.intent = fields["intent"]
     source = dataset.cells.filter(position=0).first()
     return PreparedLanding(
         dataset.pk,
@@ -114,10 +140,11 @@ def prepare(dataset, landing, *, path, state=Dataset.State.IDLE, infer_capabilit
         path,
         fields,
         {
-            **measure.describe_frame(measured, path, df=df, report=report),
+            **measure.describe_frame(measured, path, report=contract.measure_path(path)),
             "input_fingerprint": "",
             "seconds": 0.0,
         },
+        sources,
     )
 
 
@@ -126,9 +153,15 @@ def publish(dataset, prepared, *, user=None):
     if prepared.dataset_id != dataset.pk:
         raise LandError("The prepared source belongs to another dataset.")
     locked = Dataset.objects.select_for_update().get(pk=dataset.pk)
+    operations.check_cancelled(locked.pk)
     source = locked.cells.filter(position=0).first()
     if source is not None and source.pk != prepared.cell_id:
         raise LandError("The source changed before publication.")
+    for artifact in prepared.sources:
+        if artifact.get("staged_path"):
+            destination = paths.source_path(locked.pk, artifact["id"])
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(artifact["staged_path"], destination)
     destination = paths.cell_path(locked.pk, prepared.cell_id)
     destination.parent.mkdir(parents=True, exist_ok=True)
     prepared.path.replace(destination)
@@ -142,14 +175,17 @@ def publish(dataset, prepared, *, user=None):
             **prepared.cell_fields,
         )
     else:
-        Cell.objects.filter(pk=source.pk).update(**prepared.cell_fields)
+        fields = dict(prepared.cell_fields)
+        if source.preparation_plan:
+            fields["preparation_plan"] = {
+                **source.preparation_plan,
+                "result_fingerprint": fields["fingerprint"],
+            }
+        Cell.objects.filter(pk=source.pk).update(**fields)
     Dataset.objects.filter(pk=locked.pk).update(
         **prepared.dataset_fields, updated_at=timezone.now()
     )
     dataset.refresh_from_db()
-    from overbae.services.eval.eval_set import maybe_enqueue_card_evaluator_sync
-
-    maybe_enqueue_card_evaluator_sync(dataset)
     return dataset
 
 
@@ -167,28 +203,143 @@ def commit(dataset, landing, *, user=None, state=Dataset.State.IDLE, infer_capab
         return publish(dataset, prepared, user=user)
 
 
-def read_file(path: Path, *, filename: str) -> Landing:
+def read_file(
+    path: Path,
+    *,
+    filename: str,
+    on_progress: Callable[[dict], None] | None = None,
+    json_rows_field: str | None = None,
+    project_id=None,
+    ocr_languages=None,
+) -> Landing:
+    spool = None
+
+    def progress(detail):
+        if on_progress:
+            on_progress({"filename": filename, **detail})
+
+    progress(
+        {"stage": "extracting" if filename.lower().endswith(documents.SUFFIXES) else "reading"}
+    )
     try:
-        rows = files.read_file_rows(path, filename=filename)
-    except files.FileError as exc:
+        if filename.lower().endswith(documents.SUFFIXES):
+            extracted, extraction = documents.extract(
+                path,
+                filename=filename,
+                on_progress=progress,
+                project_id=project_id,
+                ocr_languages=ocr_languages,
+            )
+            spool = tempfile.TemporaryDirectory(prefix="overmind-document-")
+            cached = Path(spool.name) / "extracted.jsonl"
+            with cached.open("w") as output:
+                for row in extracted:
+                    output.write(json.dumps(row) + "\n")
+            rows = files.FileRows(cached, filename="extracted.jsonl")
+        else:
+            rows = files.FileRows(path, filename=filename, json_rows_field=json_rows_field)
+            extraction = (
+                {"json_rows_field": json_rows_field, "selection": "explicit"}
+                if json_rows_field
+                else {}
+            )
+    except (files.FileError, documents.DocumentError) as exc:
+        progress({"stage": "failed"})
         raise LandError(str(exc)) from exc
     if not rows:
         raise LandError("The file has no rows.")
-    return read_rows(rows, spec={"filename": filename})
+    identity = store.file_sha256(path)
+    artifact = {
+        "id": identity,
+        "sha256": identity,
+        "filename": filename,
+        "bytes": files.stored_stat(path).st_size,
+        "rows": len(rows),
+        "extraction": extraction,
+        "staged_path": str(path),
+    }
+    return Landing(
+        EvidenceRows(rows, identity, filename, spool),
+        spec={"filename": filename, "sources": [artifact]},
+    )
 
 
-def read_uploads(upload_ids: list[str]) -> Landing:
-    rows: list[dict[str, Any]] = []
+@dataclass
+class EvidenceRows:
+    source: files.FileRows
+    identity: str
+    filename: str
+    spool: tempfile.TemporaryDirectory | None = field(default=None, repr=False)
+
+    def __len__(self):
+        return len(self.source)
+
+    def __getitem__(self, index):
+        for offset, row in enumerate(self):
+            if offset == index:
+                return row
+        raise IndexError(index)
+
+    def __iter__(self):
+        for offset, original in enumerate(self.source):
+            row = dict(original)
+            row["_overmind_provenance"] = {
+                **preserve_lineage(row),
+                "file": {"sha256": self.identity, "filename": self.filename, "row": offset},
+            }
+            yield row
+
+
+@dataclass
+class UploadRows:
+    sources: list[EvidenceRows]
+
+    def __len__(self):
+        return sum(len(source) for source in self.sources)
+
+    def __iter__(self):
+        for source in self.sources:
+            yield from source
+
+
+def read_uploads(
+    upload_ids: list[str],
+    *,
+    on_progress: Callable[[dict], None] | None = None,
+    project_id=None,
+    ocr_languages=None,
+) -> Landing:
+    parts = []
     sources = []
-    for upload_id in upload_ids:
+    for index, upload_id in enumerate(upload_ids):
         filename = files.upload_filename(upload_id)
         path = files.upload_data_path(upload_id)
         if not filename or not path.exists():
             raise LandError("An upload has expired. Start it again.")
-        part = read_file(path, filename=filename)
-        sources.append({"filename": filename, "bytes": path.stat().st_size, "rows": len(part.rows)})
-        rows.extend(part.rows)
-    return read_rows(rows, spec={"files": sources})
+
+        def progress(detail, index=index):
+            if on_progress:
+                on_progress({"completed": index, "total": len(upload_ids), **detail})
+
+        part = read_file(
+            path,
+            filename=filename,
+            on_progress=progress,
+            project_id=project_id,
+            ocr_languages=ocr_languages,
+            json_rows_field=(files.inspection(upload_id) or {}).get("json_rows_field"),
+        )
+        sources.extend(part.spec["sources"])
+        parts.append(part.rows)
+    if on_progress:
+        on_progress({"completed": len(upload_ids), "total": len(upload_ids), "stage": "merging"})
+    return Landing(
+        UploadRows(parts),
+        spec={
+            "sources": sources,
+            "files": [{k: item[k] for k in ("filename", "bytes", "rows")} for item in sources],
+        },
+    )
 
 
 def read_rows(rows: list[dict[str, Any]], *, spec: dict[str, Any] | None = None) -> Landing:
@@ -245,15 +396,18 @@ def _attr(span: Span, key: str) -> Any:
 
 
 def _root(spans: list[Span]) -> Span:
-    """The parentless span; an interrupted trace has none, so its longest span stands in."""
     for span in spans:
         if span.parent_span_id is None:
             return span
+    ids = {span.span_id for span in spans}
+    roots = [span for span in spans if span.parent_span_id not in ids]
+    if len(roots) == 1:
+        return roots[0]
     return max(spans, key=lambda s: s.duration_ns or 0)
 
 
 def _delivered(spans: list[Span]) -> Any:
-    from overbae.services.eval import chatml
+    from overbae.services.transcripts import chatml
 
     for span in sorted(spans, key=lambda s: s.start_time_ns or 0, reverse=True):
         if str(_attr(span, "overmind.delivery")).lower() == "true":
@@ -275,7 +429,7 @@ def _first(usage: dict[str, Any], keys: tuple[str, ...]) -> float:
 def _usage(spans: list[Span]) -> dict[str, Any]:
     """Summed over the trace from ``Span.usage``, which keeps the attribute names
     as sent (``genai.prompt_tokens``, ``gen_ai.usage.input_tokens``, ...)."""
-    from overbae.services.eval import chatml
+    from overbae.services.transcripts import chatml
 
     prompt = completion = 0
     cost = 0.0
@@ -307,10 +461,11 @@ def _error(root: Span, spans: list[Span]) -> str | None:
     return None
 
 
-def trace_row(spans: list[Span], *, score: float | None) -> dict[str, Any]:
-    """One row for one trace: the traces-table facts, the wire transcript and the
-    capability's delivered I/O. ``spans`` is the whole trace in start order."""
-    from overbae.services.eval import chatml, normalizer
+def trace_row(
+    spans: list[Span], *, score: float | None, capability_id: str | None = None
+) -> dict[str, Any]:
+    """``spans`` is one whole trace or selected invocation in start order."""
+    from overbae.services.transcripts import chatml, normalizer
 
     root = _root(spans)
     trajectory = normalizer.reconstruct_spans(spans, promote_harness=True)
@@ -321,7 +476,14 @@ def trace_row(spans: list[Span], *, score: float | None) -> dict[str, Any]:
     raw_in, raw_out = normalizer.capability_io(spans)
     delivered = _delivered(spans)
     usage = _usage(spans)
-    capability = root.capability or next((s.capability for s in spans if s.capability_id), None)
+    capabilities = {s.capability_id: s.capability for s in spans if s.capability_id}
+    capability = (
+        root.capability
+        if capability_id and str(root.capability_id) == capability_id
+        else next(iter(capabilities.values()))
+        if len(capabilities) == 1
+        else None
+    )
     conversation = next(
         (s.conversation.external_id for s in (root, *spans) if s.conversation_id), None
     )
@@ -358,22 +520,54 @@ def _chunks(items: Iterable[str], size: int) -> Iterator[list[str]]:
         yield batch
 
 
-def _scores(project_id: Any, trace_ids: list[str]) -> dict[str, float]:
-    """The trace's score is its last scored task execution: the terminal unit of a
-    single-task trace, the latest turn of a session."""
-    rows = (
-        TaskExecution.objects.filter(project_id=project_id, trace_id__in=trace_ids)
-        .exclude(success_score=None)
-        .order_by("started_at", "created_at")
-        .values_list("trace_id", "success_score")
+def _score(spans: list[Span]) -> float | None:
+    # Scoped imports use their invocation root, never a sibling or enclosing trace score.
+    attrs = _root(spans).eval_attributes or {}
+    return (attrs.get("trajectory") or {}).get("score", attrs.get("score"))
+
+
+def _ancestors(spans: list[Span], unit: Span) -> list[Span]:
+    by_id = {span.span_id: span for span in spans}
+    seen = {unit.span_id}
+    chain = []
+    cursor = by_id.get(unit.parent_span_id or "")
+    while cursor is not None and cursor.span_id not in seen:
+        seen.add(cursor.span_id)
+        chain.append(cursor)
+        cursor = by_id.get(cursor.parent_span_id or "")
+    return chain
+
+
+def _preferred_spans(spans: list[Span], capability_id: str | None) -> list[Span]:
+    if not capability_id:
+        return spans
+    matches = [s for s in spans if str(s.capability_id) == capability_id]
+    if not matches:
+        return spans
+    roots = [
+        s
+        for s in matches
+        if not any(str(a.capability_id) == capability_id for a in _ancestors(spans, s))
+    ]
+    if len(roots) != 1:
+        raise LandError(
+            f"Trace {spans[0].trace_id} has {len(roots)} separate invocations of the selected "
+            "capability. Select LLM calls or import explicit invocation rows."
+        )
+    return sorted(
+        [s for s in spans if s == roots[0] or roots[0] in _ancestors(spans, s)],
+        key=lambda s: s.start_time_ns or 0,
     )
-    return dict(rows)
 
 
 def iter_trace_rows(
-    project_id: Any, trace_ids: Iterable[str], *, on_progress: Any = None
+    project_id: Any,
+    trace_ids: Iterable[str],
+    *,
+    on_progress: Any = None,
+    preferred_capability_id: str | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Two queries per chunk of traces, then pure assembly; a trace whose spans
+    """One query per chunk of traces, then pure assembly; a trace whose spans
     are gone is skipped."""
     done = 0
     for chunk in _chunks(trace_ids, TRACE_CHUNK):
@@ -385,13 +579,14 @@ def iter_trace_rows(
         by_trace: dict[str, list[Span]] = {}
         for span in spans:
             by_trace.setdefault(span.trace_id, []).append(span)
-        scores = _scores(project_id, chunk)
         for trace_id in chunk:
             trace_spans = by_trace.get(trace_id)
             if not trace_spans:
                 continue
+            scoped = _preferred_spans(trace_spans, preferred_capability_id)
+            score = _score(scoped)
             try:
-                row = trace_row(trace_spans, score=scores.get(trace_id))
+                row = trace_row(scoped, score=score, capability_id=preferred_capability_id)
             except Exception:  # noqa: BLE001 — one unreadable trace must not sink the batch
                 logger.warning("trace %s did not land", trace_id, exc_info=True)
                 continue
@@ -406,7 +601,12 @@ def read_traces(project_id: Any, spec: dict[str, Any], *, on_progress: Any = Non
     try:
         source = selection.TraceSource.parse(spec)
         rows = list(
-            iter_trace_rows(project_id, source.iter_trace_ids(project_id), on_progress=on_progress)
+            iter_trace_rows(
+                project_id,
+                source.iter_trace_ids(project_id),
+                on_progress=on_progress,
+                preferred_capability_id=source.preferred_capability_id,
+            )
         )
     except selection.TraceSourceError as exc:
         raise LandError(str(exc)) from exc
@@ -424,6 +624,9 @@ def land_traces(
     user: Any = None,
     on_progress: Any = None,
 ) -> Dataset:
+    from overbae.services.datasets.dispatch import _trace_preference
+
+    spec = _trace_preference({"traces": spec}, dataset.capability_id)["traces"]
     return commit(
         dataset, read_traces(dataset.project_id, spec, on_progress=on_progress), user=user
     )

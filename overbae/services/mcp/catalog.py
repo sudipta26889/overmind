@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import json
 import logging
+import time
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, Literal
 
@@ -23,7 +25,17 @@ CostClass = Literal["free", "compute", "llm", "gpu"]
 AsyncMode = Literal["sync", "job", "task"]
 _TOOL_NAME = r"^[a-z][a-z0-9_]{0,63}$"
 _FORBIDDEN_NAME_PARTS = ("delete", "remove", "cancel", "retry", "undeploy")
-_ALLOWED_LIFECYCLE_TOOLS = frozenset({"retry_deployment"})
+_ALLOWED_LIFECYCLE_TOOLS = frozenset(
+    {
+        "retry_deployment",
+        "delete_eval_matrix_row",
+        "cancel_dataset",
+        "retry_data_partition",
+        "cancel_dataset_pipeline_run",
+        "cancel_finetune",
+    }
+)
+_DESTRUCTIVE_TOOLS = frozenset({"cancel_dataset", "delete_eval_matrix_row"})
 _SCHEMA_NOISE_KEYS = frozenset({"default", "discriminator", "title"})
 _KNOWN_SCOPES = frozenset(
     {
@@ -35,6 +47,7 @@ _KNOWN_SCOPES = frozenset(
         "overmind:deploy",
         "overmind:optimize",
         "overmind:connectors",
+        "overmind:account:write",
     }
 )
 
@@ -81,7 +94,7 @@ class ToolDefinition(BaseModel):
             part in self.name for part in _FORBIDDEN_NAME_PARTS
         ):
             raise CatalogError("destructive lifecycle tools are not supported")
-        if self.destructive:
+        if self.destructive != (self.name in _DESTRUCTIVE_TOOLS):
             raise CatalogError("destructive tools are not supported")
 
     def as_mcp_tool(self) -> types.Tool:
@@ -90,7 +103,6 @@ class ToolDefinition(BaseModel):
             schema.setdefault("properties", {})["project_id"] = {
                 "type": "string",
                 "format": "uuid",
-                "description": "Project ID from list_projects. Required for account connections.",
             }
         return types.Tool(
             name=self.name,
@@ -162,7 +174,19 @@ class ToolCatalog:
             if self._visible(entry.definition, permissions)
         ]
 
-    async def call(
+    async def call(self, name, arguments, context):
+        started = time.monotonic()
+        result = await self.invoke(name, arguments, context)
+        logger.info(
+            "MCP operation name=%s elapsed_ms=%.1f response_bytes=%d is_error=%s",
+            name,
+            (time.monotonic() - started) * 1000,
+            len(json.dumps(result.model_dump(mode="json"), separators=(",", ":")).encode()),
+            result.isError,
+        )
+        return result
+
+    async def invoke(
         self,
         name: str,
         arguments: dict[str, Any],
@@ -241,6 +265,10 @@ from overbae.services.mcp.tools_datasets import register_dataset_tools  # noqa: 
 
 register_dataset_tools(CATALOG)
 
+from overbae.services.mcp.tools_workbench import register_workbench_tools  # noqa: E402
+
+register_workbench_tools(CATALOG)
+
 from overbae.services.mcp.tools_evaluations import register_evaluation_tools  # noqa: E402
 
 register_evaluation_tools(CATALOG)
@@ -268,3 +296,11 @@ from overbae.services.mcp.tools_instrumentation import (  # noqa: E402
 )
 
 register_instrumentation_tools(CATALOG)
+
+from overbae.services.mcp.tools_model_workflows import register_model_workflow_tools  # noqa: E402
+
+register_model_workflow_tools(CATALOG)
+
+from overbae.services.mcp.tools_signals import register_signal_tools  # noqa: E402
+
+register_signal_tools(CATALOG)

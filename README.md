@@ -64,6 +64,8 @@ cp .env.example .env    # set the required keys below
 docker compose up -d    # Postgres, Redis, API on :8000, Console on :5173, Celery workers, beat, Grafana on :3001
 ```
 
+Document uploads include local English OCR for scanned PDFs, embedded images and direct PNG/JPEG/WebP uploads. Direct images are capped at 100 MB and 64 megapixels; animated images are not supported. The Docker image includes Tesseract and its English/orientation data. For workers or backend tests outside Docker, install `tesseract-ocr`, `tesseract-ocr-eng` and `tesseract-ocr-osd` on Debian/Ubuntu, or `brew install tesseract` on macOS. No external OCR service is required.
+
 On first boot the API runs migrations and seeds the built-in evaluators; Swagger is at `/api/docs/`. Sign in at `http://localhost:5173` with any email and password. `docker compose exec api python manage.py seed_demo --owner <your email>` loads a full demo workspace.
 
 <details>
@@ -71,22 +73,29 @@ On first boot the API runs migrations and seeds the built-in evaluators; Swagger
 
 The API refuses to start until every required key is set, and the error names each missing one. `.env.example` documents every key.
 
-| Required                                                        | Used for                                                                               |
-| --------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `OPENROUTER_API_KEY`                                            | Judges, evals, trace scoring, the Data Workshop, optimiser scoring, frontier inference |
-| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                          | Modal training and serving workers (`MODAL_ENVIRONMENT` defaults to `overmind-dev`)    |
-| `INFERENCE_API_URL`, `INFERENCE_API_KEY`                        | Serving trained models — the endpoint printed by `modal deploy` and its shared secret  |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET_NAME` | The fine-tuning checkpoint archive                                                     |
-| `HF_TOKEN`                                                      | Gated Hugging Face base models; also set it in the Modal secret                        |
+| Required                                                        | Used for                                                                              |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `OPENROUTER_API_KEY`                                            | Judges, evals, trace scoring, optimiser scoring, frontier inference                   |
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                          | Modal training and serving workers (set `MODAL_ENVIRONMENT` explicitly)               |
+| `INFERENCE_API_URL`, `INFERENCE_API_KEY`                        | Serving trained models — the endpoint printed by `modal deploy` and its shared secret |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET_NAME` | The fine-tuning checkpoint archive                                                    |
+| `HF_TOKEN`                                                      | Gated Hugging Face base models; also set it in the Modal secret                       |
 
-| Optional                              | Effect                                                                                 |
-| ------------------------------------- | -------------------------------------------------------------------------------------- |
-| `CURSOR_API_KEY`                      | Recommended for the Data Workshop: runs the dataset agent as a Cursor Composer session |
-| `OPENAI_API_KEY`                      | The `embedding_cosine` evaluator                                                       |
-| `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` | Fallback engines for the Data Workshop; unused while `OPENROUTER_API_KEY` is set       |
-| `STRIPE_SECRET_KEY`                   | Paid plans and the credit cap; without it, usage is metered with no cap                |
+| Optional            | Effect                                                                  |
+| ------------------- | ----------------------------------------------------------------------- |
+| `OPENAI_API_KEY`    | The `embedding_cosine` evaluator                                        |
+| `STRIPE_SECRET_KEY` | Paid plans and the credit cap; without it, usage is metered with no cap |
 
 Fine-tuning and serving also need the Modal workers deployed (`modal deploy overbae/modal/modal_vllm_worker.py`, `register_model.py` and `modal_sft_worker.py`) and a Modal secret named `overmind-inference` with the AWS keys, `INFERENCE_API_KEY` and `HF_TOKEN`.
+
+Self-hosted login uses email and password. Keep Clerk and Stripe secrets blank.
+Data Workshop transformations are authored by your native coding agent through MCP;
+the platform stores source files, immutable cell versions and execution receipts.
+There is no platform Workshop agent or ChatGPT account connection.
+Reusable scripts, cross-source revisions and continuous bindings use the dedicated
+[Workshop runtime and package protocol](docs/workshop-pipelines.md).
+See [self-hosting](https://docs.overmindlab.ai/platform/self-hosting) for configuration
+and private VM setup.
 
 </details>
 
@@ -118,11 +127,11 @@ def handle(request: dict, session_id: str) -> dict:
         return answer
 ```
 
-`providers="auto"` instruments the LLM SDKs you already use over OpenTelemetry; without a key, tracing is off and nothing breaks. Any OTel exporter can `POST /api/v1/traces` instead, and existing traces in Langfuse, LangSmith, Braintrust or Galileo can be synced through a connector. Open **Observability → Task executions** to see the trace and its score.
+`providers="auto"` instruments the LLM SDKs you already use over OpenTelemetry; without a key, tracing is off and nothing breaks. Any OTel exporter can `POST /api/v1/traces` instead, and existing traces in Langfuse, LangSmith, Braintrust or Galileo can be synced through a connector. Open **Observability** to see the trace and its score.
 
 ## Connect your coding agent
 
-Overmind ships an MCP server at `/api/mcp/` with tools, resources and prompts for the platform's agent workflows. Account API keys and OAuth connections can access every active project their account is authorized to use: call `list_projects`, then pass the selected `project_id` on project tools and resource URIs. Membership is checked on every operation. Project API keys remain limited to their configured project. Every tool declares what it costs to run (`free`, `compute`, `llm`, `gpu`) and none can delete anything.
+Overmind ships an MCP server at `/api/mcp/` with tools, resources and prompts for the platform's agent workflows. Account API keys and OAuth connections can access every active project their account is authorized to use: call `list_projects`, then pass the selected `project_id` on project tools and resource URIs. Membership is checked on every operation. Project API keys remain limited to their configured project. Every tool declares what it costs to run (`free`, `compute`, `llm`, `gpu`) and whether it is destructive. Evaluation matrix rows can be deleted through their scoped lifecycle tool.
 
 The [optional plugin](overmind/README.md#mcp-and-optional-plugins) packages the MCP connection, Overmind branding and nine workflow skills. OAuth connections remain authorized until revoked; access tokens expire after one hour and refresh tokens rotate. Direct MCP connections can use an API key without OAuth or a plugin.
 
@@ -186,17 +195,17 @@ http_headers = { "X-Api-Key" = "ovr_…" }
 <details>
 <summary><b>What the tools cover</b></summary>
 
-| Domain          | Tools                                                                                                                                                      |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Projects        | `list_projects`                                                                                                                                            |
-| Observability   | `inspect_capability_health`, `query_failures`, `query_traces`, `query_task_executions`, `get_job`                                                          |
-| Datasets        | `list_datasets`, `inspect_dataset`, `query_dataset`, `create_dataset_from_traces`, `create_dataset_from_llm_calls`, `message_dataset_agent`, `run_dataset` |
-| Evaluations     | `check_evaluation_readiness`, `upsert_evaluator`, `run_evaluation`, `compare_evaluations`, `annotate_evaluation_sample`                                    |
-| Training        | `check_finetune_readiness`, `estimate_finetune`, `start_finetune`, `retry_deployment`, `set_active_model`, `run_inference`, `get_model_swap_prompt`        |
-| Optimiser       | `check_optimizer_readiness`, `start_optimizer`, `inspect_optimizer_result`                                                                                 |
-| Connectors      | `inspect_connectors`, `configure_connector`, `sync_connector`                                                                                              |
-| Instrumentation | `get_instrumentation_plan`, `verify_instrumentation`                                                                                                       |
-| Catalog         | `get_model_catalog`                                                                                                                                        |
+| Domain          | Tools                                                                                                                                                                                                                                        |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Projects        | `list_projects`                                                                                                                                                                                                                              |
+| Observability   | `inspect_capability_health`, `query_failures`, `query_traces`, `query_task_executions`, `get_job`                                                                                                                                            |
+| Datasets        | `list_datasets`, `inspect_dataset`, `query_dataset`, `create_dataset_from_traces`, `create_dataset_from_llm_calls`, `inspect_dataset_workbench`, `save_dataset_pipeline`, `run_dataset_pipeline`, `import_dataset_version`, `update_dataset` |
+| Evaluations     | `check_evaluation_readiness`, `upsert_evaluator`, `run_evaluation`, `compare_evaluations`, `annotate_evaluation_sample`                                                                                                                      |
+| Training        | `check_finetune_readiness`, `estimate_finetune`, `start_finetune`, `retry_deployment`, `set_active_model`, `run_inference`, `get_model_swap_prompt`                                                                                          |
+| Optimiser       | `check_optimizer_readiness`, `start_optimizer`, `inspect_optimizer_result`                                                                                                                                                                   |
+| Connectors      | `inspect_connectors`, `configure_connector`, `sync_connector`                                                                                                                                                                                |
+| Instrumentation | `get_instrumentation_plan`, `verify_instrumentation`                                                                                                                                                                                         |
+| Catalog         | `get_model_catalog`                                                                                                                                                                                                                          |
 
 Prompts such as `investigate-capability`, `finetune-capability` and `ship-model` chain the tools into complete workflows.
 

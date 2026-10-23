@@ -13,13 +13,6 @@
  */
 
 import { mapValues } from '../runtime';
-import type { ChatTurn } from './ChatTurn';
-import {
-    ChatTurnFromJSON,
-    ChatTurnFromJSONTyped,
-    ChatTurnToJSON,
-    ChatTurnToJSONTyped,
-} from './ChatTurn';
 import type { DatasetSourceKindEnum } from './DatasetSourceKindEnum';
 import {
     DatasetSourceKindEnumFromJSON,
@@ -82,6 +75,12 @@ export interface Dataset {
     name: string;
     /**
      *
+     * @type {string}
+     * @memberof Dataset
+     */
+    readonly brief: string;
+    /**
+     *
      * @type {DatasetSourceKindEnum}
      * @memberof Dataset
      */
@@ -92,6 +91,12 @@ export interface Dataset {
      * @memberof Dataset
      */
     readonly sourceSpec: any | null;
+    /**
+     *
+     * @type {Array<string>}
+     * @memberof Dataset
+     */
+    ocrLanguages?: Array<string>;
     /**
      *
      * @type {string}
@@ -142,6 +147,18 @@ export interface Dataset {
     readonly readiness: DatasetReadiness | null;
     /**
      *
+     * @type {{ [key: string]: any; }}
+     * @memberof Dataset
+     */
+    readonly preparationPlan: { [key: string]: any; } | null;
+    /**
+     *
+     * @type {{ [key: string]: any; }}
+     * @memberof Dataset
+     */
+    readonly operation: { [key: string]: any; };
+    /**
+     *
      * @type {DatasetStateEnum}
      * @memberof Dataset
      */
@@ -158,12 +175,6 @@ export interface Dataset {
      * @memberof Dataset
      */
     readonly cells: Array<Cell>;
-    /**
-     *
-     * @type {Array<ChatTurn>}
-     * @memberof Dataset
-     */
-    readonly chat: Array<ChatTurn>;
     /**
      *
      * @type {number}
@@ -193,6 +204,7 @@ export function instanceOfDataset(value: object): value is Dataset {
     if (!('id' in value) || value['id'] === undefined) return false;
     if (!('project' in value) || value['project'] === undefined) return false;
     if (!('name' in value) || value['name'] === undefined) return false;
+    if (!('brief' in value) || value['brief'] === undefined) return false;
     if (!('sourceKind' in value) || value['sourceKind'] === undefined) return false;
     if (!('sourceSpec' in value) || value['sourceSpec'] === undefined) return false;
     if (!('capabilityName' in value) || value['capabilityName'] === undefined) return false;
@@ -200,10 +212,11 @@ export function instanceOfDataset(value: object): value is Dataset {
     if (!('activeVersion' in value) || value['activeVersion'] === undefined) return false;
     if (!('rows' in value) || value['rows'] === undefined) return false;
     if (!('readiness' in value) || value['readiness'] === undefined) return false;
+    if (!('preparationPlan' in value) || value['preparationPlan'] === undefined) return false;
+    if (!('operation' in value) || value['operation'] === undefined) return false;
     if (!('state' in value) || value['state'] === undefined) return false;
     if (!('error' in value) || value['error'] === undefined) return false;
     if (!('cells' in value) || value['cells'] === undefined) return false;
-    if (!('chat' in value) || value['chat'] === undefined) return false;
     if (!('createdBy' in value) || value['createdBy'] === undefined) return false;
     if (!('createdAt' in value) || value['createdAt'] === undefined) return false;
     if (!('updatedAt' in value) || value['updatedAt'] === undefined) return false;
@@ -223,8 +236,10 @@ export function DatasetFromJSONTyped(json: any, ignoreDiscriminator: boolean): D
         'id': json['id'],
         'project': json['project'],
         'name': json['name'],
+        'brief': json['brief'],
         'sourceKind': DatasetSourceKindEnumFromJSON(json['source_kind']),
         'sourceSpec': json['source_spec'],
+        'ocrLanguages': json['ocr_languages'] == null ? undefined : json['ocr_languages'],
         'capability': json['capability'] == null ? undefined : json['capability'],
         'capabilityName': json['capability_name'],
         'capabilityRank': json['capability_rank'],
@@ -233,10 +248,11 @@ export function DatasetFromJSONTyped(json: any, ignoreDiscriminator: boolean): D
         'activeVersion': json['active_version'],
         'rows': json['rows'],
         'readiness': DatasetReadinessFromJSON(json['readiness']),
+        'preparationPlan': json['preparation_plan'],
+        'operation': json['operation'],
         'state': DatasetStateEnumFromJSON(json['state']),
         'error': json['error'],
         'cells': ((json['cells'] as Array<any>).map(CellFromJSON)),
-        'chat': ((json['chat'] as Array<any>).map(ChatTurnFromJSON)),
         'createdBy': json['created_by'],
         'createdAt': (new Date(json['created_at'])),
         'updatedAt': (new Date(json['updated_at'])),
@@ -247,7 +263,7 @@ export function DatasetToJSON(json: any): Dataset {
     return DatasetToJSONTyped(json, false);
 }
 
-export function DatasetToJSONTyped(value?: Omit<Dataset, 'id'|'project'|'source_kind'|'source_spec'|'capability_name'|'capability_rank'|'active_version'|'rows'|'readiness'|'state'|'error'|'cells'|'chat'|'created_by'|'created_at'|'updated_at'> | null, ignoreDiscriminator: boolean = false): any {
+export function DatasetToJSONTyped(value?: Omit<Dataset, 'id'|'project'|'brief'|'source_kind'|'source_spec'|'capability_name'|'capability_rank'|'active_version'|'rows'|'readiness'|'preparation_plan'|'operation'|'state'|'error'|'cells'|'created_by'|'created_at'|'updated_at'> | null, ignoreDiscriminator: boolean = false): any {
     if (value == null) {
         return value;
     }
@@ -255,6 +271,7 @@ export function DatasetToJSONTyped(value?: Omit<Dataset, 'id'|'project'|'source_
     return {
 
         'name': value['name'],
+        'ocr_languages': value['ocrLanguages'],
         'capability': value['capability'],
         'intent': IntentEnumToJSON(value['intent']),
         'active': value['active'],

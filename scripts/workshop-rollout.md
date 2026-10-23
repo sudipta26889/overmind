@@ -1,63 +1,70 @@
-# Workshop capacity rollout
+# Workshop rollout
 
-Imports and workshop turns have separate capacity. Interactive work can fill all
-process slots while CPU and memory remain low. Generate the interactive plan with
-`python scripts/plan_workshop_capacity.py --cluster CLUSTER --min-capacity 1 --max-capacity 6 --alarm-topic-arn TOPIC --output PLAN`.
+This merge retires main's mutable Execution and separate DecisionJob runtimes.
+Their records, checkpoint references, costs and attachment metadata are archived;
+they do not become runnable native FinetuningJob models. The migration preserves
+cell IDs, source bytes and active selections. It refuses active legacy execution
+or decision jobs. This is a maintenance cutover, not a rolling schema change.
 
-Six workers is the default reviewed rollout bound, not a product limit. Larger
-bounds are configurable. Validate regional vCPU and subnet capacity, database
-connections, broker memory, provider concurrency, and deployment surge capacity
-before applying them. Four process slots per worker means that 250 simultaneous
-workshop tasks require at least 63 workers; that arithmetic is not a load-test
-result or a guarantee of provider throughput.
+## Infrastructure prerequisite
 
-Apply the reviewed target, backlog policy, age policy, and alarms using the same
-procedure as the landing plan. Add the age policy ARN to the queue-age alarm's
-actions. The control task's `overmind-queue-metrics` policy must include
-`ecs:DescribeServices` for the environment's interactive service; the landing
-planner generates that exact resource scope. Verify fresh interactive metrics
-before enabling the scaling policies. The backlog target is the worker's actual
-process count from `docker/worker-topology.json`.
+Retain main's Fargate services, isolated sandbox, five Celery worker profiles,
+per-project interactive admission, queue autoscaling and scale-in drain policy.
+The dedicated EC2/Docker controller proposed in cloud-platform PR #11 is not a
+dependency of this application release and must not be applied for this rollout.
 
-Keep dynamic scale-in suspended even when older CPU or memory policies exist.
-Long turns exceed ECS's 120-second container stop grace. Scale-out adds consumers;
-scale-in and deployments require draining the workers being removed.
+Landing and interactive workers need SANDBOX_URL and SANDBOX_TOKEN and network
+access to the sandbox. The sandbox gets no app credentials or media mounts and
+has no outbound route. Deploy the same immutable application image to all three.
+Its pinned libraries and offline tokenizer cache support retained packages and
+branch document/OCR fixes. There is no in-process parsing or script fallback.
 
-## First upgrade to execution clocks
+Existing Docker-pinned package revisions remain historical records. Register new
+revisions with the sandbox identity advertised by inspect_dataset_workbench; do
+not rewrite old manifests. Current recipes do not install dependencies at runtime.
 
-The additive migration cannot infer task identity from old chat. Do not run the
-ordinary consumer-first release for this one-time transition.
+## First cutover
 
-1. Hold the automatic deployment workflow while publishing the reviewed image.
-   Record its prior enabled state. After merge, restore that state and dispatch
-   **Deploy API** with `build_only=true` to build without deploying services.
-1. Apply migration 0015. Keep the existing interactive consumers and control
-   reaper running. Upgrade API and landing producers to the new image; verify
-   that all old API and landing tasks have stopped. The existing consumer accepts
-   the unchanged task arguments while new producers persist identity and clocks.
-1. Run `python manage.py check_workshop_transition --require-idle`. Leave the
-   consumers running until all existing work completes. Old interactive workers
-   can themselves publish proposal continuations, so a nonblank identity alone
-   is insufficient during this mixed-version window. This command only reads;
-   never purge, recreate, or invent an owner for an existing task.
-1. Protect the existing interactive ECS tasks from termination. Cancel only their
-   `interactive` consumer through Celery remote control, preserving active work.
-   Verify no active/reserved work was accepted during cancellation. If any was,
-   restore those consumers and repeat the idle barrier after it completes.
-   Run `check_workshop_transition --require-idle` again after cancellation. If
-   either check sees work, restore the old consumers and repeat the barrier.
-   This also drains continuations an old worker published while finishing.
-   Only then can subsequently queued jobs come exclusively from the upgraded
-   producers with their persisted task identities.
-1. Start healthy new interactive consumers on the reviewed image, release
-   protection only on the old idle tasks, and verify their retirement. Upgrade
-   control, beat, and the remaining services. Do not reduce desired capacity
-   while workers own jobs.
-1. Verify a real upload and follow-up through completion, separate queued/start
-   times, fresh queue metrics, bounded capacity, and all alarms. Restore the
-   deployment workflow's recorded enabled state before completing the rollout.
+1. Build the release image without deploying (`build_only`). Deploy the exact
+   pinned training, decision-serving and decision-evaluation worker releases.
+1. Put the public API in maintenance mode. Stop new submissions and the scheduler,
+   drain queued and active work, and reconcile all outstanding provider calls.
+   Record each ECS service's desired count and autoscaling settings. Suspend
+   autoscaling and stop API, all five workers, beat and sandbox; wait for running and
+   pending counts to reach zero. Do not discard broker messages or treat a remote
+   cancellation request as proof that work ended.
+1. Confirm a restorable PostgreSQL backup and retained media snapshot. Rehearse
+   against a disposable restored copy. The included validator also proves clean
+   and populated main/branch upgrades using loopback-only temporary databases:
+   `PYTHONPATH=. uv run python scripts/validate_migration_upgrade.py origin/main`
+   (repeat with the previous branch commit and `fresh`). It never targets the
+   application's database.
+1. Run `scripts/deploy_ecs.py preflight --cluster CLUSTER`, then
+   `scripts/deploy_ecs.py migrate --cluster CLUSTER --image IMMUTABLE_IMAGE`.
+   Preflight checks the currently deployed API release marker and refuses the
+   first schema cutover while old consumers are active; it never infers cutover
+   from a desired count of zero. Migration
+   archives legacy rows under transactional table locks before dropping fields.
+   No application container performs implicit database bootstrap.
+1. Deploy using `scripts/deploy_ecs.py deploy --cluster CLUSTER --image IMAGE --service SERVICE --desired-count RECORDED_COUNT`. Start sandbox, then
+   landing, the remaining workers (including interactive), beat,
+   and finally API. Restore recorded capacity explicitly; the script refuses to
+   guess counts for stopped services. Each deployment waits for readiness before
+   continuing. Keep maintenance mode until the checks below pass. Later automated
+   releases preserve desired counts and follow the same consumer-first ordering.
+1. Verify source upload/export, OCR, pipeline preview/publication/cancellation,
+   preparation, bounded training, held-out evaluation and inference through the
+   intended project-scoped MCP endpoint. Check sandbox runtime identity and interactive consumer health,
+   exact output cells and fingerprints, and source retention. Restore autoscaling
+   and traffic only after successful checks.
 
-Later deployments must still preserve busy workers, but every producer already
-stamps ownership and does not require this initial transition. Rollback to the
-previous image leaves the additive fields intact; repeat this transition before
-returning to strict consumers.
+Do not reverse the archival cutover against new writes. A failed cutover requires
+an explicitly reviewed forward repair, or restoring the matching database/media
+snapshot and previous application version while traffic remains stopped.
+
+## Local environment
+
+Before recreating services, inspect their physical Docker volume names. Preserve
+those names in the ignored local compose override; renaming a compose project
+must not switch an existing database or media volume. The repository's defaults
+are not proof of which volumes an older local installation currently uses.

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import itertools
+import json
 import threading
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,6 +28,12 @@ class _Method:
 
     async def aio(self, *args, **kwargs):
         return await sync_to_async(self._sync)(*args, **kwargs)
+
+
+class _IteratorMethod(_Method):
+    async def aio(self, *args, **kwargs):
+        for chunk in self._sync(*args, **kwargs):
+            yield chunk
 
 
 @dataclass
@@ -158,6 +169,8 @@ class FakeModal:
     calls: dict[str, FakeCall] = field(default_factory=dict)
     log: list[tuple[str, str, tuple, dict]] = field(default_factory=list)
     cancelled: list[tuple[str, dict]] = field(default_factory=list)
+    files: dict[str, bytes] = field(default_factory=dict)
+    dictionaries: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
     worker_stats: dict[str, Any] | BaseException | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -205,6 +218,28 @@ class FakeModal:
             def from_name(app: str, name: str, **_) -> FakeFunction:
                 return FakeFunction(cloud, app, name)
 
+        class Dict:
+            @staticmethod
+            def from_name(name, *, environment_name="", **_):
+                values = cloud.dictionaries.setdefault((environment_name, name), {})
+                return SimpleNamespace(get=_Method(values.get), put=_Method(values.__setitem__))
+
+        class Workspace:
+            @staticmethod
+            def from_context():
+                return SimpleNamespace(
+                    billing=SimpleNamespace(
+                        rates=_Method(
+                            lambda: {
+                                "gpu_hour_cost_h100": 3.95,
+                                "gpu_hour_cost_h200": 4.54,
+                                "cpu_hour_cost": 0.0473,
+                                "mem_gib_hour_cost": 0.008,
+                            }
+                        )
+                    )
+                )
+
         class FunctionCall:
             @staticmethod
             def from_id(call_id: str) -> FakeCall:
@@ -217,9 +252,33 @@ class FakeModal:
             def from_name(app: str, cls: str, **_):
                 return lambda **__: _FakeInstance(cloud, app, cls)
 
+        class Volume:
+            @staticmethod
+            def from_name(*args, **kwargs):
+                return Volume()
+
+            @contextmanager
+            def batch_upload(self, **kwargs):
+                yield self
+
+            def put_file(self, local, remote):
+                cloud.files[remote] = Path(local).read_bytes()
+
+            def _read_file(self, path):
+                if path not in cloud.files:
+                    raise FileNotFoundError(path)
+                yield cloud.files[path]
+
+            @property
+            def read_file(self):
+                return _IteratorMethod(self._read_file)
+
+        monkeypatch.setattr(modal, "Volume", Volume)
         monkeypatch.setattr(modal, "Function", Function)
         monkeypatch.setattr(modal, "Cls", Cls)
         monkeypatch.setattr(modal, "FunctionCall", FunctionCall)
+        monkeypatch.setattr(modal, "Dict", Dict)
+        monkeypatch.setattr(modal, "Workspace", Workspace)
         return self
 
 
@@ -231,31 +290,56 @@ class SftBackend:
     cloud: FakeModal
     runs: dict[str, dict[str, Any]] = field(default_factory=dict)
     uploads: list[str] = field(default_factory=list)
+    prepared: dict[str, dict] = field(default_factory=dict)
+    materialized: dict[str, dict] = field(default_factory=dict)
 
     def install(self) -> SftBackend:
         from modal_shared.stacks import TRAIN_FUNCTION_NAMES
+        from overbae.services.training_release import current
 
+        release = current()
+        app = release["app"]
+        self.cloud.deploy(app, "release_identity", lambda: release)
         for name in TRAIN_FUNCTION_NAMES.values():
-            self.cloud.deploy(SFT_APP, name, self._train, held=True)
-            self.cloud.deploy(SFT_APP, f"prepare_{name}", self._prepare, held=True)
-        self.cloud.deploy(SFT_APP, "upload_dataset", self._upload)
-        self.cloud.deploy(SFT_APP, "get_progress", self._progress)
-        self.cloud.deploy(SFT_APP, "mark_cancelled", self._cancelled)
+            self.cloud.deploy(app, name, self._train, held=True)
+            self.cloud.deploy(app, f"prepare_{name}", self._prepare, held=True)
+        self.cloud.deploy(app, "upload_dataset", self._upload)
+        self.cloud.deploy(app, "get_progress", self._progress)
+        self.cloud.deploy(app, "mark_cancelled", self._cancelled)
         self.cloud.deploy("overmind-register", "fetch_base_model", lambda **_: {"ok": True})
         return self
 
     def _prepare(self, preparation_id: str, request: dict) -> dict:
+        from modal_shared.training_data import row_key
+
+        body = self.cloud.files[request["rows_path"].removeprefix("/data")]
+        assert hashlib.sha256(body).hexdigest() == request["rows_sha256"]
+        rows = [json.loads(line) for line in gzip.decompress(body).splitlines()]
+        self.prepared[preparation_id] = {row_key(row): row for row in rows}
         return {
             "ready": True,
             "max_tokens": 64,
             "incompatible_rows": 0,
-            "rows": len(request["rows"]),
+            "rows": len(rows),
+            "artifact_sha256": hashlib.sha256(body).hexdigest(),
         }
 
-    def _upload(self, run_id: str, data_jsonl: str, val_jsonl=None, preparation_id=None) -> dict:
+    def _upload(
+        self, run_id: str, *, preparation_id, artifact_sha256, selections, monitoring=None
+    ) -> dict:
         self.uploads.append(run_id)
         self.runs[run_id] = {"status": "running", "steps": 2}
-        return {"run_id": run_id, "rows": len(data_jsonl.splitlines())}
+        rows = {}
+        for name, spec in selections.items():
+            content = self.cloud.files[f"/runs/{run_id}/selected-{name}.keys"]
+            assert hashlib.sha256(content).hexdigest() == spec["sha256"]
+            rows[name] = [
+                self.prepared[preparation_id][content[i : i + 32].hex()]
+                for i in range(0, len(content), 32)
+            ]
+            assert len(rows[name]) == spec["rows"]
+        self.materialized[run_id] = rows
+        return {"run_id": run_id, "rows": len(rows["data"])}
 
     def crash(self, message: str = "CUDA out of memory") -> None:
         for run in self.runs.values():

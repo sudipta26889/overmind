@@ -8,10 +8,11 @@ import uuid
 
 import pandas as pd
 import pytest
+from conftest import read_table
 from factories import make_project
 
-from overbae.models import Capability, Conversation, Dataset, Span, TaskExecution
-from overbae.services.datasets import land, paths, selection, store
+from overbae.models import Capability, Conversation, Dataset, Span
+from overbae.services.datasets import land, paths, selection
 
 pytestmark = pytest.mark.django_db
 
@@ -28,8 +29,8 @@ def _span(project, trace_id, *, parent=None, span_type="llm_call", attrs=None, s
         span_type=span_type,
         name=fields.pop("name", span_type),
         start_time_ns=start,
-        end_time_ns=start + 1_000_000_000,
-        duration_ns=1_000_000_000,
+        end_time_ns=start + fields.get("duration_ns", 1_000_000_000),
+        duration_ns=fields.pop("duration_ns", 1_000_000_000),
         attributes=attrs or {},
         **fields,
     )
@@ -76,7 +77,7 @@ def _land(project, spec):
     dataset = Dataset.objects.create(project=project, name="t")
     land.land_traces(dataset, spec)
     dataset.refresh_from_db()
-    return dataset, store.read_frame(paths.cell_path(dataset.id, dataset.source.id))
+    return dataset, read_table(paths.cell_path(dataset.id, dataset.source.id))
 
 
 def test_one_row_per_trace_in_selection_order_with_the_fixed_columns():
@@ -143,18 +144,13 @@ def test_delivered_output_wins_over_the_root_output():
     assert df.iloc[0]["output"] == {"reply": "final"}
 
 
-def test_score_is_the_last_scored_task_execution_and_session_id_is_the_wire_id():
+def test_score_is_the_root_trajectory_score_and_session_id_is_the_wire_id():
     project = make_project()
     conversation = Conversation.objects.create(project=project, external_id="conv-42")
     trace, root = _chat_trace(project, conversation=conversation)
-    for offset, score in ((0, 0.2), (60, 0.9), (120, None)):
-        TaskExecution.objects.create(
-            project=project,
-            trace_id=trace,
-            unit_span_id=uuid.uuid4().hex[:16],
-            started_at=land._ns_to_dt(NS + offset * 10**9),
-            success_score=score,
-        )
+    Span.objects.filter(pk=root.pk).update(
+        eval_attributes={"score": 0.2, "trajectory": {"score": 0.9}}
+    )
     _, df = _land(project, {"trace_ids": [trace]})
     row = df.iloc[0]
     assert row["score"] == pytest.approx(0.9)
@@ -168,7 +164,7 @@ def test_a_failed_trace_carries_its_status_and_error():
     assert (df.iloc[0]["status"], df.iloc[0]["error"]) == ("error", "boom")
 
 
-def test_an_interrupted_trace_without_a_root_lands_from_its_longest_span():
+def test_an_interrupted_trace_lands_from_the_span_whose_parent_is_missing():
     project = make_project()
     trace = uuid.uuid4().hex
     orphan = _span(
@@ -184,6 +180,7 @@ def test_an_interrupted_trace_without_a_root_lands_from_its_longest_span():
         trace,
         parent=orphan.span_id,
         start=NS + 10,
+        duration_ns=5_000_000_000,
         attrs={"gen_ai.input.messages": inn, "gen_ai.output.messages": out},
     )
     spec = {"filters": {"project": str(project.id)}, "ordering": "-start_time_ns"}
@@ -191,12 +188,85 @@ def test_an_interrupted_trace_without_a_root_lands_from_its_longest_span():
     _, df = _land(project, spec)
     assert df["trace_id"].tolist() == [trace]
     assert df.iloc[0]["messages"][-1]["content"] == "partial"
+    assert df.iloc[0]["duration_ms"] == 1000
 
 
-def test_a_chunk_of_traces_costs_two_queries(django_assert_num_queries):
+def _agent_trace(project, router, answer, *, answers=1):
+    """A router capability whose wrapper carries no I/O, delegating to ``answer``."""
+    trace = uuid.uuid4().hex
+    root = _span(project, trace, span_type="entry_point", capability=router)
+    _span(
+        project,
+        trace,
+        parent=root.span_id,
+        start=NS + 5,
+        span_type="tool",
+        attrs={"overmind.input.data": json.dumps({"tool": "args"})},
+        capability=router,
+    )
+    invocations = []
+    for n in range(answers):
+        invocation = _span(
+            project,
+            trace,
+            parent=root.span_id,
+            start=NS + 10 + n * 100,
+            span_type="entry_point",
+            attrs={
+                "overmind.input.data": json.dumps({"question": n}),
+                "overmind.output.data": json.dumps({"answer": n}),
+            },
+            capability=answer,
+        )
+        inn, out = _messages(f"answer {n}")
+        _span(
+            project,
+            trace,
+            parent=invocation.span_id,
+            start=NS + 20 + n * 100,
+            attrs={"gen_ai.input.messages": inn, "gen_ai.output.messages": out},
+            capability=answer,
+        )
+        invocations.append(invocation)
+    return trace, root, invocations
+
+
+def test_a_selected_capability_lands_its_own_invocation_and_score():
+    project = make_project()
+    router = Capability.objects.create(project=project, name="Router", slug="router")
+    answer = Capability.objects.create(project=project, name="Answer", slug="answer")
+    trace, root, [invocation] = _agent_trace(project, router, answer)
+    for unit, score in ((invocation, 0.8), (root, 0.1)):
+        Span.objects.filter(pk=unit.pk).update(eval_attributes={"trajectory": {"score": score}})
+
+    _, whole = _land(project, {"trace_ids": [trace]})
+    assert pd.isna(whole.iloc[0]["capability_id"])
+
+    bare, _, _ = _agent_trace(project, router, answer, answers=0)
+    _, tool_only = _land(project, {"trace_ids": [bare]})
+    assert pd.isna(tool_only.iloc[0]["input"])
+
+    _, scoped = _land(project, {"filters": {"capability": str(answer.id)}})
+    row = scoped.iloc[0]
+    assert (row["capability"], row["capability_id"]) == ("Answer", str(answer.id))
+    assert (row["input"], row["output"]) == ({"question": 0}, {"answer": 0})
+    assert row["score"] == pytest.approx(0.8)
+
+
+def test_repeated_invocations_of_the_selected_capability_fail_the_landing():
+    project = make_project()
+    router = Capability.objects.create(project=project, name="Router", slug="router")
+    answer = Capability.objects.create(project=project, name="Answer", slug="answer")
+    trace, _, _ = _agent_trace(project, router, answer, answers=2)
+    dataset = Dataset.objects.create(project=project, name="t", capability=answer)
+    with pytest.raises(land.LandError, match="2 separate invocations"):
+        land.land_traces(dataset, {"trace_ids": [trace]})
+
+
+def test_a_chunk_of_traces_costs_one_query(django_assert_num_queries):
     project = make_project()
     ids = [_chat_trace(project)[0] for _ in range(5)]
-    with django_assert_num_queries(2):
+    with django_assert_num_queries(1):
         rows = list(land.iter_trace_rows(project.id, ids))
     assert len(rows) == 5
 
