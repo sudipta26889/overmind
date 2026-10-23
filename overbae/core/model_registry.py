@@ -408,7 +408,15 @@ def decision_models() -> tuple[Model, ...]:
 
 
 def decision_model() -> Model:
-    return decision_models()[0]
+    """``JEV_MODEL`` pins the version a self-hosted gateway routes; blank takes the first."""
+    models = decision_models()
+    slug = os.environ.get("JEV_MODEL", "").strip()
+    if not slug:
+        return models[0]
+    for model in models:
+        if model.slug == slug:
+            return model
+    raise ValueError(f"JEV_MODEL={slug} is not one of {', '.join(m.slug for m in models)}")
 
 
 def is_decision_model(name: str) -> bool:
