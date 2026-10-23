@@ -180,6 +180,14 @@ def merge_stats(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def served_in_family(served: str, model: str) -> bool:
+    """OpenRouter answers ``typesafe/jev-1.14-<date>``; a gateway in front of it may answer
+    ``jev-1.14.0``. Either is the requested version; another version never is."""
+    family = model.split("/", 1)[-1]
+    served = served.split("/", 1)[-1]
+    return served == family or served.startswith((family + "-", family + "."))
+
+
 def response_usage(payload: dict, elapsed: float) -> dict[str, Any]:
     usage = payload.get("usage") or {}
     if not isinstance(usage, dict):
@@ -354,7 +362,7 @@ def decide(
             raw_answers = payload.get("answers")
             if not isinstance(raw_answers, dict) or set(raw_answers) != set(batch):
                 raise ValueError("Decision question coverage mismatch.")
-            if stats["served_model"] != model and not stats["served_model"].startswith(model + "-"):
+            if not served_in_family(stats["served_model"], model):
                 raise ValueError("Decision model identity does not match the requested family.")
             parsed = {key: ChoiceAnswer.model_validate(value) for key, value in raw_answers.items()}
             for key, answer in parsed.items():

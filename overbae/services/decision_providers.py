@@ -125,7 +125,7 @@ def qualify_participants(project, selected):
                 participant.get("job")
                 or model not in known
                 or not isinstance(served, str)
-                or (served and served != model and not served.startswith(model + "-"))
+                or (served and not decisions.served_in_family(served, model))
             ):
                 raise InputValidationError(
                     "External native evaluation requires a catalog System One model and a compatible served version"
