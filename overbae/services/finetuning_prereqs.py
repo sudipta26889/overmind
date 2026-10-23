@@ -6,7 +6,9 @@ from typing import Any
 
 from django.db.models import Q
 
-from overbae.modal.model_registry import TIER_ORDER
+from modal_shared.stacks import NATIVE_FOUNDATION_STACKS
+from overbae.modal.model_registry import TIER_ORDER, get_unsloth_image
+from overbae.modal.training_type import training_enabled
 from overbae.models import Capability, Dataset, EvalSet
 from overbae.services.datasets import review
 from overbae.services.datasets import rows as row_store
@@ -18,6 +20,7 @@ from overbae.services.recommendation import (
     recommend_hyperparams_for_model,
     tier_models,
 )
+from overbae.services.recommendation.catalog import active_backend
 
 # The ranking covers the whole catalog; chat gets the head of it, with "catalog" below
 # still naming every trainable model.
@@ -97,9 +100,13 @@ def default_finetune_name(*, display_name: str, dataset_name: str, capability_na
     return " · ".join(parts) if parts else "Chat finetune"
 
 
-def catalog_by_tier(*, has_tool_calling: bool = False) -> dict[str, list[str]]:
+def catalog_by_tier(
+    *, has_tool_calling: bool = False, native: bool = False
+) -> dict[str, list[str]]:
     """Trainable model ids by tier for the active backend."""
     out: dict[str, list[str]] = {}
+    if native and active_backend() != "modal":
+        return out
     for tier in TIER_ORDER:
         models = tier_models().get(tier) or []
         ids = [
@@ -108,6 +115,13 @@ def catalog_by_tier(*, has_tool_calling: bool = False) -> dict[str, list[str]]:
             if m.get("id")
             and not m.get("disabled")
             and (not has_tool_calling or m.get("supports_tool_calling"))
+            and (
+                not native
+                or (
+                    get_unsloth_image(m["id"]) in NATIVE_FOUNDATION_STACKS
+                    and training_enabled(m, "lora")
+                )
+            )
         ]
         if ids:
             out[tier] = ids
@@ -119,15 +133,33 @@ def finetune_prerequisite_report(
     dataset: Dataset,
     *,
     capability: Capability | None = None,
+    cell=None,
+    validation_cell=None,
+    validation_enabled=True,
+    validation_split_ratio=0.2,
+    split_method="random",
+    eval_dataset=None,
+    eval_cell=None,
+    eval_set=None,
+    evaluate=True,
 ) -> dict[str, Any]:
     """Readiness checklist before create_finetune_job (wizard-equivalent gates)."""
-    validation = validate_dataset(str(dataset.id))
-    eval_dataset = default_eval_dataset(project, capability)
-    eval_set = default_eval_set(project, capability)
+    validation = validate_dataset(
+        str(dataset.id),
+        cell_id=str(cell.id) if cell else None,
+        validation_enabled=validation_enabled,
+        validation_split_ratio=validation_split_ratio,
+        validation_dataset_id=str(validation_cell.dataset_id) if validation_cell else None,
+        validation_cell_id=str(validation_cell.id) if validation_cell else None,
+        split_method=split_method,
+    )
+    if evaluate:
+        eval_dataset = eval_dataset or default_eval_dataset(project, capability)
+        eval_set = eval_set or default_eval_set(project, capability)
 
     missing: list[str] = []
     warnings: list[str] = []
-    product = dataset.active_cell
+    product = cell or dataset.active_cell
     if product is None:
         missing.append("training dataset — no version has run yet")
     elif not product.fits("train")[0]:
@@ -136,16 +168,18 @@ def finetune_prerequisite_report(
         missing.append(
             "training dataset — fix the rows the validator lists, then run the notebook again"
         )
-    if eval_dataset is None:
+    if evaluate and eval_dataset is None:
         missing.append(
             "eval dataset — create an eval dataset whose version fits the eval contract "
             "(wizard needs it for in-training judge evals)"
         )
-    if eval_set is None:
-        missing.append("eval set — create an eval set with generative evaluators in this project")
+    if evaluate and (eval_set is None or not eval_set.rows.filter(enabled=True).exists()):
+        missing.append(
+            "eval set — select an eval set with enabled eval matrix rows in this project"
+        )
 
     overlap_count = None
-    eval_product = eval_dataset.active_cell if eval_dataset is not None else None
+    eval_product = eval_cell or (eval_dataset.active_cell if eval_dataset is not None else None)
     for ds, cell, intent, label in (
         (dataset, product, "train", "training dataset"),
         (eval_dataset, eval_product, "eval", "eval dataset"),
@@ -171,6 +205,8 @@ def finetune_prerequisite_report(
     try:
         analysis = get_recommendation(
             str(dataset.id),
+            cell=product,
+            eval_cell=eval_product,
             capability_id=str(capability.id) if capability is not None else None,
             eval_dataset_id=str(eval_dataset.id) if eval_dataset is not None else None,
         )
@@ -179,7 +215,9 @@ def finetune_prerequisite_report(
 
     candidates = analysis.get("candidates") or []
     has_tool_calling = bool((analysis.get("dataset") or {}).get("has_tool_calling"))
+    native = validation.format == "decision"
     recommendations = [slim_recommendation_row(r) for r in candidates[:_MAX_CHAT_CANDIDATES]]
+    catalog = catalog_by_tier(has_tool_calling=has_tool_calling, native=native)
 
     hint = None
     if missing:
@@ -192,13 +230,7 @@ def finetune_prerequisite_report(
         "hint": hint,
         "dataset": dataset.name or str(dataset.id)[:8],
         "capability": capability.slug if capability is not None else None,
-        "validation": {
-            "valid": validation.valid,
-            "errors": validation.errors,
-            "warnings": validation.warnings,
-            "num_examples": validation.num_examples,
-            "format": validation.format,
-        },
+        "validation": validation.as_dict(),
         "eval_dataset": (
             {
                 "name": eval_dataset.name or str(eval_dataset.id)[:8],
@@ -210,8 +242,8 @@ def finetune_prerequisite_report(
         "eval_set": eval_set.name if eval_set is not None else None,
         "overlap_count": overlap_count,
         "recommendations": recommendations,
-        "n_candidates": len(candidates),
-        "catalog": catalog_by_tier(has_tool_calling=has_tool_calling),
+        "n_candidates": sum(map(len, catalog.values())) if native else len(candidates),
+        "catalog": catalog,
         "has_tool_calling": has_tool_calling,
         "task_type": analysis.get("task_type"),
         "task_type_source": analysis.get("task_type_source"),

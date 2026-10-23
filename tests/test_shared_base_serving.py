@@ -1,6 +1,10 @@
 import importlib
 import json
 import os
+import shutil
+import urllib.error
+import urllib.request
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -12,6 +16,7 @@ from overbae.modal import modal_vllm_worker as serving
 def test_shared_worker_resolves_family_from_sealed_base(monkeypatch, tmp_path):
     obj = serving._BaseVLLMWorker()
     obj.model_path = "base"
+    obj._journal = Mock()
     obj.model_name = "opaque-deployment-id"
     obj.max_model_len = 512
     obj.enable_lora = True
@@ -63,6 +68,7 @@ def worker():
     obj.model_name = "base--test"
     obj.model_path = ".base_models/org--base"
     obj.base_identity = "base-identity"
+    obj._journal = Mock()
     obj._startup_error = None
     obj._verify_base_identity = Mock()
     obj._start = Mock()
@@ -104,7 +110,11 @@ def test_restore_reloads_before_kv_wake_and_clears_tenant_state(monkeypatch):
     obj._loaded_adapters = {"must-not-survive"}
     calls = []
     obj._control = Mock(side_effect=lambda path: calls.append(path))
-    obj._base_rpc = Mock(side_effect=lambda method: calls.append(method) or {"reload_s": 1})
+    obj._base_rpc = Mock(
+        side_effect=lambda method, *args: (
+            calls.append(method) or {"reload_s": 1, "bytes": 128, "parameters": 2}
+        )
+    )
     monkeypatch.setattr(serving, "weights_vol", Mock())
     monkeypatch.setattr(serving, "artifacts_vol", Mock(reload=lambda: calls.append("refresh")))
     monkeypatch.setattr(
@@ -202,3 +212,82 @@ async def test_gateway_reads_base_identity_without_reloading(monkeypatch):
     assert await serving._base_identity_aio(".base_models/fresh") == "immutable"
     vol.reload.assert_not_called()
     assert await serving._base_identity_aio(".base_models/fresh") == "immutable"
+
+
+class _AdapterClient:
+    def __init__(self, timeout):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    async def post(self, url, json):
+        _AdapterClient.posts.append((url, json))
+        return Mock(status_code=200, text="")
+
+
+@pytest.mark.asyncio
+async def test_adapter_load_leaves_the_weights_mount_closed(monkeypatch, tmp_path):
+    mount = tmp_path / "weights"
+    posts = []
+    _AdapterClient.posts = posts
+
+    def write_adapter(cache_key: str, payload: bytes) -> str:
+        adapter = mount / ".adapters" / cache_key
+        adapter.mkdir(parents=True)
+        (adapter / "adapter_config.json").write_text(json.dumps({"r": 8}))
+        (adapter / "adapter_model.safetensors").write_bytes(payload)
+        return f".adapters/{cache_key}"
+
+    first = write_adapter("ft-first", b"first-weights")
+    second = write_adapter("ft-second", b"second-weights")
+    reloads = 0
+
+    async def reload():
+        nonlocal reloads
+        reloads += 1
+
+    volume = Mock()
+    volume.reload.aio = reload
+    monkeypatch.setattr(serving, "WEIGHTS_MOUNT", str(mount))
+    monkeypatch.setattr(serving, "weights_vol", volume)
+    monkeypatch.setattr("httpx.AsyncClient", _AdapterClient)
+    obj = serving._BaseVLLMWorker()
+    obj._loaded_adapters = set()
+    obj._adapter_lock = None
+
+    try:
+        await obj._ensure_adapter("first", first)
+        await obj._ensure_adapter("second", second)
+
+        assert reloads == 2
+        serving.weights_vol.reload.assert_not_called()
+        loaded = [body["lora_path"] for _url, body in posts]
+        assert len(loaded) == 2
+        for path, payload in zip(loaded, (b"first-weights", b"second-weights"), strict=True):
+            staged = Path(path)
+            assert not staged.is_relative_to(mount)
+            assert (staged / "adapter_model.safetensors").read_bytes() == payload
+    finally:
+        shutil.rmtree("/tmp/overmind-adapters", ignore_errors=True)
+
+
+def test_engine_health_wait_reports_liveness_without_claiming_load_progress(monkeypatch):
+    journal = Mock()
+    process = Mock(poll=Mock(return_value=None))
+    ticks = iter(range(0, 200, 10))
+    monkeypatch.setattr(serving.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(serving.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        urllib.request, "urlopen", Mock(side_effect=urllib.error.URLError("waiting"))
+    )
+    with pytest.raises(RuntimeError, match="did not become healthy"):
+        serving._wait_for_vllm(timeout=65, proc=process, journal=journal)
+    assert journal.emit.call_count >= 1
+    for call in journal.emit.call_args_list:
+        assert call.args == ("waiting_for_engine",)
+        assert call.kwargs["process_alive"] is True
+        assert "completed" not in call.kwargs

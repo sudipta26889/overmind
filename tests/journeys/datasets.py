@@ -15,10 +15,12 @@ def tickets(tmp_path, n=3):
     path = tmp_path / "tickets.jsonl"
     rows = [
         {
-            "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": f"Refund order {i} please"},
-            ],
+            "input": {
+                "messages": [
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": f"Refund order {i} please"},
+                ]
+            },
             "expected_output": GOOD_REPLY,
         }
         for i in range(n)
@@ -34,9 +36,7 @@ def evaluate(mcp, dataset):
             "name": "candidate",
             "dataset": dataset,
             "judge_model": JUDGE,
-            "variants": [
-                {"mode": "generate", "model_name": "fake/candidate", "label": "candidate"}
-            ],
+            "targets": [{"mode": "generate", "model_name": "fake/candidate", "label": "candidate"}],
         },
     )
 

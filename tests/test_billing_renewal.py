@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 from django.contrib.auth import get_user_model
 from django.urls import reverse
-from factories import auth_client
+from factories import auth_client, make_project, make_user
 from rest_framework.test import APIClient
 
 from overbae.models import BillingService, BillingTelemetry, Subscription, SubscriptionStatus
@@ -86,7 +86,6 @@ def test_renew_plan_from_invoice_activates_pro_and_grants_credits(stripe_api):
         email="pro-renew@example.com",
         password="x",
         clerk_user_id="clerk_pro_renew",
-        projects_limit=5,
         stripe_customer_id="cus_test",
     )
     Subscription.objects.create(user=user, status=SubscriptionStatus.INCOMPLETE)
@@ -104,7 +103,6 @@ def test_renew_plan_from_invoice_activates_pro_and_grants_credits(stripe_api):
 
     user.refresh_from_db()
     sub = user.subscription
-    assert user.projects_limit is None
     assert sub.status == SubscriptionStatus.ACTIVE
     assert sub.stripe_subscription_id == "sub_test"
     assert sub.stripe_price_id == "price_1TvfC1CgXbweROl8gtGzCSV6"
@@ -126,7 +124,6 @@ def test_renew_plan_extends_end_date_and_adds_credits_without_changing_start(str
         email="pro-renew2@example.com",
         password="x",
         clerk_user_id="clerk_pro_renew2",
-        projects_limit=5,
         stripe_customer_id="cus_test2",
     )
     Subscription.objects.create(user=user, status=SubscriptionStatus.INCOMPLETE)
@@ -174,7 +171,6 @@ def test_renew_plan_idempotent_on_same_invoice_id(stripe_api):
         email="pro-idem@example.com",
         password="x",
         clerk_user_id="clerk_pro_idem",
-        projects_limit=5,
         stripe_customer_id="cus_idem",
     )
     Subscription.objects.create(user=user, status=SubscriptionStatus.INCOMPLETE)
@@ -322,20 +318,19 @@ def test_a_stripe_outage_leaves_the_subscription_unchanged(stripe_api):
 
 
 @pytest.mark.parametrize(
-    ("event_type", "remote", "status", "cancel_at_period_end", "projects_limit"),
+    ("event_type", "remote", "status", "cancel_at_period_end"),
     [
-        ("customer.subscription.deleted", "canceled", SubscriptionStatus.CANCELED, False, 5),
-        ("customer.subscription.updated", "active", SubscriptionStatus.ACTIVE, True, None),
+        ("customer.subscription.deleted", "canceled", SubscriptionStatus.CANCELED, False),
+        ("customer.subscription.updated", "active", SubscriptionStatus.ACTIVE, True),
     ],
 )
 def test_subscription_events_sync_the_plan(
-    stripe_api, event_type, remote, status, cancel_at_period_end, projects_limit
+    stripe_api, event_type, remote, status, cancel_at_period_end
 ):
     user = User.objects.create_user(
         email=f"sync-{remote}@example.com",
         password="x",
         clerk_user_id=f"clerk_sync_{remote}",
-        projects_limit=None,
     )
     Subscription.objects.create(
         user=user,
@@ -363,7 +358,6 @@ def test_subscription_events_sync_the_plan(
     assert sub.status == status
     assert sub.cancel_at_period_end is cancel_at_period_end
     assert sub.end_date == datetime(2030, 1, 1, tzinfo=UTC)
-    assert user.projects_limit == projects_limit
 
 
 def test_a_newer_invoice_names_its_subscription_under_parent_details(stripe_api):
@@ -371,7 +365,6 @@ def test_a_newer_invoice_names_its_subscription_under_parent_details(stripe_api)
         email="pro-parent@example.com",
         password="x",
         clerk_user_id="clerk_pro_parent",
-        projects_limit=5,
         stripe_customer_id="cus_parent",
     )
     Subscription.objects.create(user=user, status=SubscriptionStatus.INCOMPLETE)
@@ -459,3 +452,20 @@ def test_ledger_lists_own_entries_newest_first():
     assert results[0]["amount"] == "-1.2500000"
     assert results[1]["service"] == BillingService.FREE_CREDITS
     assert results[1]["amount"] == "50.0000000"
+
+
+@pytest.mark.parametrize("ordering", ["service", "-service", "project__name", "-project__name"])
+def test_ledger_sorts_visible_labels_and_keeps_missing_projects_last(ordering):
+    user = make_user()
+    BillingTelemetry.objects.filter(user=user).delete()
+    project = make_project(name="Alpha")
+    first = BillingTelemetry.objects.create(
+        user=user, project=project, amount=-1, service=BillingService.INFERENCE_FT_MODEL
+    )
+    second = BillingTelemetry.objects.create(user=user, amount=-2, service=BillingService.INFERENCE)
+    response = auth_client(user).get(
+        reverse("billing-ledger"), {"ordering": ordering, "page_size": 1}
+    )
+    assert response.status_code == 200, response.content
+    expected = second if ordering == "-service" else first
+    assert response.data["results"][0]["id"] == str(expected.id)

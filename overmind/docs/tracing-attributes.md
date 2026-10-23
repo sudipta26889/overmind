@@ -1,8 +1,8 @@
 # Overmind tracing — canonical attribute contract
 
 This is the **source-of-truth contract** for every span attribute the Overmind
-Python SDK emits. The server ingest (`overbae/api/otlp.py`), the JS SDK, and the
-public API docs are reconciled against this file.
+Python SDK emits. The server ingest (`overbae/api/otlp.py`) and the public API docs
+are reconciled against this file.
 
 Rules of the road:
 
@@ -179,6 +179,20 @@ Emitters: the `provenance=` parameter on `@observe` (and the decorator
 shorthands) / `start_span`; `start_span(unit=...)` and `task(key, unit="turn")` for units;
 `overmind.deliver(payload, *, grounded_by=None, name="deliver", provenance="agent")` — `grounded_by` accepts span_id hex strings or OTel span
 handles (e.g. the span yielded by `start_span`).
+
+### Live-scoring declarations
+
+Live scoring judges each span against the project's eval matrix plus what the
+span declares. Pinned in `tests/test_evidence_contract.py`.
+
+| Key                             | Type     | When present                     | Meaning                                                                                                                                                 |
+| ------------------------------- | -------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `overmind.intent`               | string   | `observe(intent=)`               | What the user asked for. Stamped on every span started under it unless it declares its own; else the nearest arrived ancestor's, else the root's input. |
+| `overmind.expectations`         | string[] | `observe(expectations=[...])`    | One-sentence expectations judged against this span's output, in addition to the matching eval matrix rows.                                              |
+| `overmind.reference_trajectory` | string[] | `observe(reference_trajectory=)` | Tool names this span's subtree should call, in order; the trajectory scorer compares the actual calls.                                                  |
+
+`overmind.intent(text)` (§6) and `overmind.expect("constraint", text)` are read
+as an intent and an expectation of the span that emitted them.
 
 ### Capability scoping and handoffs
 

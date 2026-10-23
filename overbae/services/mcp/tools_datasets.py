@@ -1,19 +1,26 @@
-"""Project-scoped dataset inspection, creation, agent, and run tools."""
-
 from __future__ import annotations
 
+import json
+import logging
 import re
-import uuid
+import time
 
 import duckdb
 from asgiref.sync import sync_to_async
+from django.conf import settings
 
-from overbae.models import Capability, Cell, Dataset
-from overbae.services.datasets import dispatch, paths, store
+from overbae.models import Capability, Dataset
+from overbae.services.datasets import (
+    dispatch,
+    imports,
+    paths,
+    store,
+    workbench,
+)
 from overbae.services.datasets.contract import stored_intents
 from overbae.services.datasets.lifecycle import DatasetError
-from overbae.services.datasets.notebook.agent import resolve_cell
 from overbae.services.datasets.selection import TraceSource, TraceSourceError
+from overbae.services.datasets.versions import resolve_cell
 from overbae.services.mcp.context import MCPContext
 from overbae.services.mcp.contracts.common import PageContract
 from overbae.services.mcp.contracts.datasets import (
@@ -24,10 +31,9 @@ from overbae.services.mcp.contracts.datasets import (
     InspectDatasetInput,
     ListDatasetsInput,
     ListDatasetsOutput,
-    MessageDatasetAgentInput,
     QueryDatasetInput,
     QueryDatasetOutput,
-    RunDatasetInput,
+    StartDatasetInput,
     dataset_resource_link,
     mutation_output,
     sanitize_error,
@@ -35,19 +41,10 @@ from overbae.services.mcp.contracts.datasets import (
     serialize_dataset_list_item,
 )
 from overbae.services.mcp.errors import MCPError, dataset_mcp_error, mcp_dataset
+from overbae.services.mcp.references import uuid_reference
 
 _READ_ONLY_SQL = re.compile(r"^\s*(?:select|with)\b", re.IGNORECASE)
-
-
-def _uuid(value: str) -> str | None:
-    try:
-        return str(uuid.UUID(value))
-    except (AttributeError, TypeError, ValueError):
-        return None
-
-
-def _resolve_dataset(context: MCPContext, reference: str) -> Dataset:
-    return mcp_dataset(context, reference)
+QUERY_RESULT_BYTES = 32 * 1024
 
 
 def _resolve_capability(context: MCPContext, reference: str) -> Capability:
@@ -60,7 +57,7 @@ def _resolve_capability(context: MCPContext, reference: str) -> Capability:
 
 
 def _resolve_capability_uuid(context: MCPContext, reference: str) -> Capability:
-    capability_id = _uuid(reference)
+    capability_id = uuid_reference(reference)
     if capability_id is None:
         raise MCPError("invalid_input", "Capability references must be UUIDs.")
     capability = Capability.objects.filter(project=context.project, id=capability_id).first()
@@ -103,42 +100,115 @@ def _list_datasets_sync(payload: ListDatasetsInput, context: MCPContext) -> List
 
 def _inspect_dataset_sync(payload: InspectDatasetInput, context: MCPContext) -> DatasetDetail:
     return serialize_dataset_detail(
-        _resolve_dataset(context, payload.dataset),
-        chat_limit=payload.chat_limit,
+        mcp_dataset(context, payload.dataset),
+        cell_offset=payload.cell_offset,
+        cell_limit=payload.cell_limit,
+        source_offset=payload.source_offset,
+        source_limit=payload.source_limit,
     )
 
 
 def _query_dataset_sync(payload: QueryDatasetInput, context: MCPContext) -> QueryDatasetOutput:
-    dataset = _resolve_dataset(context, payload.dataset)
-    sql = payload.sql.strip()
-    if not _READ_ONLY_SQL.match(sql):
-        raise MCPError("query_invalid", "Only read-only SELECT queries are supported.")
+    phases = [("lookup", time.monotonic())]
     try:
-        cell = resolve_cell(dataset, payload.cell, ran_only=True)
-    except DatasetError as exc:
-        raise MCPError("cell_not_found", "The cell was not found in this dataset.") from exc
-    if cell.dataset_id != dataset.id:
-        raise MCPError("cell_not_found", "The cell was not found in this dataset.")
-    limit = min(payload.limit, 100)
-    try:
-        result = store.query(sql, limit=limit + 1, t=paths.cell_path(dataset.id, cell.id))
-    except duckdb.Error as exc:
-        reason = sanitize_error(str(exc).splitlines()[0], 300)
-        raise MCPError("query_invalid", f"The query failed: {reason}") from exc
-    rows = list(result["rows"])[:limit]
-    columns = [str(column) for column in (result.get("columns") or [])[:200]]
-    link = dataset_resource_link(dataset)
-    return QueryDatasetOutput(
-        summary=f"{len(rows)} rows.",
-        dataset=str(dataset.id),
-        cell_id=str(cell.id),
-        version=dataset.versions().get(cell.id),
-        columns=columns,
-        rows=rows,
-        n=len(rows),
-        truncated=len(result["rows"]) > limit,
-        resource_links=[link],
-    )
+        from overbae.services.datasets import query_capacity
+
+        dataset = mcp_dataset(context, payload.dataset)
+        sql = payload.sql.strip()
+        if not _READ_ONLY_SQL.match(sql):
+            raise MCPError("query_invalid", "Only read-only SELECT queries are supported.")
+        try:
+            cell = resolve_cell(dataset, payload.cell, ran_only=True)
+        except DatasetError as exc:
+            raise MCPError("cell_not_found", "The cell was not found in this dataset.") from exc
+        if cell.dataset_id != dataset.id:
+            raise MCPError("cell_not_found", "The cell was not found in this dataset.")
+        limit = min(payload.limit, 100)
+        phases.append(("admission", time.monotonic()))
+        try:
+            with query_capacity.admitted(dataset.project_id) as check:
+                phases.append(("sql", time.monotonic()))
+                result = store.query(
+                    sql,
+                    limit=limit + 1,
+                    max_bytes=32768,
+                    max_columns=200,
+                    execution_check=check,
+                    t=paths.cell_path(dataset.id, cell.id),
+                )
+                phases.append(("release", time.monotonic()))
+            phases.append(("response", time.monotonic()))
+        except (
+            query_capacity.QueryCapacityBusyError,
+            query_capacity.QueryCapacityUnavailableError,
+        ) as exc:
+            busy = isinstance(exc, query_capacity.QueryCapacityBusyError)
+            raise MCPError(
+                "query_capacity_busy" if busy else "query_capacity_unavailable",
+                "SQL inspection capacity is busy. Retry the same SQL against the returned cell "
+                "after one second; use a retained pipeline for bulk analysis."
+                if busy
+                else "SQL inspection admission is unavailable. Retry the same SQL against the "
+                "returned cell after one second.",
+                retryable=True,
+                fields={
+                    "dataset": str(dataset.pk),
+                    "cell": str(cell.pk),
+                    "retry_after_seconds": "1",
+                    "project_concurrency": str(settings.DATASET_QUERY_PROJECT_CONCURRENCY),
+                    "global_concurrency": str(settings.DATASET_QUERY_MAX_IN_FLIGHT),
+                },
+            ) from None
+        except store.QueryTimeoutError as exc:
+            raise MCPError("query_timeout", str(exc), retryable=False) from exc
+        except store.QuerySizeError as exc:
+            raise MCPError("query_result_too_large", str(exc), retryable=False) from exc
+        except (duckdb.Error, store.StoreError) as exc:
+            reason = sanitize_error(str(exc).splitlines()[0], 300)
+            raise MCPError("query_invalid", f"The query failed: {reason}") from exc
+        rows = list(result["rows"])[:limit]
+        columns = [str(column) for column in (result.get("columns") or [])]
+        if len(columns) > 200:
+            raise MCPError(
+                "query_result_too_large",
+                "The query result exceeds 200 columns. Select fewer columns or export the "
+                "full cell through overmind://dataset-export. No column metadata was omitted.",
+            )
+        link = dataset_resource_link(dataset)
+        output = QueryDatasetOutput(
+            summary=f"{len(rows)} rows.",
+            dataset=str(dataset.id),
+            cell_id=str(cell.id),
+            version=dataset.versions().get(cell.id),
+            columns=columns,
+            rows=rows,
+            n=len(rows),
+            truncated=len(result["rows"]) > limit,
+            resource_links=[link],
+        )
+        if len(json.dumps(output.model_dump(mode="json")).encode()) > QUERY_RESULT_BYTES:
+            raise MCPError(
+                "query_result_too_large",
+                "The query result exceeds 32 KiB. Select fewer rows or smaller columns, "
+                "use SQL aggregates, or export the full cell through overmind://dataset-export. "
+                "No values were clipped.",
+            )
+        return output
+    finally:
+        finished = time.monotonic()
+        elapsed = finished - phases[0][1]
+        if elapsed >= 0.25:
+            boundaries = [*phases, ("finished", finished)]
+            stages = {
+                name: round((end - start) * 1000, 1)
+                for (name, start), (_, end) in zip(boundaries, boundaries[1:], strict=False)
+            }
+            logging.getLogger(__name__).info(
+                "MCP SQL timing project_id=%s elapsed_ms=%.1f stages_ms=%s",
+                context.project.pk if context.project is not None else None,
+                elapsed * 1000,
+                stages,
+            )
 
 
 def _create_dataset_from_traces_sync(
@@ -169,6 +239,7 @@ def _create_dataset_from_traces_sync(
                 project=context.project,
                 user=context.user,
                 name=payload.name,
+                brief=payload.brief,
                 source={"traces": source.spec()},
                 eval_percent=payload.split.eval_percent,
                 position=payload.split.position,
@@ -183,6 +254,7 @@ def _create_dataset_from_traces_sync(
                 project=context.project,
                 user=context.user,
                 name=payload.name,
+                brief=payload.brief,
                 source={"traces": source.spec()},
                 intent=payload.intent,
                 capability=capability,
@@ -263,56 +335,75 @@ def _create_dataset_from_llm_calls_sync(
     )
 
 
-def _message_dataset_agent_sync(
-    payload: MessageDatasetAgentInput, context: MCPContext
-) -> DatasetMutationOutput:
-    dataset = _resolve_dataset(context, payload.dataset)
-    message = payload.message.strip()
-    if not message:
-        raise MCPError("invalid_input", "A non-empty message is required.")
+def _start_dataset_sync(payload: StartDatasetInput, context: MCPContext) -> DatasetMutationOutput:
+    capability = _resolve_capability(context, payload.capability) if payload.capability else None
     try:
-        dispatch.message_agent(dataset, context.user, message)
+        dataset = dispatch.create_dataset(
+            project=context.project,
+            user=context.user,
+            name=payload.name,
+            brief=payload.brief,
+            intent=payload.intent,
+            capability=capability,
+            infer_capability=False,
+        )
     except DatasetError as exc:
         raise dataset_mcp_error(exc) from exc
-    return mutation_output(dataset, summary="Dataset agent queued.")
+    return mutation_output(dataset, summary="Dataset started from the written request.")
 
 
-def _run_dataset_sync(payload: RunDatasetInput, context: MCPContext) -> DatasetMutationOutput:
-    dataset = _resolve_dataset(context, payload.dataset)
-    proposal = None
-    if payload.proposal_cell:
-        proposal_id = _uuid(payload.proposal_cell)
-        if proposal_id is None:
-            raise MCPError("invalid_input", "Proposal cell references must be UUIDs.")
-        proposal = dataset.cells.filter(id=proposal_id).first()
-        if proposal is None:
-            raise MCPError("cell_not_found", "The proposal was not found in this dataset.")
-    if payload.decision == "deny":
-        if proposal is None or proposal.state != Cell.State.PROPOSED:
-            raise MCPError("invalid_input", "Only a pending proposal can be denied.")
-        try:
-            dispatch.discard_cell(dataset, proposal, context.user)
-        except DatasetError as exc:
-            raise dataset_mcp_error(exc) from exc
-        return mutation_output(dataset, summary="Proposal denied.")
+def _cancel_dataset_sync(payload, context):
+    dataset = mcp_dataset(context, payload.dataset)
+    workbench.cancel(dataset)
+    dataset.refresh_from_db()
+    return mutation_output(
+        dataset, summary="Cancellation requested. Inspect dataset state and run receipts."
+    )
+
+
+def _resume_import_sync(payload, context):
+    dataset = mcp_dataset(context, payload.dataset)
     try:
-        dispatch.run_dataset(dataset, context.user, proposal=proposal)
+        imports.resume_dataset(dataset)
     except DatasetError as exc:
         raise dataset_mcp_error(exc) from exc
-    return mutation_output(dataset, summary="Dataset run queued.")
-
-
-def _async_handler(function):
-    async def handler(payload, context):
-        return await sync_to_async(function, thread_sensitive=True)(payload, context)
-
-    return handler
+    return mutation_output(dataset, summary="Source import resumed from its retained receipt.")
 
 
 def register_dataset_tools(catalog) -> None:
     from overbae.services.mcp.catalog import ToolDefinition
 
     definitions = [
+        (
+            "resume_dataset_import",
+            "Resume source import",
+            "Resume a stopped source import using its retained bytes and task identity. Does not prepare data or replay transformations.",
+            InspectDatasetInput,
+            DatasetMutationOutput,
+            _resume_import_sync,
+            False,
+            "job",
+        ),
+        (
+            "cancel_dataset",
+            "Cancel dataset operation",
+            "Cancel publication of queued or running pipeline work, or request cancellation of source landing. In-flight calculations may finish without publishing. Inspect dataset state and run receipts; external agents and providers are not stopped.",
+            InspectDatasetInput,
+            DatasetMutationOutput,
+            _cancel_dataset_sync,
+            False,
+            "job",
+        ),
+        (
+            "start_dataset",
+            "Start dataset",
+            "Start from a written request; source, capability and training intent are optional. Inspect for next steps.",
+            StartDatasetInput,
+            DatasetMutationOutput,
+            _start_dataset_sync,
+            False,
+            "job",
+        ),
         (
             "list_datasets",
             "List datasets",
@@ -326,7 +417,7 @@ def register_dataset_tools(catalog) -> None:
         (
             "inspect_dataset",
             "Inspect dataset",
-            "Inspect one project dataset, its bounded cell chain, source/active task-family profiles, downstream consumer requirements, sample, recent agent chat, and next actions.",
+            "Inspect dataset versions, extraction metadata, progress, profiles and consumer requirements. Cell analytics expose fingerprint-bound server measurements, class counts, majority baselines, warnings and explicitly unchecked risks; unmeasured versions can be scanned with explore_dataset. Inspect the exact consumer cell before training handoff. Cells expose receipt-backed transformation execution, exact revision/package/entrypoint, distinguishing external imports and unrecorded history. Read all package files through dataset-pipeline-packages resources. Page cells and sources with offsets and next_cursor.",
             InspectDatasetInput,
             DatasetDetail,
             _inspect_dataset_sync,
@@ -337,7 +428,12 @@ def register_dataset_tools(catalog) -> None:
             "query_dataset",
             "Query dataset",
             "Read-only SELECT over table t on one ran cell (active unless cell is an id or version). "
-            "At most 100 rows; truncated when more matched.",
+            "At most 100 rows; truncated when more matched. Results over 200 columns or 32 KiB of JSON fail "
+            "with query_result_too_large; project smaller columns, aggregate, or use the "
+            "dataset-export resource for complete data. Values are never clipped. "
+            "SQL execution has bounded global and per-project capacity. Retryable "
+            "query_capacity_busy/query_capacity_unavailable returns the exact cell and retry delay; "
+            "retry the same SQL on that cell. Use a retained pipeline for bulk analysis.",
             QueryDatasetInput,
             QueryDatasetOutput,
             _query_dataset_sync,
@@ -365,26 +461,6 @@ def register_dataset_tools(catalog) -> None:
             False,
             "task",
         ),
-        (
-            "message_dataset_agent",
-            "Message dataset agent",
-            "Queue one agent turn for an idle project dataset.",
-            MessageDatasetAgentInput,
-            DatasetMutationOutput,
-            _message_dataset_agent_sync,
-            False,
-            "job",
-        ),
-        (
-            "run_dataset",
-            "Run dataset",
-            "Run a dataset; approving a proposal activates it and resumes its agent request; decision=deny discards it.",
-            RunDatasetInput,
-            DatasetMutationOutput,
-            _run_dataset_sync,
-            False,
-            "job",
-        ),
     ]
     for (
         name,
@@ -404,13 +480,14 @@ def register_dataset_tools(catalog) -> None:
                 input_model=input_model,
                 output_model=output_model,
                 read_only=read_only,
-                idempotent=read_only,
+                destructive=name == "cancel_dataset",
+                idempotent=read_only or name == "cancel_dataset",
                 open_world=False,
                 required_scopes=frozenset(
                     {"overmind:read"} if read_only else {"overmind:data:write"}
                 ),
-                cost_class="llm" if name == "run_dataset" else "free",
+                cost_class="free",
                 async_mode=mode,
             ),
-            _async_handler(function),
+            sync_to_async(function, thread_sensitive=True),
         )

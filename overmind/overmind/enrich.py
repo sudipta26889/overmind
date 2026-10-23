@@ -9,7 +9,9 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+from overmind import typescript_ast
 from overmind.chassis import module_dotted_path
+from overmind.languages import PYTHON, language_of_path
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,9 @@ _CODE_LINE_RE = re.compile(
 _MIN_NESTED_PROMPT_CHARS = 40
 
 
-def source_qualnames(source: str) -> set[str]:
+def source_qualnames(source: str, rel_path: str = "") -> set[str]:
+    if language_of_path(rel_path) not in (None, PYTHON):
+        return typescript_ast.source_qualnames(source, rel_path)
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -48,10 +52,10 @@ def source_qualnames(source: str) -> set[str]:
 
 def _acceptable_names(rel_path: str, repo_root: str) -> set[str]:
     file = Path(repo_root, rel_path)
-    if not file.is_file() or file.suffix != ".py":
+    if not file.is_file() or language_of_path(rel_path) is None:
         return set()
     try:
-        qualnames = source_qualnames(file.read_text(encoding="utf-8", errors="ignore"))
+        qualnames = source_qualnames(file.read_text(encoding="utf-8", errors="ignore"), rel_path)
     except OSError:
         return set()
     module_parts = module_dotted_path(rel_path).split(".")
@@ -138,9 +142,10 @@ def _card_span_lists(card: Any) -> list[tuple[dict[str, Any], str]]:
     prov = card.get("provenance")
     if isinstance(prov, dict):
         out.append((prov, "paths"))
-    output_schema = card.get("output_schema")
-    if isinstance(output_schema, dict):
-        out.append((output_schema, "provenance"))
+    for key in ("output_schema", "model_resolution", "prompt_resolution"):
+        artifact = card.get(key)
+        if isinstance(artifact, dict):
+            out.append((artifact, "provenance"))
     for entries in (
         card.get("tool_spec"),
         card.get("constraints"),
@@ -150,6 +155,10 @@ def _card_span_lists(card: Any) -> list[tuple[dict[str, Any], str]]:
         for entry in entries if isinstance(entries, list) else []:
             if isinstance(entry, dict):
                 out.append((entry, "provenance"))
+                branches = entry.get("branches")
+                for branch in branches if isinstance(branches, list) else []:
+                    if isinstance(branch, dict):
+                        out.append((branch, "provenance"))
     return out
 
 
@@ -229,7 +238,9 @@ def _literal_prompt_text(node: ast.expr) -> str | None:
     return None
 
 
-def _prompt_text_from_source(source: str) -> str:
+def _prompt_text_from_source(source: str, rel_path: str = "") -> str:
+    if language_of_path(rel_path) not in (None, PYTHON):
+        return typescript_ast.prompt_text_from_source(source, rel_path)
     text = textwrap.dedent(source).strip()
     if not text:
         return ""
@@ -254,28 +265,25 @@ def _prompt_text_from_source(source: str) -> str:
     return max(nested, key=len) if nested else ""
 
 
+def read_prompt_span(repo_root: str, span: Any) -> str:
+    match = _PROVENANCE_SPAN_RE.match(str(span or "").strip())
+    return _prompt_text_from_source(_read_span_text(repo_root, span), match.group("path") if match else "")
+
+
 def resolve_prompt_spans(analysis: dict[str, Any], repo_root: str) -> None:
     """Fill empty system_prompt / mode prompt from a cited source span. Model text wins."""
-
-    def resolve(span: Any) -> str:
-        if not str(span or "").strip():
-            return ""
-        raw = _read_span_text(repo_root, span)
-        if not raw:
-            return ""
-        return _prompt_text_from_source(raw)
 
     for item in analysis.get("capabilities") or []:
         if not isinstance(item, dict):
             continue
         if not str(item.get("system_prompt") or "").strip():
-            text = resolve(item.get("system_prompt_span"))
+            text = read_prompt_span(repo_root, item.get("system_prompt_span"))
             if text:
                 item["system_prompt"] = text
         for mode in item.get("modes") or []:
             if not isinstance(mode, dict) or str(mode.get("prompt") or "").strip():
                 continue
-            text = resolve(mode.get("prompt_span"))
+            text = read_prompt_span(repo_root, mode.get("prompt_span"))
             if text:
                 mode["prompt"] = text
 

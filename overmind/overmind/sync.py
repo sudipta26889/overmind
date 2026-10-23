@@ -4,6 +4,9 @@
 ``overmind sync down``   GET the server snapshot; overwrite the local file.
 ``overmind sync``        up, then down.
 
+``up`` also sends each synced capability's decorator ``expectations=``, read from the
+checkout next to the toml; they never enter the toml.
+
 When ``project-id`` is missing and the API key is account-scoped, ``up`` /
 ``sync`` creates a project via ``POST /api/projects/`` and writes the id back
 before pushing. Project-scoped keys still require an explicit ``project-id``.
@@ -20,6 +23,7 @@ import requests
 import typer
 from rich.console import Console
 
+from overmind.chassis import declared_expectations
 from overmind.config import (
     DEFAULT_PATH,
     Config,
@@ -203,27 +207,46 @@ def resolve_api_url(cli_url: str, config: Config | None) -> str:
     return DEFAULT_BASE_URL
 
 
+def _sync_connection(api_key: str, api_url: str, config: Config) -> tuple[str, str]:
+    key = resolve_api_key(api_key, config)
+    url = resolve_api_url(api_url, config)
+    bound_key = config.api_key
+    if bound_key.startswith("env:"):
+        bound_key = os.environ.get(bound_key[4:], "")
+    if bound_key and key == bound_key and url != config.base_url.rstrip("/"):
+        raise SyncError(
+            "Repository credentials belong to a different API. "
+            "Use the repository's saved endpoint or an explicit matching connection. No request was sent."
+        )
+    return key, url
+
+
 def run_up(path: Path, api_key: str, api_url: str) -> Config:
     if not path.exists():
         raise SyncError(f"{path} not found — nothing to push")
     config = load(path)
-    key = resolve_api_key(api_key, config)
+    key, url = _sync_connection(api_key, api_url, config)
     if not key:
         raise SyncError("Missing API key. Pass --api-key or set OVERMIND_API_KEY.")
-    url = resolve_api_url(api_url, config)
     try:
         protect_secret_file(credentials_path(path), repo_root=path.resolve().parent)
         preflight_mcp_configs(path.resolve().parent)
     except (SecretFileError, OSError, ValueError) as exc:
         raise SyncError(str(exc)) from exc
     key_scope = _api_key_scope(key, url)
+    config.base_url = url
     if key_scope == "account":
         config.api_key = ""
     try:
         config, _ = ensure_project_id(config, path, key, url)
     except (SecretFileError, OSError, ValueError) as exc:
         raise SyncError(f"Could not persist the local project configuration: {exc}") from exc
-    snapshot = post_snapshot(url, key, config.to_snapshot())
+    snapshot = config.to_snapshot()
+    declared = declared_expectations(path.resolve().parent)
+    for body in snapshot["capabilities"]:
+        if body.get("id"):
+            body["expectations"] = declared.get(body["id"], [])
+    snapshot = post_snapshot(url, key, snapshot)
     config.apply_snapshot(snapshot)
     try:
         dump(config, path)
@@ -245,7 +268,7 @@ def run_up(path: Path, api_key: str, api_url: str) -> Config:
 
 def run_down(path: Path, api_key: str, api_url: str) -> Config:
     config = load(path) if path.exists() else Config()
-    key = resolve_api_key(api_key, config)
+    key, url = _sync_connection(api_key, api_url, config)
     if not key:
         raise SyncError("Missing API key. Pass --api-key or set OVERMIND_API_KEY.")
     if not config.project_id:
@@ -253,9 +276,9 @@ def run_down(path: Path, api_key: str, api_url: str) -> Config:
             f"{path} has no project-id (needed to fetch server state). "
             "Run `overmind sync up` first with an account-scoped key, or set project-id."
         )
-    url = resolve_api_url(api_url, config)
     snapshot = get_snapshot(url, key, config.project_id)
     config.apply_snapshot(snapshot)
+    config.base_url = url
     dump(config, path)
     return config
 

@@ -10,49 +10,73 @@ from django.utils import timezone
 
 from overbae.models import Cell, Dataset
 from overbae.services.datasets import alignment, contract, store
+from overbae.services.datasets.profile import profile_records
 
 
-def describe_frame(dataset, path, *, df=None, report=None):
-    if df is None:
-        df = store.read_frame(path)
-    report = report or contract.measure(df)
-    manifest = store.read_manifest(path)
-    null_rates = {c["name"]: c["null_rate"] for c in store.column_stats(path)}
-    capability_report = (
-        alignment.capability_contract(dataset.capability, df, dataset.intent)
-        if dataset.capability_id is not None
-        else {}
-    )
-    return {
-        "state": Cell.State.OK,
-        "error": "",
-        "rows": int(len(df)),
-        "columns": [{**c, "null_rate": null_rates.get(c["name"], 0.0)} for c in manifest],
-        "fingerprint": store.file_sha256(path),
-        "intent_report": {"train": report["train"], "eval": report["eval"]},
-        "capability_report": capability_report,
-        "stats": contract.stats(df),
-        "updated_at": timezone.now(),
-    }
-
-
-def frame(
+def describe_frame(
     dataset: Dataset,
-    cell: Cell,
     path: Path,
     *,
     df: pd.DataFrame | None = None,
     report: dict[str, Any] | None = None,
-    **fields,
-) -> Cell:
-    Cell.objects.filter(pk=cell.pk).update(
-        **{**describe_frame(dataset, path, df=df, report=report), **fields}
+) -> dict:
+    report = report or (contract.measure(df) if df is not None else contract.measure_path(path))
+    manifest = store.read_manifest(path)
+    null_rates = store.null_rates(path)
+    capability_report = (
+        capability_path(dataset.capability, path, dataset.intent)
+        if dataset.capability_id is not None
+        else {}
     )
-    cell.refresh_from_db()
-    from overbae.services.eval.eval_set import maybe_enqueue_card_evaluator_sync
+    fingerprint = store.file_sha256(path)
+    statistics = contract.RowStatistics({column["name"] for column in manifest})
+    profile = profile_records(store.iter_rows(path), observe=statistics.observe)
+    analytics = {**profile.pop("analytics"), "fingerprint": fingerprint}
+    return dict(
+        state=Cell.State.OK,
+        error="",
+        rows=store.row_count(path),
+        columns=[{**c, "null_rate": null_rates.get(c["name"], 0.0)} for c in manifest],
+        fingerprint=fingerprint,
+        intent_report={"train": report["train"], "eval": report["eval"]},
+        capability_report=capability_report,
+        stats={
+            **statistics.result(),
+            "preparation_profile": profile,
+            "analytics": analytics,
+        },
+        updated_at=timezone.now(),
+    )
 
-    maybe_enqueue_card_evaluator_sync(dataset)
+
+def frame(dataset: Dataset, cell: Cell, path: Path, *, df=None, report=None, **fields) -> Cell:
+    measured = describe_frame(dataset, path, df=df, report=report)
+    if cell.preparation_plan:
+        fields["preparation_plan"] = {
+            **cell.preparation_plan,
+            "result_fingerprint": measured["fingerprint"],
+        }
+    Cell.objects.filter(pk=cell.pk).update(**{**measured, **fields})
+    cell.refresh_from_db()
     return cell
+
+
+def capability_path(capability, path, intent):
+    report = {}
+    for df in store.iter_frames(path):
+        part = alignment.capability_contract(capability, df, intent)
+        if not report:
+            report = part
+            continue
+        report["rows"] += part.get("rows", 0)
+        report["rows_ok"] += part.get("rows_ok", 0)
+        report["ok"] = report["ok"] and part.get("ok", False)
+        if not report["ok"]:
+            report["reason"] = (
+                f"{report['rows'] - report['rows_ok']} of {report['rows']} rows "
+                "do not match the capability."
+            )
+    return report
 
 
 def capability_only(dataset: Dataset) -> None:
@@ -65,9 +89,7 @@ def capability_only(dataset: Dataset) -> None:
         if not path.exists():
             continue
         report = (
-            alignment.capability_contract(
-                dataset.capability, store.read_frame(path), dataset.intent
-            )
+            capability_path(dataset.capability, path, dataset.intent)
             if dataset.capability_id is not None
             else {}
         )

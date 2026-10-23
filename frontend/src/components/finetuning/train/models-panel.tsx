@@ -1,15 +1,11 @@
 import { type ReactNode, useId, useState } from "react";
 
-import {
-  EvidencePanel,
-  ExcludedSummary,
-  MatchScore,
-  UngradedNote,
-} from "@/components/finetuning/train/evidence";
+import { EvidencePanel, ExcludedSummary, MatchScore } from "@/components/finetuning/train/evidence";
 import { Column, FactLine, type Segment, SplitBar } from "@/components/finetuning/train/field";
 import {
   clampBatchSize,
   draftWithModel,
+  LORA_RANKS,
   MAX_MODELS,
   type ModelDraft,
   TIER_META,
@@ -31,8 +27,7 @@ import { Icon } from "@/components/ui/icons";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Spinner } from "@/components/ui/spinner";
+import { LoadingState } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import type { ModelCatalog } from "@/hooks/use-finetuning";
 import { count } from "@/lib/formatters";
@@ -46,9 +41,10 @@ import type {
 
 const CLASSIFIED_FROM: Record<TaskTypeSourceEnum, string> = {
   capability: "Classified from capability codebase context",
+  declared_contract: "Declared by the dataset's decision contract",
   heuristic: "Classified from dataset structure",
   semantic: "Classified from dataset content",
-  unknown: "Capability task could not be classified from codebase context",
+  unknown: "Task has not been classified from available context",
 };
 
 function compactTokens(tokens: number): string {
@@ -67,8 +63,8 @@ function snapshotDate(generatedAt: string): string {
 
 function MetaRow({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="col-span-2 grid grid-cols-subgrid items-start">
-      <dt className="pixel-label text-xs text-muted-foreground">{label}</dt>
+    <div className="grid min-w-0 grid-cols-1 gap-1 sm:grid-cols-[7.5rem_minmax(0,1fr)] sm:items-start sm:gap-x-4">
+      <dt className="pixel-label text-xs leading-5 text-muted-foreground">{label}</dt>
       <dd className="min-w-0">{children}</dd>
     </div>
   );
@@ -93,32 +89,45 @@ function AnalysisHeader({
     .map(([skill, weight]) => `${skill} ${Math.round(weight * 100)}%`);
 
   return (
-    <dl className="grid shrink-0 grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 border-b border-border/70 pb-3">
+    <dl className="flex shrink-0 flex-col gap-1.5">
+      {format && format !== "unknown" && (
+        <MetaRow label="Training mode">
+          <span className="text-sm text-foreground">
+            {format === "decision" ? "Decision" : "Generative"}
+          </span>
+        </MetaRow>
+      )}
       <MetaRow label="Task type">
         <FactLine
+          className="min-h-5 text-sm text-foreground"
           items={[
             <span
               className="text-foreground"
               key="type"
               title={CLASSIFIED_FROM[rec.taskTypeSource]}
             >
-              {humanizeKey(rec.taskType || "unknown")}
+              {rec.taskType && rec.taskType !== "unknown"
+                ? humanizeKey(rec.taskType)
+                : "Not classified"}
             </span>,
-            rec.taskTypeSource === "capability" || rec.taskTypeSource === "unknown"
-              ? "Capability context"
-              : "Dataset",
+            rec.taskTypeSource === "unknown"
+              ? null
+              : rec.taskTypeSource === "capability"
+                ? "Capability context"
+                : "Dataset",
           ]}
         />
       </MetaRow>
 
       <MetaRow label="Training data">
         <FactLine
+          className="min-h-5 text-sm text-foreground"
           items={[
             dataset.rows > 0 ? count(dataset.rows, "row") : null,
             format ?? null,
             dataset.totalTokens > 0 ? `~${compactTokens(dataset.totalTokens)} tokens` : null,
             dataset.maxTokenLength > 0
-              ? `longest ≈${dataset.maxTokenLength.toLocaleString()} tok`
+              ? `longest ${dataset.maxTokenLength.toLocaleString()} tokens`
               : null,
             dataset.hasToolCalling ? "tool-calling" : null,
           ]}
@@ -127,12 +136,17 @@ function AnalysisHeader({
 
       <MetaRow label="Graded on">
         <FactLine
+          className="min-h-5 text-sm text-foreground"
           items={[
             ...(blend.length > 0 ? blend : ["No skill weights"]),
             benchmarkCount > 0 ? (
               <span
                 key="benchmarks"
-                title={`Snapshot ${snapshotDate(benchmarkSnapshot.generatedAt)}`}
+                title={
+                  benchmarkSnapshot.generatedAt
+                    ? `Snapshot ${snapshotDate(benchmarkSnapshot.generatedAt)}`
+                    : undefined
+                }
               >
                 {count(benchmarkCount, "benchmark")}
               </span>
@@ -300,37 +314,20 @@ function TuneFields({
             <TuningField
               id={`lora-r-${draft.id}`}
               label="Rank"
-              min={1}
               onCommit={(v) => {
-                const r = Number.parseInt(v, 10) || 1;
+                const r = Number.parseInt(v, 10);
                 onChange({
                   ...draft,
                   loraParams: {
                     ...draft.loraParams,
-                    lora_alpha: Math.max(draft.loraParams.lora_alpha, r),
+                    lora_alpha: r * 2,
                     lora_r: r,
                   },
                 });
               }}
-              parse="int"
+              options={LORA_RANKS}
               recommended={draft.recommendedValues?.lora_r}
               value={String(draft.loraParams.lora_r)}
-            />
-            <TuningField
-              id={`lora-alpha-${draft.id}`}
-              label="Alpha"
-              min={1}
-              onCommit={(v) =>
-                onChange({
-                  ...draft,
-                  loraParams: {
-                    ...draft.loraParams,
-                    lora_alpha: Number.parseInt(v, 10) || 1,
-                  },
-                })
-              }
-              parse="int"
-              value={String(draft.loraParams.lora_alpha)}
             />
             <TuningField
               id={`lora-dropout-${draft.id}`}
@@ -435,11 +432,13 @@ function ModelRow({
                 <CreditsAmount usd={estimate.costEstimate.usd} />
               </span>
             )}
-            {estimate?.timeEstimate && (
-              <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
-                ~{estimate.timeEstimate.human}
-              </span>
-            )}
+            {estimate?.timeEstimate &&
+              (estimate.timeEstimate.seconds != null ||
+                estimate.forecast?.training_seconds != null) && (
+                <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground">
+                  ~{estimate.timeEstimate.human}
+                </span>
+              )}
             {canRemove && (
               <Button
                 aria-label={`Remove ${draft.displayName}`}
@@ -452,7 +451,6 @@ function ModelRow({
             )}
           </div>
 
-          {draft.evidence.length === 0 && <UngradedNote className="mt-1.5" />}
           {servingContext && (
             <p className="mt-1.5 text-xs text-muted-foreground">
               Serving context {servingContext.maxModelLen.toLocaleString()} tokens
@@ -541,15 +539,13 @@ export function ModelsPanel({ wizard }: { wizard: TrainWizard }) {
   const stats = validation?.stats ?? {};
   const trainRows = stats.trainExamples ?? 0;
   const valRows = stats.valExamples ?? 0;
-  const evalRows = evalDataset?.rows ?? 0;
+  const evalRows = wizard.evaluationEnabled ? (evalDataset?.rows ?? 0) : 0;
   const composition: Segment[] =
-    trainRows + valRows > 0 && evalRows > 0
+    trainRows + valRows > 0
       ? [
-          // Two shades of one hue for the two halves of the training set, a separate hue
-          // for the eval set: they come from different datasets.
           { className: "bg-primary/70", label: "Train", value: trainRows },
           { className: "bg-primary/30", label: "Validation", value: valRows },
-          { className: "bg-cat-2/70", label: "Eval", value: evalRows },
+          ...(evalRows > 0 ? [{ className: "bg-cat-2/70", label: "Eval", value: evalRows }] : []),
         ]
       : [];
 
@@ -561,26 +557,20 @@ export function ModelsPanel({ wizard }: { wizard: TrainWizard }) {
   const skillWeights = rec?.skillWeights ?? {};
 
   return (
-    <Column>
+    <Column className="[&>div:last-child]:gap-3">
       {!dataReady ? (
         <p className="flex h-24 items-center justify-center rounded-md border border-dashed border-border px-4 text-center text-xs text-muted-foreground">
-          Pick a capability and a valid dataset.
+          Select training data to see compatible models.
         </p>
       ) : recommendQuery.isLoading && drafts.length === 0 ? (
-        <>
-          <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Spinner size="sm" />
-            Reading the dataset and the capability&apos;s context
-          </p>
-          <Skeleton className="h-20 w-full shrink-0" />
-        </>
+        <LoadingState className="min-h-24" label="Loading compatible models" />
       ) : (
         <>
           {rec && (
             <AnalysisHeader
               benchmarkCount={benchmarkCount}
               composition={composition}
-              format={stats.format}
+              format={validation?.format ?? stats.format}
               rec={rec}
             />
           )}
@@ -595,7 +585,7 @@ export function ModelsPanel({ wizard }: { wizard: TrainWizard }) {
           )}
 
           {drafts.length > 0 && (
-            <ul aria-label="Experiments" className="flex flex-col gap-2">
+            <ul aria-label="Experiments" className="flex flex-col gap-3">
               {drafts.map((draft) => (
                 <ModelRow
                   canRemove={drafts.length > 1}

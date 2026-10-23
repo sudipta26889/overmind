@@ -14,10 +14,12 @@ os.environ.setdefault("FINETUNING_BACKEND", "modal")
 os.environ.setdefault("HF_TOKEN", "testing")
 os.environ.setdefault("BASETEN_API_KEY", "testing")
 os.environ.setdefault("TOGETHER_API_KEY", "testing")
+os.environ.setdefault("MODAL_ENVIRONMENT", "overmind-dev")
 os.environ.setdefault("MODAL_TOKEN_ID", "testing")
 os.environ.setdefault("MODAL_TOKEN_SECRET", "testing")
-os.environ.setdefault("CURSOR_API_KEY", "testing")
 os.environ.setdefault("OPENROUTER_API_KEY", "testing")
+os.environ.setdefault("SANDBOX_URL", "http://sandbox.test")
+os.environ.setdefault("SANDBOX_TOKEN", "testing")
 # FileField storage stays local in tests even if .env opts into hosted S3.
 os.environ["AWS_STORAGE_BUCKET_NAME"] = ""
 os.environ["AWS_STATIC_BUCKET_NAME"] = ""
@@ -54,11 +56,17 @@ CELERY_RESULT_BACKEND = JOURNEY_REDIS_URL or "cache+memory://"
 os.environ["CELERY_BROKER_URL"] = CELERY_BROKER_URL
 os.environ["CELERY_RESULT_BACKEND"] = CELERY_RESULT_BACKEND
 
+
+def _journey_cache_url(url: str) -> str:
+    base, db = url.rsplit("/", 1)
+    return f"{base}/{int(db) - 1}"
+
+
 CACHES = {
     "default": (
         {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": JOURNEY_REDIS_URL.rsplit("/", 1)[0] + "/14",
+            "LOCATION": _journey_cache_url(JOURNEY_REDIS_URL),
         }
         if JOURNEY_REDIS_URL
         else {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}

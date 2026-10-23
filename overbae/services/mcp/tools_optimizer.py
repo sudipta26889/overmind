@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
-from collections.abc import Callable
-
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.db.models import Prefetch, Q
@@ -37,43 +34,28 @@ from overbae.services.mcp.contracts.optimizer import (
     OptimizerJobReference,
     OptimizerModelReadiness,
     OptimizerNextAction,
-    OptimizerPlanReadiness,
     OptimizerResultSummary,
     OptimizerWinner,
     StartOptimizerInput,
     StartOptimizerOutput,
 )
 from overbae.services.mcp.errors import MCPError, mcp_cell, mcp_cell_contract, mcp_dataset
+from overbae.services.mcp.references import uuid_reference
 from overbae.services.mcp.resources import resource_link, safe_json
 from overbae.services.optimizer_create import (
     create_optimizer_experiment,
     validate_optimizer_models,
 )
 from overbae.services.optimizer_prereqs import optimizer_prerequisite_report
-from overbae.services.plan_limits import PlanLimitExceeded
 
 _PATCH_CAP = 4_000
-
-
-def _cell_ref(*values: str | None) -> str | None:
-    for value in values:
-        if value:
-            return value
-    return None
-
-
-def _uuid(value: str) -> str | None:
-    try:
-        return str(uuid.UUID(str(value)))
-    except (AttributeError, TypeError, ValueError):
-        return None
 
 
 def _resolve_capability(context: MCPContext, reference: str) -> Capability:
     query = Capability.objects.filter(
         project=context.project, status=Capability.Status.CURRENT
     ).select_related("active_eval_set")
-    normalized = _uuid(reference)
+    normalized = uuid_reference(reference)
     capability = query.filter(id=normalized).first() if normalized else None
     if capability is None:
         capability = query.filter(name__iexact=reference.strip()).first()
@@ -84,15 +66,11 @@ def _resolve_capability(context: MCPContext, reference: str) -> Capability:
     return capability
 
 
-def _resolve_dataset(context: MCPContext, reference: str) -> Dataset:
-    return mcp_dataset(context, reference)
-
-
 def _resolve_eval_set(context: MCPContext, reference: str, *, capability: Capability) -> EvalSet:
     query = EvalSet.objects.filter(
         Q(capability=capability) | Q(capability__isnull=True), project=context.project
     ).select_related("capability")
-    normalized = _uuid(reference)
+    normalized = uuid_reference(reference)
     eval_set = query.filter(id=normalized).first() if normalized else None
     if eval_set is None:
         matches = list(query.filter(name__iexact=reference.strip()).order_by("-created_at")[:2])
@@ -105,7 +83,7 @@ def _resolve_eval_set(context: MCPContext, reference: str, *, capability: Capabi
 
 
 def _resolve_experiment(context: MCPContext, reference: str) -> OptimizerExperiment:
-    normalized = _uuid(reference)
+    normalized = uuid_reference(reference)
     if normalized is None:
         raise MCPError("optimizer_not_found", "Use the optimizer experiment id.")
     candidates = OptimizerCandidate.objects.select_related("eval_run").order_by("candidate_index")
@@ -146,16 +124,6 @@ def _credits_available(user) -> bool:
     try:
         require_credits(user)
     except PaymentRequired:
-        return False
-    return True
-
-
-def _plan_available(user) -> bool:
-    from overbae.services.plan_limits import require_plan_quota
-
-    try:
-        require_plan_quota(user, "optimize_runs")
-    except PlanLimitExceeded:
         return False
     return True
 
@@ -218,7 +186,7 @@ def _eval_set_readiness(
         name=eval_set.name,
         capability=capability.slug,
         active=capability.active_eval_set_id == eval_set.id,
-        member_count=eval_set.members.filter(enabled=True).count(),
+        row_count=eval_set.rows.filter(enabled=True).count(),
     )
 
 
@@ -249,9 +217,9 @@ def _readiness_sync(
     capability = _resolve_capability(context, payload.capability)
     optimizer_prerequisite_report(context.project, capability)
     explicit_cell = None
-    dataset = _resolve_dataset(context, payload.dataset) if payload.dataset else None
+    dataset = mcp_dataset(context, payload.dataset) if payload.dataset else None
     if dataset is not None:
-        explicit_cell = mcp_cell(dataset, _cell_ref(payload.cell, payload.version))
+        explicit_cell = mcp_cell(dataset, payload.cell or payload.version or None)
     if dataset is None:
         for candidate in Dataset.objects.filter(
             project=context.project, capability=capability, intent=Dataset.Intent.EVAL
@@ -270,7 +238,6 @@ def _readiness_sync(
     executioner = _executioner()
     models = _model_readiness(payload.mode, payload.model_ids, capability)
     credits = OptimizerCreditReadiness(available=_credits_available(context.user))
-    plan = OptimizerPlanReadiness(available=_plan_available(context.user))
 
     missing: list[str] = []
     if dataset_data is None:
@@ -283,8 +250,6 @@ def _readiness_sync(
         missing.append(f"model selection: {models.issue or 'invalid'}")
     if not credits.available:
         missing.append("credits")
-    if not plan.available:
-        missing.append("plan quota")
 
     ready = not missing
     links = [resource_link("capabilities", str(capability.id), capability.name)]
@@ -300,7 +265,6 @@ def _readiness_sync(
         executioner=executioner,
         models=models,
         credits=credits,
-        plan=plan,
         next_action=_next_action(ready=ready),
         resource_links=links,
     )
@@ -326,8 +290,8 @@ def _start_sync(payload: StartOptimizerInput, context: MCPContext) -> StartOptim
             fields={"missing": ", ".join(readiness.missing)[:500]},
         )
     capability = _resolve_capability(context, payload.capability)
-    dataset = _resolve_dataset(context, payload.dataset)
-    cell = mcp_cell(dataset, _cell_ref(payload.cell, payload.version))
+    dataset = mcp_dataset(context, payload.dataset)
+    cell = mcp_cell(dataset, payload.cell or payload.version or None)
     eval_set = (
         _resolve_eval_set(context, payload.eval_set, capability=capability)
         if payload.eval_set
@@ -358,10 +322,6 @@ def _start_sync(payload: StartOptimizerInput, context: MCPContext) -> StartOptim
             "optimizer_invalid",
             "The optimizer request failed validation.",
             fields={"request": _validation_message(error)},
-        ) from error
-    except PlanLimitExceeded as error:
-        raise MCPError(
-            "plan_limit_exceeded", "The optimizer plan quota has been reached."
         ) from error
 
     executioner = _executioner()
@@ -400,14 +360,10 @@ def _start_sync(payload: StartOptimizerInput, context: MCPContext) -> StartOptim
 def _candidate_coverage_fields(candidate: OptimizerCandidate) -> dict:
     scores = candidate.scores or {}
     coverage = scores.get("coverage") or {}
-    measurement = scores.get("measurement") or {}
-    uncovered = list(measurement.get("uncovered_card_claims") or [])
     return {
         "coverage_rate": scores.get("coverage_rate", coverage.get("coverage_rate")),
         "graded_rows": scores.get("graded_rows", coverage.get("graded_rows")),
         "total_rows": scores.get("total_rows", coverage.get("total_rows")),
-        "suite_incomplete": bool(uncovered),
-        "uncovered_card_claims": uncovered,
     }
 
 
@@ -566,13 +522,6 @@ def _inspect_sync(
     )
 
 
-def _async_handler(function: Callable):
-    async def handler(payload, context):
-        return await sync_to_async(function, thread_sensitive=True)(payload, context)
-
-    return handler
-
-
 def register_optimizer_tools(catalog) -> None:
     from overbae.services.mcp.catalog import ToolDefinition
 
@@ -644,5 +593,5 @@ def register_optimizer_tools(catalog) -> None:
                 cost_class=cost_class,
                 async_mode=async_mode,
             ),
-            _async_handler(function),
+            sync_to_async(function, thread_sensitive=True),
         )

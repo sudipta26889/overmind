@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import ipaddress
-from dataclasses import dataclass
-from typing import Any
+from io import BytesIO
 
 from asgiref.sync import sync_to_async
 from django.conf import settings
-from django.db import close_old_connections, connections
+from django.core.handlers.asgi import ASGIRequest
 from rest_framework import exceptions
-from starlette.datastructures import URL, Headers
+from starlette.datastructures import URL
 from starlette.responses import JSONResponse
 from starlette.types import Receive, Scope, Send
 
@@ -23,19 +22,8 @@ from overbae.services.mcp.oauth import authenticate_access
 MCP_PATH = "/api/mcp/"
 
 
-@dataclass(frozen=True)
-class _HeaderRequest:
-    headers: Headers
-    method: str
-    META: dict[str, Any]
-
-
-def _request_for_scope(scope: Scope) -> _HeaderRequest:
-    return _HeaderRequest(
-        headers=Headers(scope=scope),
-        method=scope.get("method", "GET"),
-        META={"REMOTE_ADDR": (scope.get("client") or (None, None))[0]},
-    )
+def _request_for_scope(scope: Scope) -> ASGIRequest:
+    return ASGIRequest(scope, BytesIO())
 
 
 def _auth_error(detail: str) -> MCPError:
@@ -49,7 +37,7 @@ def _auth_error(detail: str) -> MCPError:
     return MCPError("authentication_failed", "The API key is invalid.")
 
 
-def _ip_allowed(token: APIToken, client_ip: str | None) -> bool:
+def ip_allowed(token: APIToken, client_ip: str | None) -> bool:
     allowed_ips = token.allowed_ips or []
     if not allowed_ips:
         return True
@@ -71,18 +59,7 @@ def _ip_allowed(token: APIToken, client_ip: str | None) -> bool:
     return False
 
 
-def recycle_connections() -> None:
-    close_old_connections()
-    for conn in connections.all(initialized_only=True):
-        raw = conn.connection
-        # psycopg still sits on the wrapper after RDS closes the TCP session.
-        if raw is not None and getattr(raw, "closed", 0):
-            conn.close()
-
-
 def _authenticate_sync(scope: Scope) -> MCPContext:
-    # Starlette MCP never runs Django's request_started/finished.
-    recycle_connections()
     request = _request_for_scope(scope)
     authorization = request.headers.get("Authorization", "").split(None, 1)
     if (
@@ -99,10 +76,12 @@ def _authenticate_sync(scope: Scope) -> MCPContext:
             token=token,
             project=None,
             client_ip=(scope.get("client") or (None, None))[0],
-            inference_base_url=str(URL(scope=scope).replace(path="/api/v1", query="")),
+            inference_base_url=str(
+                URL(scope=scope).replace(scheme=request.scheme, path="/api/v1", query="")
+            ),
         )
     try:
-        result = APITokenBackend().authenticate(_request_for_scope(scope))
+        result = APITokenBackend().authenticate(request)
     except exceptions.AuthenticationFailed as exc:
         raise _auth_error(str(exc.detail)) from None
 
@@ -114,7 +93,7 @@ def _authenticate_sync(scope: Scope) -> MCPContext:
         raise MCPError("authentication_failed", "An MCP API key is required.")
 
     client_ip = (scope.get("client") or (None, None))[0]
-    if not _ip_allowed(token, client_ip):
+    if not ip_allowed(token, client_ip):
         raise MCPError("authentication_failed", "The API key is not valid for this address.")
 
     token_scope = token.scope if isinstance(token.scope, dict) else {}
@@ -157,12 +136,13 @@ def _authenticate_sync(scope: Scope) -> MCPContext:
         token=token,
         project=project,
         client_ip=client_ip,
-        inference_base_url=str(URL(scope=scope).replace(path="/api/v1", query="")),
+        inference_base_url=str(
+            URL(scope=scope).replace(scheme=request.scheme, path="/api/v1", query="")
+        ),
     )
 
 
 authenticate_scope = sync_to_async(_authenticate_sync, thread_sensitive=True)
-_recycle_connections = sync_to_async(recycle_connections, thread_sensitive=True)
 
 
 class MCPAuthMiddleware:
@@ -175,23 +155,20 @@ class MCPAuthMiddleware:
             return
 
         try:
-            try:
-                context = await authenticate_scope(scope)
-            except MCPError as error:
-                headers = {}
-                if settings.MCP_SERVER_URL:
-                    origin = settings.MCP_SERVER_URL.removesuffix("/api/mcp/")
-                    headers["WWW-Authenticate"] = (
-                        f'Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource/api/mcp/"'
-                    )
-                response = JSONResponse(
-                    {"error": error_payload(error)},
-                    status_code=401 if error.data.code.startswith("authentication") else 403,
-                    headers=headers,
+            context = await authenticate_scope(scope)
+        except MCPError as error:
+            headers = {}
+            if settings.MCP_SERVER_URL:
+                origin = settings.MCP_SERVER_URL.removesuffix("/api/mcp/")
+                headers["WWW-Authenticate"] = (
+                    f'Bearer resource_metadata="{origin}/.well-known/oauth-protected-resource/api/mcp/"'
                 )
-                await response(scope, receive, send)
-                return
-            with bind_context(context):
-                await self.app(scope, receive, send)
-        finally:
-            await _recycle_connections()
+            response = JSONResponse(
+                {"error": error_payload(error)},
+                status_code=401 if error.data.code.startswith("authentication") else 403,
+                headers=headers,
+            )
+            await response(scope, receive, send)
+            return
+        with bind_context(context):
+            await self.app(scope, receive, send)

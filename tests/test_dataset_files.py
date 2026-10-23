@@ -10,7 +10,7 @@ from overbae.services.datasets import files
 def _read(tmp_path, name: str, body: str | bytes):
     path = tmp_path / name
     path.write_bytes(body if isinstance(body, bytes) else body.encode())
-    return files.read_file_rows(path, filename=name)
+    return list(files.FileRows(path, filename=name))
 
 
 @pytest.mark.parametrize(
@@ -29,7 +29,7 @@ def _read(tmp_path, name: str, body: str | bytes):
         ("scalar.json", "3", "object or an array"),
         ("fake.parquet", "not parquet", "not readable Parquet"),
         ("fake.csv.gz", "not gzip", "not readable gzip"),
-        ("notes.txt", "hello", "Use a CSV, TSV, JSON, JSONL or Parquet file."),
+        ("notes.exe", "hello", "Use a CSV"),
     ],
 )
 def test_a_bad_file_is_refused_in_words(tmp_path, name, body, message):

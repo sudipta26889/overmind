@@ -187,18 +187,7 @@ def evaluate_iteration(experiment: OptimizerExperiment, order: int) -> Optimizer
         experiment.current_iteration = max(experiment.current_iteration, order)
     experiment.save(update_fields=["status", "current_iteration", "updated_at"])
 
-    dispatched = experiment.start_iteration_eval(order)
-    if not dispatched:
-        # No runnable evaluators: _evaluate_commands_stub already ran inside start_iteration_eval.
-        experiment._record_eval_scores(iteration)
-        evaluated_status = (
-            OptimizerExperiment.Status.EVALUATED_BASELINE_OUTPUTS
-            if order == 0
-            else OptimizerExperiment.Status.EVALUATED_CANDIDATE_OUTPUTS
-        )
-        experiment.status = evaluated_status
-        experiment.save()
-
+    experiment.start_iteration_eval(order)
     experiment.refresh_from_db()
     return experiment
 
@@ -220,6 +209,5 @@ def complete_experiment(experiment: OptimizerExperiment) -> OptimizerExperiment:
     experiment.status = OptimizerExperiment.Status.COMPLETED
     experiment._stop_children(reason="experiment completed")
     experiment.save()
-    experiment._charge_cursor_usage()
     experiment.refresh_from_db()
     return experiment

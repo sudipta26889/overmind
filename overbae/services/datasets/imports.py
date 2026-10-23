@@ -13,15 +13,15 @@ from datetime import timedelta
 from celery import current_app
 from django.conf import settings
 from django.db import transaction
-from django.db.models import DateTimeField, ExpressionWrapper, F, Q, Value
+from django.db.models import DateTimeField, Exists, ExpressionWrapper, F, Q, Value
 from django.db.models.functions import Least
 from django.utils import timezone
 
 from overbae.models import Dataset, DatasetImport, User
-from overbae.services.datasets import files, heartbeat, llm_calls, paths
+from overbae.services.datasets import events, files, heartbeat, llm_calls, operations, paths
 from overbae.services.datasets import land as landing
-from overbae.services.datasets.lifecycle import DatasetError, claim_workshop, queue_workshop
-from overbae.services.datasets.notebook import events
+from overbae.services.datasets.lifecycle import DatasetError
+from overbae.services.datasets.progress import ProgressThrottle
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +67,12 @@ def _source_inputs(inputs):
     manifest = []
     for value in _uploads(inputs["source"]):
         upload_id = str(uuid.UUID(str(value)))
-        path = files.upload_data_path(upload_id)
         filename = files.upload_filename(upload_id)
-        if not filename or not path.is_file():
+        try:
+            stat = files.stored_stat(files.upload_data_path(upload_id))
+        except OSError:
+            stat = None
+        if not filename or stat is None:
             raise DatasetError(
                 "The source upload is missing. Upload it again.", code="source_missing"
             )
@@ -79,7 +82,6 @@ def _source_inputs(inputs):
                 "before creating a dataset from it.",
                 code="upload_not_inspected",
             )
-        stat = path.stat()
         manifest.append(
             {
                 "upload_id": upload_id,
@@ -154,6 +156,8 @@ def queue_landing_receipt(dataset, task_id, inputs, *, published=False, preserve
 
 
 def enqueue(dataset, inputs):
+    if dataset.ocr_languages:
+        inputs = {**inputs, "source": {**inputs["source"], "ocr_languages": dataset.ocr_languages}}
     run = queue_landing_receipt(dataset, uuid.uuid4(), inputs)
     transaction.on_commit(lambda: publish(run.pk))
     return run
@@ -235,8 +239,8 @@ def claim(run_id):
     if run.state != DatasetImport.State.QUEUED:
         return None
     now = timezone.now()
-    queue_seconds = getattr(settings, "DATASET_IMPORT_MAX_QUEUE_SECONDS", 15 * 60)
-    if run.queued_at < now - timedelta(seconds=queue_seconds):
+    queue_seconds = settings.DATASET_IMPORT_MAX_QUEUE_SECONDS or None
+    if queue_seconds is not None and run.queued_at < now - timedelta(seconds=queue_seconds):
         _block(
             run,
             "queue_timeout",
@@ -334,6 +338,51 @@ def resume(run_id):
     return _requeue(run)
 
 
+def stopped_draft(dataset):
+    from overbae.models import DatasetLandingWork
+
+    if (
+        dataset.state != Dataset.State.ERROR
+        or dataset.cells.exists()
+        or DatasetImport.objects.filter(dataset=dataset).exists()
+    ):
+        return None
+    work = DatasetLandingWork.objects.filter(
+        pk=dataset.operation.get("task_id"), dataset=dataset, state="failed"
+    ).first()
+    return work if work and _uploads(work.inputs["source"]) else None
+
+
+@transaction.atomic
+def resume_dataset(dataset):
+    run = DatasetImport.objects.filter(
+        Q(dataset=dataset) | Q(evaluation=dataset), state=DatasetImport.State.BLOCKED
+    ).first()
+    if run is None and (work := stopped_draft(dataset)) is not None:
+        run = queue_landing_receipt(dataset, work.pk, work.inputs, preserve_error=True)
+    if run is None:
+        raise DatasetError("No stopped source import is available.", code="import_not_found")
+    resume(run.pk)
+    dataset.refresh_from_db()
+    return dataset
+
+
+def status(dataset):
+    run = DatasetImport.objects.filter(Q(dataset=dataset) | Q(evaluation=dataset)).first()
+    if run is None:
+        return None
+    return {
+        "id": str(run.pk),
+        "state": run.state,
+        "attempts": run.attempts,
+        "queued_at": run.queued_at.isoformat(),
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "failure_code": run.failure_code,
+        "error": run.error,
+        "can_resume": run.state == DatasetImport.State.BLOCKED and run.attempts < MAX_ATTEMPTS,
+    }
+
+
 def _requeue(run):
     """The caller holds the receipt's row lock."""
     targets = list(
@@ -364,12 +413,12 @@ def _requeue(run):
 
 def validate_sources(run):
     for source in run.source_manifest:
-        path = files.upload_data_path(source["upload_id"])
-        if not path.is_file():
+        try:
+            stat = files.stored_stat(files.upload_data_path(source["upload_id"]))
+        except OSError as exc:
             raise DatasetError(
                 "The saved upload is missing. Upload it again.", code="source_missing"
-            )
-        stat = path.stat()
+            ) from exc
         if stat.st_size != source["bytes"] or stat.st_mtime_ns != source["mtime_ns"]:
             raise DatasetError(
                 "The saved upload changed after it was queued.", code="source_changed"
@@ -400,142 +449,18 @@ def _release_sources(run):
             files.discard_upload(source["upload_id"])
 
 
-def publish_handoffs(run_id):
-    # The task imports this service, so task imports stay at dispatch boundaries.
-    from overbae.tasks.datasets import diagnose
-
-    with transaction.atomic():
-        run = DatasetImport.objects.select_for_update().get(pk=run_id)
-        now = timezone.now()
-        if run.state != DatasetImport.State.COMPLETE or not run.handoff_pending:
-            return
-        if run.handoff_lease_until and run.handoff_lease_until > now:
-            return
-        published = set(run.result.get("diagnose_published", []))
-        retired = set(run.result.get("diagnose_retired", []))
-        pending = [
-            target for target in run.result.get("diagnose", []) if target not in published | retired
-        ]
-        if run.handoff_attempts >= MAX_PUBLICATIONS:
-            unstarted = set(pending) - set(run.result.get("diagnose_claimed", []))
-            Dataset.objects.filter(pk__in=unstarted, state=Dataset.State.DIAGNOSING).update(
-                state=Dataset.State.ERROR,
-                error="The source landed, but the agent could not be queued. Send a message to retry.",
-                updated_at=now,
-            )
-            run.handoff_pending = False
-            run.save(update_fields=["handoff_pending", "updated_at"])
-            return
-        owner = uuid.uuid4()
-        run.handoff_owner = owner
-        run.handoff_lease_until = now + timedelta(seconds=PUBLISH_LEASE_SECONDS)
-        run.handoff_attempts += 1
-        run.save(
-            update_fields=["handoff_owner", "handoff_lease_until", "handoff_attempts", "updated_at"]
-        )
-    for dataset_id in pending:
-        task_id = str(uuid.uuid5(run.pk, f"diagnose:{dataset_id}"))
-        try:
-            with current_app.connection_for_write(
-                connect_timeout=5,
-                transport_options={"socket_connect_timeout": 5, "socket_timeout": 5},
-            ) as connection:
-                diagnose.apply_async(
-                    kwargs={"dataset_id": dataset_id, "user_id": run.inputs.get("user_id")},
-                    task_id=task_id,
-                    connection=connection,
-                    retry=False,
-                )
-        except Exception:  # noqa: BLE001 — the completed import retains its handoff
-            logger.exception("could not publish diagnosis for dataset import %s", run_id)
-            return
-        with transaction.atomic():
-            locked = DatasetImport.objects.select_for_update().get(pk=run_id)
-            if locked.handoff_owner != owner:
-                return
-            acknowledged = list(locked.result.get("diagnose_published", []))
-            if dataset_id not in acknowledged:
-                acknowledged.append(dataset_id)
-            locked.result = {**locked.result, "diagnose_published": acknowledged}
-            locked.save(update_fields=["result", "updated_at"])
-    DatasetImport.objects.filter(pk=run_id, handoff_owner=owner).update(
-        handoff_pending=False,
-        handoff_owner=None,
-        handoff_lease_until=None,
-        updated_at=timezone.now(),
-    )
-
-
-@contextmanager
-def explicit_operation(dataset_id):
-    with transaction.atomic():
-        receipt = (
-            DatasetImport.objects.select_for_update()
-            .filter(Q(dataset_id=dataset_id) | Q(evaluation_id=dataset_id))
-            .first()
-        )
-        dataset = Dataset.objects.select_for_update().get(pk=dataset_id)
-        previous_state = dataset.state
-        yield dataset
-        if (
-            receipt is None
-            or receipt.state != DatasetImport.State.COMPLETE
-            or previous_state not in (Dataset.State.IDLE, Dataset.State.ERROR)
-            or dataset.state not in (Dataset.State.DIAGNOSING, Dataset.State.RUNNING)
-            or dataset.source is None
-        ):
-            return
-        target = str(dataset_id)
-        retired = list(receipt.result.get("diagnose_retired", []))
-        if (
-            target in receipt.result.get("diagnose", [])
-            and target not in receipt.result.get("diagnose_claimed", [])
-            and target not in retired
-        ):
-            retired.append(target)
-            receipt.result = {**receipt.result, "diagnose_retired": retired}
-            receipt.save(update_fields=["result", "updated_at"])
-
-
-@transaction.atomic
-def claim_diagnosis(dataset_id, task_id):
-    run = (
-        DatasetImport.objects.select_for_update()
-        .filter(Q(dataset_id=dataset_id) | Q(evaluation_id=dataset_id))
-        .first()
-    )
-    if run is None:
-        return claim_workshop(dataset_id, task_id, state=Dataset.State.DIAGNOSING)
-    target = str(dataset_id)
-    if (
-        run.state != DatasetImport.State.COMPLETE
-        or target not in run.result.get("diagnose", [])
-        or target in run.result.get("diagnose_retired", [])
-        or str(task_id) != str(uuid.uuid5(run.pk, f"diagnose:{target}"))
-    ):
-        return False
-    claimed = list(run.result.get("diagnose_claimed", []))
-    if target in claimed:
-        return False
-    dataset = Dataset.objects.select_for_update().get(pk=dataset_id)
-    if dataset.state != Dataset.State.DIAGNOSING or dataset.source is None:
-        return False
-    if not claim_workshop(dataset_id, task_id, state=Dataset.State.DIAGNOSING):
-        return False
-    claimed.append(target)
-    run.result = {**run.result, "diagnose_claimed": claimed}
-    run.save(update_fields=["result", "updated_at"])
-    return True
-
-
 def reconcile():
     now = timezone.now()
-    queue_seconds = getattr(settings, "DATASET_IMPORT_MAX_QUEUE_SECONDS", 15 * 60)
+    queue_seconds = settings.DATASET_IMPORT_MAX_QUEUE_SECONDS or None
     candidates = (
         DatasetImport.objects.filter(
-            Q(
-                state=DatasetImport.State.QUEUED,
-                queued_at__lt=now - timedelta(seconds=queue_seconds),
+            (
+                Q(
+                    state=DatasetImport.State.QUEUED,
+                    queued_at__lt=now - timedelta(seconds=queue_seconds),
+                )
+                if queue_seconds is not None
+                else Q(pk__in=[])
             )
             | Q(
                 state=DatasetImport.State.QUEUED,
@@ -543,10 +468,6 @@ def reconcile():
                 next_publish_at__lte=now,
             )
             | Q(state=DatasetImport.State.RUNNING, lease_until__lt=now)
-            | (
-                Q(state=DatasetImport.State.COMPLETE, handoff_pending=True)
-                & (Q(handoff_lease_until__isnull=True) | Q(handoff_lease_until__lte=now))
-            )
         )
         .order_by("queued_at")
         .values_list("pk", flat=True)[:RECONCILE_BATCH]
@@ -564,7 +485,12 @@ def reconcile():
                 and run.lease_until
                 and run.lease_until < now
             ):
-                if run.attempts >= MAX_ATTEMPTS:
+                from overbae.models import DatasetLandingWork
+
+                if (
+                    run.attempts >= MAX_ATTEMPTS
+                    or DatasetLandingWork.objects.filter(pk=run.pk).exists()
+                ):
                     _block(
                         run,
                         "worker_timeout",
@@ -575,8 +501,10 @@ def reconcile():
                         _requeue(run)
                     except DatasetError as exc:
                         _block(run, exc.code, exc.detail)
-            elif run.state == DatasetImport.State.QUEUED and run.queued_at < now - timedelta(
-                seconds=queue_seconds
+            elif (
+                run.state == DatasetImport.State.QUEUED
+                and queue_seconds is not None
+                and run.queued_at < now - timedelta(seconds=queue_seconds)
             ):
                 _block(
                     run,
@@ -585,8 +513,6 @@ def reconcile():
                 )
             elif run.state == DatasetImport.State.QUEUED:
                 transaction.on_commit(lambda run_id=run_id: publish(run_id))
-            elif run.handoff_pending:
-                transaction.on_commit(lambda run_id=run_id: publish_handoffs(run_id))
         processed += 1
     return {"processed": processed}
 
@@ -594,14 +520,39 @@ def reconcile():
 def _read_parts(run, targets):
     source = run.inputs["source"]
     split = run.inputs.get("split")
+
+    def progress(detail):
+        for target in targets:
+            current = DatasetImport.objects.filter(
+                pk=run.pk, owner=run.owner, state=DatasetImport.State.RUNNING
+            )
+            changed = Dataset.objects.filter(
+                Exists(current), pk=target.pk, state=Dataset.State.LANDING
+            ).update(
+                source_spec={**target.source_spec, "landing_progress": detail},
+                updated_at=timezone.now(),
+            )
+            if changed:
+                events.publish(
+                    target.pk, {"type": "land_progress", "dataset_id": str(target.pk), **detail}
+                )
+
+    progress = ProgressThrottle(progress)
+    extraction = {
+        "project_id": run.dataset.project_id,
+        "ocr_languages": source.get("ocr_languages", []),
+    }
     if source.get("uploads"):
-        read = landing.read_uploads(source["uploads"])
+        read = landing.read_uploads(source["uploads"], on_progress=progress, **extraction)
         if source.get("pasted"):
             read = replace(read, spec={"pasted": True})
     elif source.get("upload_id"):
         read = landing.read_file(
             files.upload_data_path(source["upload_id"]),
             filename=source.get("filename") or files.upload_filename(source["upload_id"]),
+            json_rows_field=source.get("json_rows_field"),
+            on_progress=progress,
+            **extraction,
         )
     elif source.get("traces") is not None:
         read = landing.read_traces(
@@ -664,7 +615,7 @@ def _read_parts(run, targets):
     else:
         raise landing.LandError("No saved source is available.")
     if not split:
-        return [(targets[0], read)], Dataset.State.DIAGNOSING
+        return [(targets[0], read)], Dataset.State.IDLE
     cut = {
         "eval_percent": int(split["eval_percent"]),
         "position": split["position"],
@@ -684,7 +635,7 @@ def _read_parts(run, targets):
             (targets[0], train, "train", targets[1]),
             (targets[1], evaluation, "eval", targets[0]),
         )
-    ], Dataset.State.DIAGNOSING
+    ], Dataset.State.IDLE
 
 
 def execute(task_id, inputs):
@@ -700,12 +651,15 @@ def execute(task_id, inputs):
         )
     elif task_id and str(run.pk) != str(task_id):
         return {"status": "superseded"}
+    if dataset.operation.get("state") == "cancelled":
+        DatasetImport.objects.filter(pk=run.pk).update(state=DatasetImport.State.CANCELLED)
+        return {"status": "cancelled"}
     claimed = claim(run.pk)
     if claimed is None:
         run.refresh_from_db()
         return {"status": run.state}
     stage = paths.dataset_dir(dataset.pk) / "imports" / str(run.pk) / str(claimed.owner)
-    beat = heartbeat.start(lambda: renew(claimed))
+    beat = heartbeat.start(lambda: renew(claimed), owner=f"import {run.pk}")
     try:
         run.refresh_from_db()
         validate_sources(run)
@@ -716,6 +670,14 @@ def execute(task_id, inputs):
             else None
         )
         for target in targets:
+            Dataset.objects.filter(pk=target.pk).update(
+                operation={
+                    "task_id": str(run.pk),
+                    "state": "running",
+                    "started_at": run.started_at.isoformat(),
+                    "queued_at": run.queued_at.isoformat(),
+                }
+            )
             events.publish(target.pk, {"type": "land_started", "dataset_id": str(target.pk)})
         parts, state = _read_parts(run, targets)
         prepared = [
@@ -732,7 +694,7 @@ def execute(task_id, inputs):
             for target, part in parts
         ]
         validate_sources(run)
-        if state == Dataset.State.IDLE:
+        if run.inputs["source"].get("llm_calls") is not None:
             for target, result in prepared:
                 report = result.cell_fields["intent_report"].get(target.intent, {})
                 if not report.get("ok") or not result.cell_fields["rows"]:
@@ -743,23 +705,14 @@ def execute(task_id, inputs):
             rows = 0
             for target, result in prepared:
                 landing.publish(target, result, user=user)
-                if state == Dataset.State.DIAGNOSING:
-                    queue_workshop(target.pk, str(uuid.uuid5(run.pk, f"diagnose:{target.pk}")))
                 rows += result.cell_fields["rows"]
             locked.state = DatasetImport.State.COMPLETE
-            locked.result = {
-                "rows": rows,
-                "diagnose": [str(target.pk) for target in targets]
-                if state == Dataset.State.DIAGNOSING
-                else [],
-            }
-            locked.handoff_pending = bool(locked.result["diagnose"])
+            locked.result = {"rows": rows}
             locked.owner = locked.lease_until = None
             locked.save(
                 update_fields=[
                     "state",
                     "result",
-                    "handoff_pending",
                     "owner",
                     "lease_until",
                     "updated_at",
@@ -779,7 +732,6 @@ def execute(task_id, inputs):
             _release_sources(run)
         except OSError:
             logger.exception("could not clean up completed dataset import %s", run.pk)
-        publish_handoffs(run.pk)
         return {"status": "ok", "rows": rows}
     except Exception as exc:  # noqa: BLE001 — a failed attempt retains its exact source
         logger.exception("dataset import %s failed", run.pk)
@@ -787,4 +739,6 @@ def execute(task_id, inputs):
         return {"status": "failed", "error": str(exc)}
     finally:
         beat.set()
+        for target_id in _target_ids(run):
+            operations.finished(target_id, task_id=str(run.pk))
         shutil.rmtree(stage, ignore_errors=True)

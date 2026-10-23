@@ -27,31 +27,6 @@ PY
 """
 
 
-def _workshop_corrects_references(fake_llm) -> None:
-    def offers(request, tool):
-        return any(
-            (t.get("function") or {}).get("name") == tool for t in request.body.get("tools") or []
-        )
-
-    def turn(request):
-        if any(m.get("role") == "tool" for m in request.messages[-2:]):
-            return {"content": "Set the corrected reply as the reference."}
-        script = f"df['expected_output'] = {GOOD_REPLY!r}\n"
-        call = {"title": "Correct the references", "script": script}
-        return {
-            "content": None,
-            "tool_calls": [
-                {
-                    "id": "call_references",
-                    "type": "function",
-                    "function": {"name": "add_cell", "arguments": json.dumps(call)},
-                }
-            ],
-        }
-
-    fake_llm.on(lambda r: offers(r, "add_cell") and "failures, not references" in r.text, turn)
-
-
 def _candidate_diff(repo) -> str:
     agent = repo / "support_desk" / "agent.py"
     original = agent.read_text()
@@ -75,7 +50,7 @@ def test_failing_traces_become_a_measured_winning_diff(
     worker,
     live_api,
     support_desk_llm,
-    rubric_judges,
+    judges,
     fake_llm,
     tmp_path,
 ):
@@ -87,25 +62,46 @@ def test_failing_traces_become_a_measured_winning_diff(
 
     sample_agent.run(*TICKETS, api_url=live_api.url, llm_url=support_desk_llm)
     drain(worker)
-    executions = mcp.call("query_task_executions", {"capability": "answer"})["task_executions"]
-    assert len(executions) == len(TICKETS)
-    assert all(e["success_score"] < 1 for e in executions)
+    failures = mcp.call("query_failures", {"capability": "answer"})["failures"]
+    assert len(failures) == len(TICKETS)
 
     created = mcp.call(
         "create_dataset_from_traces",
         {
             "name": "answer misses",
-            "trace_ids": [e["trace_id"] for e in executions],
+            "trace_ids": [f["trace_id"] for f in failures],
             "intent": "eval",
             "capability": answer["id"],
         },
     )
     dataset = created["dataset"]["id"]
     drain(worker)
-    _workshop_corrects_references(fake_llm)
+    source = mcp.call("inspect_dataset", {"dataset": dataset})["active"]
+    rows = mcp.call("query_dataset", {"dataset": dataset, "sql": "select * from t"})["rows"]
     mcp.call(
-        "message_dataset_agent",
-        {"dataset": dataset, "message": "These rows are failures, not references. Correct them."},
+        "import_dataset_version",
+        {
+            "dataset": dataset,
+            "source_cell": source["id"],
+            "source_fingerprint": source["fingerprint"],
+            "request_key": "correct-fixture-references",
+            "name": "Correct the references",
+            "imported_rows": [
+                {
+                    **row,
+                    "input": {
+                        "messages": [
+                            message
+                            for message in row["messages"]
+                            if message["role"] in {"system", "user"}
+                        ]
+                    },
+                    "expected_output": GOOD_REPLY,
+                }
+                for row in rows
+            ],
+            "provenance": "The native agent projects system and user messages for answer replay and applies the support-desk fixture's declared correct reply. Full source transcripts and row identities remain retained.",
+        },
     )
     drain(worker)
     references = mcp.call(

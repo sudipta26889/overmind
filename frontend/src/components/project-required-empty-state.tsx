@@ -1,25 +1,13 @@
-import { OnboardWithAiPanel } from "@/components/quickstart/onboard-with-ai-panel";
+import { Navigate } from "@tanstack/react-router";
+
+import { QuickstartEmbed } from "@/components/quickstart/quickstart-embed";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Icon } from "@/components/ui/icons";
-import { Skeleton } from "@/components/ui/skeleton";
+import { LoadingState } from "@/components/ui/spinner";
 import { useProjectsList } from "@/hooks/use-projects";
 
 export function NoProjectsEmptyState() {
-  return (
-    <div className="mx-auto w-full max-w-2xl space-y-6">
-      <EmptyState
-        description="Paste the onboarding prompt in your coding agent. A project appears here after overmind sync."
-        icon={Icon.folderAdd}
-        title="Set up from your repository"
-      />
-      <div className="overflow-hidden rounded-md border border-border p-4">
-        <OnboardWithAiPanel
-          showManualSetup={false}
-          waitingHint="This page refreshes when init sync creates your first project."
-        />
-      </div>
-    </div>
-  );
+  return <QuickstartEmbed />;
 }
 
 export function ProjectRequiredEmptyState({
@@ -33,17 +21,11 @@ export function ProjectRequiredEmptyState({
   const projects = data?.projects ?? [];
 
   if (isLoading) {
-    return (
-      <div className="flex min-h-[400px] flex-1 flex-col items-center justify-center gap-3">
-        <Skeleton className="h-12 w-12 rounded-sm" />
-        <Skeleton className="h-8 w-64" />
-        <Skeleton className="h-4 w-80" />
-      </div>
-    );
+    return <LoadingState fullPage label="Loading projects" />;
   }
 
   if (projects.length === 0) {
-    return <NoProjectsEmptyState />;
+    return <Navigate replace search={{ projectId: undefined }} to="/" />;
   }
 
   return <EmptyState description={description} icon={Icon.folderAdd} title={title} />;

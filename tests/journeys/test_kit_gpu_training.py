@@ -26,6 +26,7 @@ def training(workshop, cli, sample_agent, worker, sft, fake_modal, beat, tmp_pat
     job = workshop.call(
         "start_finetune",
         {
+            "request_key": "train-support-model",
             "dataset": train,
             "eval_dataset": evals,
             "base_model": "Qwen/Qwen3-1.7B",

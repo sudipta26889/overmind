@@ -2,14 +2,13 @@ import { Link } from "@tanstack/react-router";
 
 import { Badge } from "@/components/ui/badge";
 import { Icon } from "@/components/ui/icons";
-import { Spinner } from "@/components/ui/spinner";
 import { INTENT_LABEL, type UsedVersionInfo } from "@/hooks/use-datasets";
 import { cn } from "@/lib/utils";
-import type { Dataset } from "@/openapi";
 
 export const SOURCE_KIND_LABEL: Record<string, string> = {
   file: "File",
   llm_calls: "LLM calls",
+  pending: "Pending",
   traces: "Traces",
 };
 
@@ -23,45 +22,10 @@ export function IntentBadge({
 }) {
   if (!intent) return null;
   return (
-    <Badge className={className} size="chip" variant={intent === "pending" ? "neutral" : "success"}>
+    <Badge className={className} size="chip" variant="outline">
       {INTENT_LABEL[intent] ?? intent}
     </Badge>
   );
-}
-
-/** Where the dataset stands. Renders nothing when idle. */
-export function StateBadge({
-  dataset,
-  className,
-}: {
-  dataset: Pick<Dataset, "state" | "error"> | null | undefined;
-  className?: string;
-}) {
-  if (!dataset) return null;
-  if (
-    dataset.state === "landing" ||
-    dataset.state === "running" ||
-    dataset.state === "diagnosing"
-  ) {
-    return (
-      <Badge className={cn("gap-1", className)} size="chip" variant="info">
-        <Spinner className="size-3" />
-        {dataset.state === "landing"
-          ? "Landing"
-          : dataset.state === "running"
-            ? "Running"
-            : "Agent"}
-      </Badge>
-    );
-  }
-  if (dataset.state === "error") {
-    return (
-      <Badge className={className} size="chip" title={dataset.error} variant="destructive">
-        Failed
-      </Badge>
-    );
-  }
-  return null;
 }
 
 /** Back-link from a run, job or experiment to the exact version it read. */

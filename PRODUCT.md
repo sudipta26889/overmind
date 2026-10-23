@@ -27,7 +27,8 @@ production traces.
 **The agent model is the product.** Overmind builds a model of a team's
 agents (capabilities, behaviours, prompts, and tools) by scanning their repo,
 pinning every component to the file and line that defines it. Telemetry binds
-to that model; everything else runs on it. The public framing: Overmind builds
+to that model. Teams can also start with uploaded data and a written task,
+without scanning a repository. The public framing: Overmind builds
 a model of the agent and uses traces to validate it.
 
 That model is what the rest depends on:
@@ -47,9 +48,22 @@ That model is what the rest depends on:
   private per-team fine-tuned models, benchmarked against the incumbent model
   running in production and served on an OpenAI-compatible endpoint.
 
-Each stage feeds the next, and every stage reads the graph.
+Each stage feeds the next. Repository workflows use the graph; data-first
+model workflows use a saved task interpretation, data lineage and comparison
+protocol.
 
 ## Operating context
+
+- Data-first onboarding leads to the existing cell-based Workshop. The native coding agent explores
+  the source and authors explicit transformations through MCP. Saved group-preserving
+  partitions, standalone decision comparisons, explicit training experiments and
+  reproducible performance workloads make this path available through Console
+  and MCP. Calibration and development selection stay separate from final results;
+  coverage, identity uncertainty and partial cost accounting remain inspectable.
+  Frozen-source derivation, bounded exploration and sampling feasibility precede
+  draft/prepare/launch workflows. Saved receipts recover after reconnects; explicit
+  compatible prediction reuse avoids duplicate work. Runtime profiles and user-defined
+  planning constraints separate measured evidence from unknown costs.
 
 - Teams instrument agents with the `overmind` SDK (PyPI) or
   `@overmind-lab/trace-sdk` (npm), or send existing telemetry via OTLP ingest
@@ -58,16 +72,20 @@ Each stage feeds the next, and every stage reads the graph.
   The public promise is "no wrapper classes, no rewrites, no proprietary wire
   format": one SDK setup auto-instruments the LLM libraries already in use,
   over OpenTelemetry.
+
 - Capability discovery is local (`overmind setup` → `overmind.toml` →
   `overmind sync`). After a fine-tune, the Console and MCP return a copy-paste
   prompt that points the capability's code at the new model.
+
 - Optimisation runs from the agent's own repo after `overmind sync`: paste
   `/overmind optimise` in the coding agent; the skill drives the SDK, the server
   scores candidates, and results return as scores and diffs.
+
 - The Console (console.overmindlab.ai) is where teams manage projects, inspect
   agents, browse observability data, build datasets, run evaluations and
   optimisation experiments, train and deploy models, monitor jobs, and chat
   with frontier or deployed models.
+
 - Separate web properties: the Console, a public marketing site at
   www.overmindlab.ai, docs at docs.overmindlab.ai, and a public Discord. The
   SDK/CLI lives in the sibling `overmind` repo.
@@ -78,12 +96,12 @@ The marketing site organises the product under `/product/` into four pillars.
 These are the customer-facing names and claims, and they are the vocabulary
 future work should match:
 
-| Pillar             | Headline                        | Promise                                                                           |
-| ------------------ | ------------------------------- | --------------------------------------------------------------------------------- |
-| **Observability**  | "Understand your agents"        | Capability scanning, automatic tracing, coverage scoring, live scoring on arrival |
-| **Data Workshop**  | "Turn real behaviour into data" | Production traces become audited, redacted training and eval data                 |
-| **Agent Testing**  | "Measure and improve"           | Generated evals, scored candidates, winning diffs in the team's repo              |
-| **Model Training** | "Own your model"                | Fine-tune on your own data, benchmark against the incumbent, serve it             |
+| Pillar             | Headline                        | Promise                                                                                    |
+| ------------------ | ------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Observability**  | "Understand your agents"        | Capability scanning, automatic tracing, coverage scoring, live scoring on arrival          |
+| **Data Workshop**  | "Turn real behaviour into data" | Production traces become versioned training and eval data through explicit transformations |
+| **Agent Testing**  | "Measure and improve"           | Generated evals, scored candidates, winning diffs in the team's repo                       |
+| **Model Training** | "Own your model"                | Fine-tune on your own data, benchmark against the incumbent, serve it                      |
 
 The pillars line up with the Console's navigation groups. Keep the two
 taxonomies in sync rather than letting them drift. Site CTAs are **"Start for
@@ -98,9 +116,9 @@ Navigation order: Overmind (home), Agent, Observability, Datasets, then an
 (Training, Inference), then Settings and Projects. Docs and Discord are
 external links. A command palette provides keyboard navigation.
 
-- **Observability** — traces and sessions with a trace detail panel, span trees
-  and flame charts. Previously called "Traces"; sessions are a view within it
-  rather than a separate destination.
+- **Observability** — a metrics overview of scored quality, errors, speed, recorded
+  cost and recurring behaviour, with Sessions, Signals and Traces as investigation
+  views. Trace detail retains span trees and flame charts.
 - **Agent** — the product graph: one agent per project, made of capabilities
   (Agent > Capabilities > Tasks) mapped from a local scan, with each capability's
   prompt, tools, control flow, and input/output contracts pinned to file and
@@ -127,49 +145,90 @@ navigation code but are no longer used to stage access.
 
 ### Data Workshop specifics
 
-- Any file, pasted rows, or trace selection lands as-is as the **source**;
-  nothing is reshaped on the way in. Trace rows carry the behaviour, verdicts,
-  scores and asks that trace scoring produced, one row per task execution.
-- Landing proposes two things and the first use freezes them: the **intent**
-  (train or eval) and the **capability** the rows belong to. Both are
-  contracts every version is measured against: the intent contract is the
-  shape, the capability contract is row by row — an eval input carries the
-  capability's required keys, a train transcript is the capability's own
-  system prompt and tools. A row that cannot meet them is a finding, never a
-  default value.
-- A linear chain of Python cells is the recipe: a cell is a body (the frame
-  arrives as `df` and leaves as `df`), each cell that ran is a **version**
-  (the source is 1.0, then 1.1, 1.2, …), and each shows what it did to the
-  rows and values against the cell before — added rows, removed rows, and
-  changed values with the old value in reach. The **active version** is the
-  last cell that ran unless the user points elsewhere. Editing a cell re-runs
-  it and every cell after it in place; the numbers do not move.
-- The chat on a dataset is the dataset's own agent, an ML engineer, not the
-  general assistant: it tests a script before it lands a cell, one request is
-  one cell, it reads before it writes, and it never asks what to do next. The
-  moment a dataset lands it runs one turn: the fewest cells that make both
-  contracts hold, each run in view, then the quality checks an engineer would
-  run for that intent — refusals, truncated turns, duplicates, length
-  outliers, leakage, coverage — each landed and run as one cell with the row
-  count in its note; only a fix that would drop more than half the rows waits
-  as a proposal. After that the conversation is open.
-- Eval runs, optimiser runs, training runs and exports **use** the exact
-  version they read: it becomes the next major (2.0), it and every cell
-  before it freeze, the frame cannot be deleted, and the run links back to it.
-- The product's shape and token distribution feed the training recommender —
-  model tier, epochs, learning rate, adapter settings — with cost and duration
-  estimated before commitment.
+- Final-output cells expose server-measured Metrics alongside Script/Data, with
+  alert chips on Data while Metrics is collapsed. Counts, baselines, evidence,
+  warnings and unperformed checks are bound to the exact data fingerprint and
+  also delivered through MCP after transformation. These are advisory findings,
+  not an automatic training-quality approval or a rebalancing policy.
+
+- Data Workshop opens with a project dataset table showing purpose, source,
+  row count, active version, capability and update time. Selecting a dataset opens
+  its unchanged, full-size cells on a grid-snapped flow canvas at scale 1:
+  steps progress downward, sibling branches align side by side on the same layer,
+  with elbow connections from recorded lineage. Zoom, Fit view and a toggleable
+  minimap navigate the graph without changing cell dimensions; Reset and linked-cell
+  focus return to scale 1. Corrections replace the displayed process; there is no repair-history or restore view. Recorded partition links keep train, development, calibration and final outputs connected to their source and scripts.
+  The right-hand box groups the minimap toggle with the folder button for project
+  dataset navigation; cell search and the cell-selector strip are removed.
+  Platform-agent chat and the prompt-style landing are removed.
+
+- The native coding agent owns planning, interpretation, transformation code,
+  generation and semantic judgment. The platform owns source landing, version
+  identity, deterministic execution, lineage, impact and consumer pinning.
+
+- Sources may be files, pasted rows or traces; source-free briefs are supported.
+  Documents and images retain original bytes and extraction evidence, including
+  local English OCR where needed. Intent is explicit and otherwise stays pending.
+
+- Agents discover reusable project transformations, then validate and preview
+  against a pinned source. Revisions retain ordered scripts, declared contracts,
+  parameters and an approved immutable runtime. Compatible sources reuse the exact
+  revision; adaptations record their origin without changing the original.
+  Each successful run publishes one cell per step atomically. Preview publishes none.
+  Agents declare step IDs, input edges and code-referenced branch conditions in the
+  retained recipe. MCP returns this flow explicitly; execution receipts separately
+  record actual input cells and output counts. Condition labels are declarations,
+  not independent verification of script semantics.
+
+- Script packages run in isolated, resource-bounded containers without network or
+  platform credentials. Native agents own authoring, semantic work and interpretation.
+  Imported outputs declare all source parents and producer attribution.
+  Large outputs use an uploaded, checksum-bound artifact. Source attribution
+  does not independently verify execution or answer correctness.
+
+- Retries with the same request key recover the same work; changed inputs conflict.
+  Failed or cancelled transformations never replace a readable version.
+  Runs have durable receipts; unknown work is not blindly replayed.
+
+- Explicitly enabled bindings reuse an exact revision as source datasets or trace
+  selections change. These are full-snapshot rebuilds, not assumed incremental
+  scripts. Checkpoints advance only with publication; failed work requires explicit
+  retry authorization. Existing training and evaluation inputs do not change.
+
+- Technical fit, source preservation, coverage and semantic quality are distinct.
+  Unmeasured quality stays unknown. Quality findings remain advisory; unreadable
+  or technically incompatible data blocks consumer use.
+
+- Evaluation, Optimiser and Training freeze the exact version consumed.
+  Later transformations do not modify those inputs. Training owns
+  model-specific preprocessing; Workshop remains model-independent.
+
+- MCP is the first-class authoring surface. Chat, mutable-cell editing and script
+  replay are unavailable in the Console. Native-agent intake inspects record
+  boundaries before upload and verifies landed counts and values before handoff;
+  successful transfer does not establish correct ingestion.
 
 ### Training and serving specifics
 
 - Up to four tiered experiments are recommended from dataset statistics and
   live traffic, **Compact to Large**; adapter training for speed or a full
   fine-tune for depth; trace-safe splits.
-- Train/validation loss and token accuracy chart live during the run.
-- Every fine-tuned model is benchmarked against the **incumbent** — the model
-  the capability actually runs in production — with per-metric deltas.
-- Weights are merged, quantised, and deployed to a hosted endpoint; the swap
-  is offered as a copy-paste prompt for the coding agent.
+- Train/validation loss and token accuracy chart live during the run. Development
+  monitoring adds frozen samples, measured check timing, generated-label/schema/field
+  evidence and verified retained checkpoints. Early stopping and best-development
+  checkpoint selection require explicit settings; warnings do not alter training.
+  Classification observations compare the same scored sample with its majority
+  baseline and expose represented labels without predictions. These are not
+  diagnoses or final-test results. Newer loss-only checks do not hide the last
+  generated-output result from the coding agent.
+- Selected final benchmarks compare the trained model with the pinned base or
+  incumbent. They remain independent of development monitoring. Missing exact
+  OpenRouter routes and invalid evaluator definitions are visible failures, not
+  permission to substitute a model or silently launch hosted base inference.
+- Successful training automatically deploys each model through its matching
+  inference runtime. Chat models use shared BF16 adapters or private checkpoints;
+  decision models retain their verified adapter and full-precision probability
+  head. Deployment does not change application routing.
 - Training and serving run on **Modal** and **Baseten**. Nebius has been
   removed. The model catalogue (`/api/models/catalog/`) can disable specific
   models, and large models are currently disabled — a live constraint that
@@ -180,6 +239,10 @@ navigation code but are no longer used to stage access.
 - Inference is an OpenAI-compatible API (`/api/v1/chat/completions`,
   `/api/v1/models`, `/api/v1/models/<model_id>`) covering frontier models and
   deployed fine-tuned models.
+- Decision deployments accept input-only decisions at
+  `/api/deployed-models/{id}/inference/` and return a durable request receipt.
+  `/api/inference-requests/{id}/` exposes ordered probabilities and the exact
+  artifact identity. They are not chat-completion models.
 - Billing meters usage on an append-only credits ledger. **Remaining-credit
   caps, Free/Pro plans, Stripe Checkout and top-ups** inject only when
   `STRIPE_SECRET_KEY` is set (cloud). Without it (OSS) the Console still shows
@@ -187,6 +250,10 @@ navigation code but are no longer used to stage access.
   owns `/pricing`; the Console's legacy `/pricing` route only redirects there.
 - Auth is Clerk, plus issued API keys for SDK/CLI access. Product analytics is
   PostHog.
+- Training delivery analytics measures result availability, check completion,
+  coverage, measured overhead and reload-verified checkpoints. It excludes raw
+  training content and does not infer clarity or delight. Local analytics is off
+  unless explicitly configured; underlying delivery receipts remain available.
 
 ### Stack
 
@@ -258,5 +325,7 @@ Agent > Capabilities > Tasks: "Agent" is the product (one per project),
 
 No formal conformance standard has been set for this product — that decision is
 open. Two constraints hold in the current implementation and future work must
-preserve them: the Console ships **user-selectable light and dark themes**, and
-motion **respects `prefers-reduced-motion`**.
+preserve them: the Console ships a **single dark theme**, independent of stored
+or operating-system preferences, and motion **respects `prefers-reduced-motion`**.
+
+Script retention is automatic; the native agent owns preparation and repairs. Workshop cells show retained data and scripts, while execution receipts record publication validation.

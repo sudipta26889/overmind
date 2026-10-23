@@ -25,8 +25,6 @@ jobs:
         with:
           version: "0.11.0"
           enable-cache: true
-          # Pin to 3.13: spacy 3.8.x has no cp314 wheels, so uv must not
-          # auto-select the newer 3.14 interpreter. Matches .python-version.
           python-version: "3.13"
 
       - name: Install dev tools (ruff)
@@ -167,6 +165,9 @@ jobs:
       - name: Create .env file
         run: touch .env
 
+      - name: Install document OCR runtime
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-spa
+
       - name: Run tests
         # Match local `make test`: xdist is already in the test dep group.
         run: uv run pytest tests/ -n auto --dist worksteal -q
@@ -233,6 +234,9 @@ jobs:
         run: |
           cd frontend && bun install --frozen-lockfile
           cd .. && uv run playwright install --with-deps chromium-headless-shell
+
+      - name: Install document OCR runtime
+        run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-spa
 
       - name: Run journeys
         run: make test-journeys

@@ -48,17 +48,17 @@ MCP_URLS = {
 PRODUCTION_MCP = "https://api.overmindlab.ai/api/mcp/"
 PRODUCTION_BASE = "https://api.overmindlab.ai"
 
-# Slash-command file stem → path inside the installed skill package.
+# Slash-command file stem → path relative to the installed `overmind` skill.
 # Filenames stay `overmind-*` so `/overmind` prefix-filters the client menu.
 COMMANDS: dict[str, str] = {
-    "overmind": "SKILL.md",
-    "overmind-onboard": "references/onboard.md",
-    "overmind-setup": "references/setup.md",
-    "overmind-ensure-tracing": "references/telemetry.md",
-    "overmind-dataset": "references/datasets.md",
-    "overmind-finetune": "references/finetuning.md",
-    "overmind-optimise": "references/optimizer.md",
-    "overmind-backtest": "references/backtest.md",
+    # "overmind": "SKILL.md",
+    # "overmind-onboard": "references/onboard.md",
+    # "overmind-setup": "references/setup.md",
+    # "overmind-ensure-tracing": "../overmind-observability/SKILL.md",
+    # "overmind-dataset": "../overmind-datasets/SKILL.md",
+    # "overmind-finetune": "../overmind-training/SKILL.md",
+    # "overmind-optimise": "../overmind-optimiser/SKILL.md",
+    # "overmind-backtest": "../overmind-optimiser/SKILL.md",
 }
 
 SLASH_LABELS: dict[str, str] = {
@@ -316,14 +316,8 @@ def run_init(
         and config_path.exists()
     ):
         configured_url = load(config_path).base_url
-    mcp_url, base_url = resolve_mcp_url(env, configured_url)
+    mcp_url, base_url = resolve_mcp_url(env, configured_url)  # noqa: F841
 
-    if (
-        ide == "codex"
-        and env in {"local", "development", "dev"}
-        and not (api_url or os.environ.get("OVERMIND_API_URL") or os.environ.get("OVERMIND_BASE_URL"))
-    ):
-        raise typer.BadParameter("Codex setup supports production or staging", param_hint="--env")
     sync_skills([skill.slug for skill in skills], ide=ide)
     dest = get_destination_dir(ide)
     console.print(f"Skills → {dest}/skills ({len(skills)})")
@@ -334,14 +328,14 @@ def run_init(
     try:
         created = seed_toml(config_path, base_url=base_url)
         saved_key = saved_project_api_key(config_path)
-        mcp_path = write_mcp_config(ide, root, mcp_url, saved_key or None)
+        # mcp_path = write_mcp_config(ide, root, mcp_url, saved_key or None)
     except SecretFileError as exc:
         raise typer.BadParameter(str(exc), param_hint="MCP config") from exc
-    try:
-        mcp_display = str(mcp_path.relative_to(root))
-    except ValueError:
-        mcp_display = str(mcp_path)
-    console.print(f"MCP → {mcp_display}")
+    # try:
+    #     mcp_display = str(mcp_path.relative_to(root))
+    # except ValueError:
+    #     mcp_display = str(mcp_path)
+    # console.print(f"MCP → {mcp_display}")
 
     if created:
         console.print(f"Seeded {created.relative_to(root)}")
@@ -349,7 +343,9 @@ def run_init(
         console.print(f"{DEFAULT_PATH.name} already present — left unchanged")
 
     if saved_key:
-        console.print("\nReady. MCP authentication uses the saved project credential.")
+        console.print(
+            "\nMCP configured with the saved project credential. Run overmind connection check --project-id PROJECT --json in this coding environment to verify MCP and local transfer readiness."
+        )
     else:
         console.print(
             "\nMCP authentication pending. Run [bold]overmind sync[/bold] to create the console project "

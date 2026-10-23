@@ -15,7 +15,6 @@ class Vendor(StrEnum):
     MOONSHOT = "moonshotai"
     META = "meta-llama"
     QWEN = "qwen"
-    CURSOR = "cursor"
     TYPESAFE = "typesafe"
 
 
@@ -51,7 +50,6 @@ class Model:
     tier: Tier
     description: str = ""
     reasoning: Reasoning = NO_REASONING
-    priced_as: str = ""
     library: bool = False
 
     @property
@@ -64,6 +62,13 @@ CATALOG: tuple[Model, ...] = (
         "jev-1.13",
         Vendor.TYPESAFE,
         "typesafe/jev-1.13",
+        Tier.DECISION,
+        "Typed decisions over supplied evidence; not a chat or training model.",
+    ),
+    Model(
+        "jev-1.14",
+        Vendor.TYPESAFE,
+        "typesafe/jev-1.14",
         Tier.DECISION,
         "Typed decisions over supplied evidence; not a chat or training model.",
     ),
@@ -238,15 +243,6 @@ CATALOG: tuple[Model, ...] = (
         library=True,
     ),
     Model("moonshotai/kimi-k2", Vendor.MOONSHOT, "moonshotai/kimi-k2", Tier.LEGACY),
-    # No OpenRouter listing; priced as the Kimi K2.5 that Composer 2.5 was built on.
-    Model(
-        "composer-2.5",
-        Vendor.CURSOR,
-        "",
-        Tier.BALANCED,
-        "Cursor's agentic coding model.",
-        priced_as="moonshotai/kimi-k2.5",
-    ),
     Model("llama-3.2-3b-instruct", Vendor.META, "meta-llama/llama-3.2-3b-instruct", Tier.OPEN),
     Model("llama-3.1-8b-instruct", Vendor.META, "meta-llama/llama-3.1-8b-instruct", Tier.OPEN),
     Model("llama-3.3-70b-instruct", Vendor.META, "meta-llama/llama-3.3-70b-instruct", Tier.OPEN),
@@ -279,7 +275,7 @@ def reasoning_of(model_name: str) -> Reasoning:
 def pricing_slug(model_name: str) -> str | None:
     m = model(model_name)
     if m is not None:
-        return m.priced_as or m.slug or None
+        return m.slug or None
     name = normalize_model_name(model_name)
     return name.removeprefix("openrouter/") if "/" in name else None
 
@@ -347,11 +343,13 @@ def is_inference_model(model_id: str) -> bool:
 class Role(StrEnum):
     FAST = "fast"
     AGENT = "agent"
+    EXPLAIN = "explain"
 
 
 ROLE_CHAINS: dict[Role, tuple[str, ...]] = {
     Role.FAST: ("gpt-5.6-luna", "claude-sonnet-5", "gemini-3.8-flash"),
     Role.AGENT: ("gpt-5.6-terra", "claude-sonnet-5", "gemini-3.1-pro-preview"),
+    Role.EXPLAIN: ("gpt-5-mini", "claude-haiku-4-5", "gemini-3.8-flash"),
 }
 
 
@@ -359,7 +357,7 @@ class TaskType(StrEnum):
     JUDGE_SCORING = "judge_scoring"
     CRITERIA_GENERATION = "criteria_generation"
     EVAL_RECOMMENDATION = "eval_recommendation"
-    WORKSHOP = "workshop"
+    EVAL_EXPLANATION = "eval_explanation"
     DEFAULT = "default"
 
 
@@ -367,7 +365,7 @@ TASK_ROLES: dict[TaskType, Role] = {
     TaskType.JUDGE_SCORING: Role.FAST,
     TaskType.CRITERIA_GENERATION: Role.FAST,
     TaskType.EVAL_RECOMMENDATION: Role.FAST,
-    TaskType.WORKSHOP: Role.AGENT,
+    TaskType.EVAL_EXPLANATION: Role.EXPLAIN,
     TaskType.DEFAULT: Role.FAST,
 }
 
@@ -389,8 +387,12 @@ def default_judge_model() -> str:
     return model_chain(TaskType.JUDGE_SCORING)[0]
 
 
+def decision_models() -> tuple[Model, ...]:
+    return tuple(model for model in CATALOG if model.tier is Tier.DECISION)
+
+
 def decision_model() -> Model:
-    return next(model for model in CATALOG if model.tier is Tier.DECISION)
+    return decision_models()[0]
 
 
 def is_decision_model(name: str) -> bool:
@@ -459,38 +461,8 @@ PROVIDERS: dict[str, Provider] = {
         "https://generativelanguage.googleapis.com/v1beta/openai/",
         reasoning_effort=True,
     ),
-    "cursor": Provider("cursor", "CURSOR_API_KEY"),
 }
 
 
 def openrouter_configured() -> bool:
     return PROVIDERS["openrouter"].configured()
-
-
-@dataclass(frozen=True)
-class Engine:
-    provider: Provider
-    models: tuple[str, ...]
-
-    @property
-    def model(self) -> str:
-        return self.models[0]
-
-
-def _agent_model_for(vendor: Vendor) -> str:
-    return next(n for n in ROLE_CHAINS[Role.AGENT] if MODELS_BY_NAME[n].vendor is vendor)
-
-
-WORKSHOP_ENGINES: tuple[Engine, ...] = (
-    Engine(PROVIDERS["cursor"], ("composer-2.5",)),
-    Engine(PROVIDERS["openrouter"], ROLE_CHAINS[Role.AGENT]),
-    Engine(PROVIDERS["openai"], (_agent_model_for(Vendor.OPENAI),)),
-    Engine(PROVIDERS["anthropic"], (_agent_model_for(Vendor.ANTHROPIC),)),
-    Engine(PROVIDERS["gemini"], (_agent_model_for(Vendor.GEMINI),)),
-)
-
-WORKSHOP_KEY_ENVS: tuple[str, ...] = tuple(e.provider.key_env for e in WORKSHOP_ENGINES)
-
-
-def workshop_engine() -> Engine | None:
-    return next((e for e in WORKSHOP_ENGINES if e.provider.configured()), None)

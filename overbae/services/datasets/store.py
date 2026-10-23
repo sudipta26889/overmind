@@ -2,8 +2,8 @@
 
 Every table carries a column manifest ``[{name, type}]`` where ``type`` is one of
 ``string | integer | number | boolean | datetime | json``. Nested values are
-stored as JSON text so a messy upload never fails schema unification; readers
-decode them back to Python objects, and DuckDB sees them as VARCHAR.
+and heterogeneous scalar values are stored as JSON text without coercion; readers
+decode them back to Python objects. Sandboxed SQL views restore their declared JSON type.
 """
 
 from __future__ import annotations
@@ -12,6 +12,11 @@ import datetime as dt
 import hashlib
 import json
 import math
+import pickle
+import tempfile
+import threading
+from collections.abc import Iterable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +24,13 @@ import duckdb
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from django.conf import settings
+
+from overbae.services.datasets.statistics import StatisticsUnavailableError, profile
 
 SOURCE_ROW = "source_row"
 ROW_GROUP_SIZE = 10_000
+ROW_GROUP_BYTES = 16 * 1024 * 1024
 _MANIFEST_KEY = b"overmind.columns"
 _ARROW_TYPES = {
     "string": pa.string(),
@@ -47,6 +56,14 @@ _FILTER_OPS = (
 
 class StoreError(ValueError):
     """A read or write the caller can act on (bad column, bad filter, missing file)."""
+
+
+class QueryTimeoutError(StoreError):
+    pass
+
+
+class QuerySizeError(StoreError):
+    pass
 
 
 def _is_missing(value: Any) -> bool:
@@ -102,43 +119,52 @@ def _coerce(value: Any, kind: str) -> Any:
 
 
 def _infer_kind(values: list[Any]) -> str:
-    """Kind of a column from its non-missing values. Mixed scalars read as string."""
-    kinds: set[str] = set()
+    builder = ManifestBuilder()
     for value in values:
-        if _is_missing(value):
-            continue
-        if isinstance(value, (dict, list, tuple)):
-            return "json"
-        if isinstance(value, bool):
-            kinds.add("boolean")
-        elif isinstance(value, int):
-            kinds.add("integer")
-        elif isinstance(value, float):
-            kinds.add("number")
-        elif isinstance(value, (dt.datetime, pd.Timestamp)):
-            kinds.add("datetime")
-        else:
-            kinds.add("string")
-    if not kinds:
-        return "string"
-    if kinds <= {"integer", "number"}:
-        return "number" if "number" in kinds else "integer"
-    if len(kinds) == 1:
-        return kinds.pop()
-    return "string"
+        builder.add({"value": value})
+    return builder.manifest()[0]["type"] if values else "string"
 
 
-def infer_manifest(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
-    """Column order = first appearance across rows."""
-    names: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        for key in row:
-            key = str(key)
-            if key not in seen:
-                seen.add(key)
-                names.append(key)
-    return [{"name": name, "type": _infer_kind([row.get(name) for row in rows])} for name in names]
+class ManifestBuilder:
+    def __init__(self):
+        self.kinds = {}
+        self.inexact_floats = set()
+
+    def add(self, row):
+        for name, value in row.items():
+            name = str(name)
+            kinds = self.kinds.setdefault(name, set())
+            if _is_missing(value):
+                continue
+            if isinstance(value, (dict, list, tuple)):
+                kinds.add("json")
+            elif isinstance(value, bool):
+                kinds.add("boolean")
+            elif isinstance(value, int):
+                if not -(2**63) <= value < 2**63:
+                    kinds.add("json")
+                else:
+                    kinds.add("integer")
+                    if int(float(value)) != value:
+                        self.inexact_floats.add(name)
+            elif isinstance(value, float):
+                kinds.add("number")
+            elif isinstance(value, (dt.datetime, pd.Timestamp)):
+                kinds.add("datetime")
+            else:
+                kinds.add("string")
+
+    def manifest(self):
+        result = []
+        for name, kinds in self.kinds.items():
+            if "json" in kinds or ("number" in kinds and name in self.inexact_floats):
+                kind = "json"
+            elif kinds and kinds <= {"integer", "number"}:
+                kind = "number" if "number" in kinds else "integer"
+            else:
+                kind = next(iter(kinds)) if len(kinds) == 1 else "json" if kinds else "string"
+            result.append({"name": name, "type": kind})
+        return result
 
 
 def manifest_from_frame(df: pd.DataFrame) -> list[dict[str, str]]:
@@ -148,7 +174,8 @@ def manifest_from_frame(df: pd.DataFrame) -> list[dict[str, str]]:
         if pd.api.types.is_bool_dtype(series):
             kind = "boolean"
         elif pd.api.types.is_integer_dtype(series):
-            kind = "integer"
+            maximum = series.max()
+            kind = "json" if pd.notna(maximum) and maximum >= 2**63 else "integer"
         elif pd.api.types.is_float_dtype(series):
             kind = "number"
         elif pd.api.types.is_datetime64_any_dtype(series):
@@ -171,12 +198,58 @@ def _table_from_columns(columns: dict[str, list[Any]], manifest: list[dict[str, 
     return pa.Table.from_arrays(arrays, schema=schema)
 
 
+def _row_batches(rows, batch_size):
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive.")
+    batch, size = [], 0
+    for row in rows:
+        record = dict(row)
+        encoded_size = len(pickle.dumps(record, protocol=pickle.HIGHEST_PROTOCOL))
+        if batch and (len(batch) >= batch_size or size + encoded_size > ROW_GROUP_BYTES):
+            yield batch
+            batch, size = [], 0
+        batch.append(record)
+        size += encoded_size
+    if batch:
+        yield batch
+
+
 def write_rows(
-    path: Path, rows: list[dict[str, Any]], manifest: list[dict[str, str]] | None = None
+    path: Path, rows: Iterable[dict[str, Any]], manifest: list[dict[str, str]] | None = None
 ) -> list[dict[str, str]]:
-    manifest = manifest or infer_manifest(rows)
-    columns = {spec["name"]: [row.get(spec["name"]) for row in rows] for spec in manifest}
-    _write_table(path, _table_from_columns(columns, manifest))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".parquet.tmp")
+    # Infer over every row before writing Arrow's fixed schema, without retaining the corpus.
+    with tempfile.TemporaryFile() if manifest is None else nullcontext() as spool:
+        if manifest is None:
+            builder = ManifestBuilder()
+            for batch in _row_batches(rows, ROW_GROUP_SIZE):
+                for record in batch:
+                    builder.add(record)
+                pickle.dump(batch, spool, protocol=pickle.HIGHEST_PROTOCOL)
+            manifest = builder.manifest()
+            spool.seek(0)
+
+            def batches():
+                while True:
+                    try:
+                        yield pickle.load(spool)  # noqa: S301 — private spool written above
+                    except EOFError:
+                        return
+
+            pending = batches()
+        else:
+            pending = _row_batches(rows, ROW_GROUP_SIZE)
+        schema = _table_from_columns({c["name"]: [] for c in manifest}, manifest).schema
+        try:
+            with pq.ParquetWriter(temporary, schema, compression="zstd") as writer:
+                for batch in pending:
+                    columns = {c["name"]: [r.get(c["name"]) for r in batch] for c in manifest}
+                    writer.write_table(_table_from_columns(columns, manifest))
+                    del batch, columns
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
     return manifest
 
 
@@ -255,14 +328,16 @@ def read_frame(path: Path) -> pd.DataFrame:
     """Pandas frame with JSON columns decoded to Python objects."""
     manifest = read_manifest(path)
     table = pq.read_table(path)
-    df = table.to_pandas()
+    df = table.to_pandas(integer_object_nulls=True)
     for spec in manifest:
         if spec["type"] == "json" and spec["name"] in df.columns:
-            df[spec["name"]] = df[spec["name"]].map(lambda v: _decode(v, "json"))
+            df[spec["name"]] = pd.Series(
+                [_decode(v, "json") for v in df[spec["name"]]], dtype=object
+            )
     return df
 
 
-def iter_rows(path: Path, batch_size: int = ROW_GROUP_SIZE):
+def iter_rows(path: Path, batch_size: int = 256):
     """Decoded dict rows, streaming by row group."""
     manifest = read_manifest(path)
     kinds = {spec["name"]: spec["type"] for spec in manifest}
@@ -272,15 +347,40 @@ def iter_rows(path: Path, batch_size: int = ROW_GROUP_SIZE):
             yield {k: _decode(v, kinds.get(k, "string")) for k, v in record.items()}
 
 
+def iter_frames(path: Path, batch_size: int = ROW_GROUP_SIZE):
+    manifest = read_manifest(path)
+    for batch in _row_batches(iter_rows(path), batch_size):
+        columns = {}
+        for spec in manifest:
+            values = [row.get(spec["name"]) for row in batch]
+            preserve_scalars = spec["type"] == "json" or (
+                spec["type"] == "integer" and any(value is None for value in values)
+            )
+            columns[spec["name"]] = pd.Series(values, dtype=object if preserve_scalars else None)
+        yield pd.DataFrame(columns)
+
+
 def read_rows(path: Path, indices: list[int]) -> list[dict[str, Any]]:
     """Rows by position; the store has no other row identity."""
     if not indices:
         return []
     manifest = read_manifest(path)
     kinds = {spec["name"]: spec["type"] for spec in manifest}
-    table = pq.read_table(path)
-    wanted = [i for i in indices if 0 <= i < table.num_rows]
-    picked = table.take(pa.array(wanted, type=pa.int64())).to_pylist()
+    parquet = pq.ParquetFile(path)
+    wanted = {i for i in indices if 0 <= i < parquet.metadata.num_rows}
+    picked = {}
+    offset = 0
+    for group in range(parquet.num_row_groups):
+        count = parquet.metadata.row_group(group).num_rows
+        selected = sorted(i for i in wanted if offset <= i < offset + count)
+        if selected:
+            table = parquet.read_row_group(group)
+            records = table.take(
+                pa.array([i - offset for i in selected], type=pa.int64())
+            ).to_pylist()
+            picked.update(zip(selected, records, strict=True))
+        offset += count
+    picked = [picked[i] for i in indices if i in picked]
     return [{k: _decode(v, kinds.get(k, "string")) for k, v in rec.items()} for rec in picked]
 
 
@@ -300,11 +400,25 @@ def head(path: Path, n: int) -> list[dict[str, Any]]:
 
 def connect(**tables: Path) -> duckdb.DuckDBPyConnection:
     """An in-memory connection with each ``name=path`` registered as a view."""
-    con = duckdb.connect()
+    con = duckdb.connect(config={"memory_limit": "512MB", "threads": 2})
     for name, path in tables.items():
         literal = str(path).replace("'", "''")
         con.execute(f"CREATE VIEW \"{name}\" AS SELECT * FROM read_parquet('{literal}')")
     return con
+
+
+def null_rates(path):
+    names = [column["name"] for column in read_manifest(path)]
+    if not names:
+        return {}
+    expressions = [
+        f"avg(CASE WHEN {_quote(name)} IS NULL OR CAST({_quote(name)} AS VARCHAR) = '' "
+        "THEN 1.0 ELSE 0.0 END)"
+        for name in names
+    ]
+    with connect(t=path) as con:
+        values = con.execute("SELECT " + ", ".join(expressions) + ' FROM "t"').fetchone()
+    return dict(zip(names, (float(value or 0) for value in values), strict=True))
 
 
 def _quote(name: str) -> str:
@@ -362,6 +476,17 @@ def page(
     """A page of decoded rows plus the matching total. ``_index`` is the row's
     position in the file — the identity consumers pin."""
     manifest = read_manifest(path)
+    if not filters and not search and (not sort or sort == "_index"):
+        total = row_count(path)
+        positions = range(int(offset), min(int(offset) + int(limit), total))
+        indices = (
+            [total - 1 - i for i in positions] if sort and direction == "desc" else list(positions)
+        )
+        rows = [
+            {"_index": index, **row}
+            for index, row in zip(indices, read_rows(path, indices), strict=True)
+        ]
+        return {"rows": rows, "total": total, "columns": manifest}
     kinds = {spec["name"]: spec["type"] for spec in manifest}
     names = set(kinds)
     where, params = _filter_sql(filters or [], names)
@@ -400,69 +525,112 @@ def page(
     return {"rows": rows, "total": int(total), "columns": manifest}
 
 
-def column_stats(path: Path, *, top: int = 5) -> list[dict[str, Any]]:
-    manifest = read_manifest(path)
-    con = connect(t=path)
-    out: list[dict[str, Any]] = []
+def column_stats(path: Path, *, top: int = 5, fingerprint: str = "") -> list[dict[str, Any]]:
     try:
-        n = con.execute('SELECT count(*) FROM "t"').fetchone()[0]
-        for spec in manifest:
-            name, kind = spec["name"], spec["type"]
-            col = _quote(name)
-            text = f"CAST({col} AS VARCHAR)"
-            nulls, distinct = con.execute(
-                f"SELECT count(*) FILTER (WHERE {col} IS NULL OR {text} = ''), "
-                f'count(DISTINCT {text}) FROM "t"'
-            ).fetchone()
-            entry: dict[str, Any] = {
-                "name": name,
-                "type": kind,
-                "null_rate": (nulls / n) if n else 0.0,
-                "distinct": int(distinct),
-            }
-            if kind in ("integer", "number"):
-                mn, mx, mean = con.execute(
-                    f'SELECT min({col}), max({col}), avg({col}) FROM "t"'
-                ).fetchone()
-                entry.update({"min": mn, "max": mx, "mean": mean})
-            elif kind in ("string", "json"):
-                mean_len, max_len = con.execute(
-                    f'SELECT avg(length({text})), max(length({text})) FROM "t"'
-                ).fetchone()
-                entry.update({"mean_len": mean_len, "max_len": max_len})
-            if kind in ("string", "boolean", "integer") and 0 < distinct <= 200:
-                rows = con.execute(
-                    f'SELECT {text}, count(*) AS c FROM "t" WHERE {col} IS NOT NULL '
-                    f"GROUP BY 1 ORDER BY c DESC LIMIT {int(top)}"
-                ).fetchall()
-                entry["top"] = [{"value": v, "count": int(c)} for v, c in rows]
-            out.append(entry)
-    finally:
-        con.close()
-    return out
+        return profile(path, read_manifest(path), fingerprint=fingerprint, top=top)
+    except StatisticsUnavailableError as exc:
+        raise StoreError(str(exc)) from exc
 
 
 def connect_sandboxed(**tables: Path) -> duckdb.DuckDBPyConnection:
-    """For user-written SQL: tables are loaded up front so file access can be
-    switched off before the statement runs."""
-    con = duckdb.connect()
-    for name, path in tables.items():
-        con.register(name, pq.read_table(path))
+    con = duckdb.connect(
+        config={
+            "memory_limit": "512MB",
+            "threads": 2,
+            "autoinstall_known_extensions": False,
+            "autoload_known_extensions": False,
+            "allow_community_extensions": False,
+        }
+    )
+    con.execute("SET allowed_paths = ?", [[str(path.resolve()) for path in tables.values()]])
     con.execute("SET enable_external_access = false")
+    con.execute("SET lock_configuration = true")
+    for name, path in tables.items():
+        literal = str(path.resolve()).replace("'", "''")
+        nested = [column["name"] for column in read_manifest(path) if column["type"] == "json"]
+        projection = "*"
+        if nested:
+            replacements = ", ".join(
+                f"CAST({_quote(column)} AS JSON) AS {_quote(column)}" for column in nested
+            )
+            projection += f" REPLACE ({replacements})"
+        con.execute(
+            f"CREATE VIEW {_quote(name)} AS SELECT {projection} FROM read_parquet('{literal}')"
+        )
     return con
 
 
-def query(sql: str, *, limit: int | None = 200, **tables: Path) -> dict[str, Any]:
+def query(
+    sql: str,
+    *,
+    limit: int | None = 200,
+    max_bytes: int | None = None,
+    max_columns: int | None = None,
+    execution_check=None,
+    **tables: Path,
+) -> dict[str, Any]:
     """Read-only SQL over registered tables. Returns decoded rows and columns."""
     con = connect_sandboxed(**tables)
     sql = sql.strip().rstrip(";").strip()
+    expired = threading.Event()
+
+    def interrupt():
+        expired.set()
+        con.interrupt()
+
+    timeout = settings.DATASET_QUERY_TIMEOUT_SECONDS
+    timer = threading.Timer(timeout, interrupt)
+    timer.daemon = True
+    timer.start()
     try:
+        if execution_check is not None:
+            execution_check()
+        statements = con.extract_statements(sql)
+        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+            raise StoreError("Only one read-only SELECT query is allowed.")
         cur = con.execute(f"SELECT * FROM ({sql}) LIMIT {int(limit)}" if limit else sql)
         cols = [d[0] for d in cur.description]
-        rows = _records(cur)
+        if max_columns is not None and len(cols) > max_columns:
+            raise QuerySizeError(
+                "The query exceeds its column budget. Select fewer columns or export the cell."
+            )
+        json_columns = {d[0] for d in cur.description if str(d[1]) == "JSON"}
+        rows, size = [], 0
+        for batch in cur.to_arrow_reader(batch_size=1):
+            if expired.is_set():
+                raise QueryTimeoutError(
+                    f"The query exceeded {timeout:g} seconds. Narrow the query or export the cell."
+                )
+            for value in batch.to_pylist():
+                row = _json_safe(
+                    {
+                        key: _decode(value, "json") if key in json_columns else value
+                        for key, value in value.items()
+                    }
+                )
+                size += len(json.dumps(row, default=str, ensure_ascii=False).encode())
+                if max_bytes is not None and size > max_bytes:
+                    raise QuerySizeError(
+                        "The query exceeds its byte budget. Select fewer columns, aggregate or export the cell."
+                    )
+                rows.append(row)
+        if execution_check is not None:
+            execution_check()
+        if expired.is_set():
+            raise QueryTimeoutError(
+                f"The query exceeded {timeout:g} seconds. Narrow the query or export the cell."
+            )
+    except duckdb.InterruptException as exc:
+        if execution_check is not None:
+            execution_check()
+        raise QueryTimeoutError(
+            f"The query exceeded {timeout:g} seconds. Narrow the query or export the cell."
+        ) from exc
     finally:
+        timer.cancel()
+        timer.join()
         con.close()
-    return {"rows": [_json_safe(r) for r in rows], "columns": cols}
+    return {"rows": rows, "columns": cols}
 
 
 def _json_safe(row: dict[str, Any]) -> dict[str, Any]:

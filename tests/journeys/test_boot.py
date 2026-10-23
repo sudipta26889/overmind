@@ -45,6 +45,7 @@ def _environment(**overrides: str) -> dict[str, str]:
     database = settings.DATABASES["default"]
     env = {
         "PATH": os.environ["PATH"],
+        "PYTHON_DOTENV_DISABLED": "1",
         "HOME": os.environ.get("HOME", "/tmp"),
         **_example(),
         **FILLED,

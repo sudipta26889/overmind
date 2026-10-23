@@ -33,7 +33,7 @@ report "raw palette status colours" \
 # Deliberate theme-independent surfaces are named in lib/colors.ts; components
 # reference those rather than re-spelling them.
 report "raw neutral palette (use lib/colors.ts)" \
-  '\b(bg|text|border|hover:bg|hover:text|hover:border|dark:bg|dark:text|dark:border|dark:hover:bg)-(zinc|neutral|slate|gray|stone)-[0-9]' \
+  '\b(bg|text|border|hover:bg|hover:text|hover:border)-(zinc|neutral|slate|gray|stone)-[0-9]' \
   'lib/colors.ts'
 # lib/colors.ts is the one module allowed to name a colour.
 report "colour literal in code (use lib/colors.ts)" \
@@ -46,29 +46,26 @@ report "re-derived score tier (use scoreTone)" \
   'lib/colors\.ts|\.test\.'
 report "hex in class strings" \
   '(bg|text|border|ring|fill|stroke|from|to|via)-\[#'
-# The elevation wash is two steps in both themes. `bg-muted/N` alphas step
+# The elevation wash is two steps. `bg-muted/N` alphas step
 # 0.25–0.5 L* against a ~1 L* just-noticeable difference, so they render flat.
 report "alpha wash (use bg-wash-subtle / bg-wash-raised)" \
   'bg-muted/[0-9]'
 # The tokens are hex, not HSL triplets, so hsl() receives a colour and the
-# browser silently discards the whole declaration, in both themes.
+# browser silently discards the whole declaration.
 report "hsl() wrapping a hex token (drops the declaration)" \
   'hsl\(var\(--'
-# An opaque bg-white/bg-black is the same fill in both themes, so one theme is
-# always wrong; bg-foreground/bg-background invert on their own. The `dark:bg-`
-# exemption covers NATIVE_DATE_TRIGGER, which forces light chrome in dark mode
-# to match the native datetime picker's non-themeable popup.
+# Named exceptions such as native date-picker chrome belong in lib/colors.ts.
 report "opaque bg-white/bg-black (use bg-foreground / bg-background)" \
   '\bbg-(white|black)[^/a-zA-Z0-9-]' \
-  'dark:bg-'
+  'lib/colors.ts'
 # Allowlisted: login, a bespoke display surface whose type sits off the UI
 # data-scale.
 report "arbitrary text-[Npx/rem/em] (use scale tokens)" \
   'text-\[[0-9.]+(px|rem|em)\]' \
   'routes/login.tsx'
-# Three faces, three jobs: PP Mondwest = titles, Geist Pixel = everything else
-# (the default, needs no class), NeueBit = sidebar nav and breadcrumb only. A
-# title picks a step from lib/typography.ts rather than spelling the face.
+# Three faces, three jobs: PP Mondwest = main page title, Geist Pixel = other content
+# (the default), NeueBit = sidebar nav and breadcrumb only. A
+# heading picks a step from lib/typography.ts rather than spelling the face.
 report "font-display / page-title (use TITLE.* from lib/typography)" \
   '\bfont-display\b|"page-title|page-title ' \
   'lib/typography\.ts|styles\.css'
@@ -79,8 +76,8 @@ report "title class + explicit text size (size comes from the step)" \
 report "prose-body literal (use PROSE from lib/typography)" \
   'prose-body' \
   'lib/typography\.ts|styles\.css'
-# Mondwest ships a Regular master only — a weight utility synthesizes bold.
-report "title + weight utility (Mondwest has one master)" \
+# The role owns weight; call sites must not override it.
+report "title + weight utility (use the role weight)" \
   '(title-hero|page-title|title-section|title-card)[^"'"'"']*font-(medium|semibold|bold)|font-(medium|semibold|bold)[^"'"'"']*(title-hero|page-title|title-section|title-card)' \
   'lib/typography\.ts|styles\.css'
 # NeueBit's bold master is reserved for its accent surfaces (active sidebar row,
@@ -103,8 +100,8 @@ report "font-sidebar outside the nav surfaces (NeueBit is an accent)" \
 report "arbitrary tracking (use tracking-cell, one Geist Pixel grid cell)" \
   'tracking-\[' \
   'routes/login\.tsx'
-# Dead shadow utilities (all --shadow-* resolve to none).
-report "shadow-* utilities (shadows are off)" \
+# Standard shadows are disabled; confirmations use the named shadow-confirmation token.
+report "standard shadow utilities (use flat surfaces or the confirmation token)" \
   '\bshadow-(2xs|xs|sm|md|lg|xl|2xl)\b'
 # The ramp is three steps and nothing above them:
 #   rounded-xs (1px)  things under ~8px — status dots, progress bars, switch
@@ -132,8 +129,10 @@ report "uppercase / text-transform (labels are sentence case)" \
 report "tracking-wide/wider/widest (label spacing comes from .pixel-label)" \
   '\btracking-(wide|wider|widest)\b' \
   'ui/dropdown-menu.tsx'
-report "text-black dark:text-white (use text-foreground)" \
-  'text-black dark:text-white|dark:text-white .*text-black'
+# The Console is dark-only, and without a custom variant Tailwind's `dark:`
+# follows the OS colour scheme.
+report "dark: variant (the Console is dark-only)" \
+  '(^|[^a-zA-Z0-9_-])dark:'
 report "confirm() (use ConfirmDialog)" \
   '\bwindow\.confirm\(|[^.]\bconfirm\('
 report "lucide-react import (use @/components/ui/icons)" \
@@ -153,8 +152,10 @@ report "animate-spin (use Spinner)" \
 report "empty state returned instead of PageShell (put it inside)" \
   'return <(ProjectRequired|NoProjects)EmptyState' \
   'components/'
+# The opt-in sheet hover backdrop is the user-requested focus treatment.
 report "blur / gradient (flat surfaces only)" \
-  'backdrop-blur|\bblur-(sm|md|lg|xl|2xl|3xl)\b|bg-gradient-|bg-(linear|radial|conic)-'
+  'backdrop-blur|\bblur-(sm|md|lg|xl|2xl|3xl)\b|bg-gradient-|bg-(linear|radial|conic)-' \
+  'ui/sheet\.tsx:.*className="sheet-hover-backdrop .*backdrop-blur-\[2px\]'
 
 if [[ "${MODE:-check}" == counts ]]; then
   exit 0
