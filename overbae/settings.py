@@ -463,7 +463,7 @@ CELERY_TASK_ROUTES = {
 }
 
 # Share of traces live scoring judges, chosen by trace id; 1 scores every trace.
-TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE", "1"))
+TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE") or "1")
 
 CELERY_BEAT_SCHEDULE = {
     "workshop-bindings": {

@@ -59,7 +59,9 @@ def test_call_llm_sends_the_response_schema(fake_llm):
     content, _ = call_llm("hello", system_prompt="system", model="gpt-5", response_format=_Status)
     request = fake_llm.requests[-1]
     assert request.model == "openai/gpt-5"
-    assert request.system == "system"
+    # The schema also rides in the prompt for gateways that drop response_format.
+    assert request.system.startswith("system\n\n")
+    assert '"status"' in request.system
     assert request.schema_name == "_Status"
     assert _Status.model_validate_json(content)
 
