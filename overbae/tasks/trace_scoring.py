@@ -5,6 +5,7 @@ re-reading feedback blocks."""
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Iterator
@@ -47,6 +48,16 @@ def _single_flight(trace_id: str, project_id: str) -> Iterator[bool]:
             cache.delete(key)
 
 
+def in_scoring_sample(trace_id: str) -> bool:
+    """Keyed on the trace id so every enqueue path — ingest, sweep, retries —
+    agrees, and an unsampled trace is never re-enqueued as unscored."""
+    rate = settings.TRACE_SCORING_SAMPLE_RATE
+    if rate >= 1:
+        return True
+    bucket = int.from_bytes(hashlib.sha256(trace_id.encode()).digest()[:4], "big")
+    return bucket < rate * 2**32
+
+
 @shared_task(
     name="overbae.tasks.trace_scoring.score_trace",
     bind=True,
@@ -55,6 +66,8 @@ def _single_flight(trace_id: str, project_id: str) -> Iterator[bool]:
     retry_kwargs={"max_retries": 2},
 )
 def score_trace(self, *, trace_id: str, project_id: str, **kwargs) -> dict[str, Any]:  # noqa: ARG001
+    if not in_scoring_sample(trace_id):
+        return {"status": "unsampled", "trace_id": trace_id}
     with _single_flight(trace_id, project_id) as acquired:
         if not acquired:
             logger.info("score_trace already in flight for trace=%s", trace_id)
@@ -221,6 +234,8 @@ def sweep_unscored_traces() -> dict[str, Any]:
     members_cache: dict = {}
     enqueued = 0
     for trace_id, project_id, eval_set_id, root_received_at in roots:
+        if not in_scoring_sample(trace_id):
+            continue
         if not _needs_scoring(trace_id, project_id, eval_set_id, members_cache, root_received_at):
             continue
         score_trace.delay(trace_id=trace_id, project_id=str(project_id))
@@ -236,6 +251,8 @@ def sweep_unscored_traces() -> dict[str, Any]:
     )
     rootless_enqueued = 0
     for row in rootless:
+        if not in_scoring_sample(row["trace_id"]):
+            continue
         if row["eval_set_id"]:
             if not _needs_scoring(
                 row["trace_id"], row["project_id"], row["eval_set_id"], members_cache

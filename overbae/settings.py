@@ -452,6 +452,9 @@ CELERY_TASK_ROUTES = {
     "overbae.tasks.trace_scoring.score_trace": {"queue": "io_traces"},
 }
 
+# Share of traces live scoring judges, chosen by trace id; 1 scores every trace.
+TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE", "1"))
+
 CELERY_BEAT_SCHEDULE = {
     "reconcile-dataset-imports": {
         "task": "overbae.tasks.datasets.reconcile_imports",

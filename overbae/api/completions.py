@@ -35,7 +35,7 @@ from overbae.api.streaming import (
     AsyncStream,
     iter_keeping_idle_alive,
 )
-from overbae.core.model_registry import inference_models, is_inference_model
+from overbae.core.model_registry import OPENROUTER_BASE_URL, inference_models, is_inference_model
 from overbae.models import (
     APIToken,
     BillingService,
@@ -144,7 +144,7 @@ def _process_stream_chunk(raw: str, captured: dict[str, Any], include_usage: boo
     return raw
 
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_URL = f"{OPENROUTER_BASE_URL}/chat/completions"
 _OPENROUTER_TIMEOUT = 120
 
 # Model-comparison runs send this header to reach ANY OpenRouter-served slug;

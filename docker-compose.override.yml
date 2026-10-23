@@ -66,6 +66,14 @@ services:
     depends_on: !override
       api:
         condition: service_healthy
+  celery-landing-worker:
+    <<: *app-env
+    mem_limit: 4g
+    memswap_limit: 5g
+    init: true
+    depends_on: !override
+      api:
+        condition: service_healthy
   celery-interactive-worker:
     <<: *app-env
     mem_limit: 4g
