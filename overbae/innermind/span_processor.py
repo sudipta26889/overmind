@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from collections import defaultdict
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -250,6 +252,24 @@ async def load_traces(
     return traces
 
 
+def in_scoring_sample(trace_id: str) -> bool:
+    """Keyed on the trace id so a trace's spans and its trajectory share one decision."""
+    rate = settings.TRACE_SCORING_SAMPLE_RATE
+    if rate >= 1:
+        return True
+    bucket = int.from_bytes(hashlib.sha256(trace_id.encode()).digest()[:4], "big")
+    return bucket < rate * 2**32
+
+
+@sync_to_async
+def mark_unsampled(span: Span) -> None:
+    """Final without judging and without an ``EvalScore`` row, so the sweep stops."""
+    Span.objects.filter(span_id=span.span_id).exclude(eval_attributes__has_key="score").update(
+        eval_attributes={**span.eval_attributes, "score": None, "metrics": {}, "unsampled": True},
+        eval_claimed_at=None,
+    )
+
+
 @sync_to_async
 def record_attempt(span: Span) -> bool:
     """Stores a pass's attempt count before its judges run; False once the span is scored."""
@@ -297,6 +317,9 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
         trace = traces[span.trace_id]
         fallback = span.capability.description if span.capability_id else ""
         processor = span_processor_factory.get_processor(span)
+        if not in_scoring_sample(span.trace_id):
+            await mark_unsampled(span)
+            return None
         async with slots:
             # Claimed only now, so a span waiting for a slot never holds a claim that expires.
             if not await sync_to_async(claim)([span.span_id]):

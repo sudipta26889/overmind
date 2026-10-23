@@ -346,10 +346,26 @@ class Role(StrEnum):
     EXPLAIN = "explain"
 
 
+def _role_chain(env: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """A self-hosted gateway may serve only some catalog models; ``env`` narrows
+    the chain to comma-separated catalog names it actually routes."""
+    names = tuple(n.strip() for n in os.environ.get(env, "").split(",") if n.strip())
+    unknown = [n for n in names if n not in MODELS_BY_NAME]
+    if unknown:
+        raise ValueError(f"{env} names models outside the catalog: {', '.join(unknown)}")
+    return names or default
+
+
 ROLE_CHAINS: dict[Role, tuple[str, ...]] = {
-    Role.FAST: ("gpt-5.6-luna", "claude-sonnet-5", "gemini-3.8-flash"),
-    Role.AGENT: ("gpt-5.6-terra", "claude-sonnet-5", "gemini-3.1-pro-preview"),
-    Role.EXPLAIN: ("gpt-5-mini", "claude-haiku-4-5", "gemini-3.8-flash"),
+    Role.FAST: _role_chain(
+        "LLM_FAST_CHAIN", ("gpt-5.6-luna", "claude-sonnet-5", "gemini-3.8-flash")
+    ),
+    Role.AGENT: _role_chain(
+        "LLM_AGENT_CHAIN", ("gpt-5.6-terra", "claude-sonnet-5", "gemini-3.1-pro-preview")
+    ),
+    Role.EXPLAIN: _role_chain(
+        "LLM_EXPLAIN_CHAIN", ("gpt-5-mini", "claude-haiku-4-5", "gemini-3.8-flash")
+    ),
 }
 
 
@@ -435,7 +451,8 @@ class Provider:
         return bool(self.key())
 
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+# Any OpenAI-compatible gateway that routes OpenRouter slugs (e.g. LiteLLM) can stand in.
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
 
 PROVIDERS: dict[str, Provider] = {
     "openrouter": Provider(

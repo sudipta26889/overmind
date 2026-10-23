@@ -462,6 +462,9 @@ CELERY_TASK_ROUTES = {
     "overbae.tasks.innermind.run_signals": {"queue": "io_traces"},
 }
 
+# Share of traces live scoring judges, chosen by trace id; 1 scores every trace.
+TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE", "1"))
+
 CELERY_BEAT_SCHEDULE = {
     "workshop-bindings": {
         "task": "overbae.tasks.datasets.refresh_pipeline_bindings",

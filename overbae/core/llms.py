@@ -475,6 +475,30 @@ def _response_format_param(response_format: type[BaseModel] | None) -> dict | No
     }
 
 
+def _with_schema_instruction(
+    messages: list[dict[str, Any]], response_format: type[BaseModel]
+) -> list[dict[str, Any]]:
+    """Some gateways (the ChatGPT-subscription backend behind LiteLLM) silently drop
+    ``response_format`` and answer in prose, so the schema also rides in the prompt.
+    It joins the first system message: that backend rejects any later one."""
+    instruction = (
+        "Respond with only a JSON object that conforms to this JSON Schema, and nothing else:\n"
+        + json.dumps(to_strict_json_schema(response_format))
+    )
+    out = list(messages)
+    for i, message in enumerate(out):
+        if message.get("role") != "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            content = [*content, {"type": "text", "text": instruction}]
+        else:
+            content = f"{content or ''}\n\n{instruction}".lstrip()
+        out[i] = {**message, "content": content}
+        return out
+    return [{"role": "system", "content": instruction}, *out]
+
+
 def _reasoning_extra_body(
     selected_model_name: str,
     reasoning_effort: str | None,
@@ -535,6 +559,9 @@ def call_llm(
             for m in messages
             if not (m.get("content") is None and m.get("role") in ("system", "user"))
         ]
+
+    if response_format is not None:
+        messages = _with_schema_instruction(messages, response_format)
 
     try:
         if model_spec is not None:

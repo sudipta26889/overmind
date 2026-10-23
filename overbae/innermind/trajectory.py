@@ -22,7 +22,7 @@ from overbae.innermind.metrics import (
     roots_of,
     score_of,
 )
-from overbae.innermind.span_processor import MAX_ATTEMPTS
+from overbae.innermind.span_processor import MAX_ATTEMPTS, in_scoring_sample
 from overbae.models import EvalScore, Span
 
 logger = logging.getLogger(__name__)
@@ -278,6 +278,10 @@ async def score_trace(trace_id: str) -> bool:
     if not is_ready(spans):
         return False
     root = roots_of(spans)[0]
+    if not in_scoring_sample(trace_id):
+        unsampled = {"score": None, "metrics": {}, "unsampled": True}
+        await store(root, {**root.eval_attributes, "trajectory": unsampled})
+        return False
     attempts = root.eval_attributes.get("trajectory_attempts", 0)
     spent = attempts >= MAX_ATTEMPTS
     if not spent:
