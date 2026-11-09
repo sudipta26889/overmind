@@ -54,6 +54,7 @@ jobs:
     environment: production
     steps:
       - name: Trigger Portainer stack redeploy
+        id: hook
         env:
           # A credential: anyone holding this URL can redeploy the stack.
           PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
@@ -71,11 +72,10 @@ jobs:
             sleep 30
           done
           [ "${status:0:1}" = "2" ]
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
 
       - name: Wait for the API to report healthy
-        if: env.PORTAINER_WEBHOOK_URL != ''
-        env:
-          PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
+        if: steps.hook.outputs.deployed == 'true'
         run: |
           for _ in $(seq 1 120); do
             curl -fsS --max-time 10 https://overmind-api.sudiptadhara.in/health && exit 0
