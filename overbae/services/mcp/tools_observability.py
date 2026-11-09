@@ -34,6 +34,7 @@ from overbae.services import (
     operational_progress,
     training_monitoring,
 )
+from overbae.services.connectors.progress import sync_progress
 from overbae.services.datasets import transfers, workbench
 from overbae.services.deployment import deployment_progress
 from overbae.services.entity_resolution import (
@@ -227,7 +228,7 @@ def _trace_filter_data(payload: QueryTracesInput, context: MCPContext) -> dict[s
         if source in values:
             data[target] = str(values[source])
     if payload.status is not None:
-        data["has_error"] = str(payload.status == "error").lower()
+        data["has_error"] = str(payload.status in {"error", "2"}).lower()
     elif payload.has_error is not None:
         data["has_error"] = str(payload.has_error).lower()
     return data
@@ -333,7 +334,7 @@ def _job_uuid(ref: str):
         return None
 
 
-def _get_job_sync(payload: GetJobInput, context: MCPContext) -> GetJobOutput:
+def get_job_sync(payload: GetJobInput, context: MCPContext) -> GetJobOutput:
     kind = _JOB_ALIASES.get(payload.kind, payload.kind)
     ref = payload.id
     normalized_id = _job_uuid(ref)
@@ -589,6 +590,7 @@ def _get_job_sync(payload: GetJobInput, context: MCPContext) -> GetJobOutput:
         created_at, updated_at = job.created_at, job.updated_at
         label, status = job.name, job.sync_status
         job_error = "Connector sync failed." if job.sync_error else None
+        connector_progress = sync_progress(job)
         details = {
             "connector_type": job.connector_type,
             "sync": {
@@ -599,6 +601,9 @@ def _get_job_sync(payload: GetJobInput, context: MCPContext) -> GetJobOutput:
                 "next_poll_at": job.next_poll_at,
                 "backfill_imported": job.backfill_imported,
                 "backfill_total": job.backfill_total,
+                "progress": connector_progress.model_dump(mode="json")
+                if connector_progress
+                else None,
                 "total_spans_imported": job.total_spans_imported,
                 "total_traces_imported": job.total_traces_imported,
                 "has_error": bool(job.sync_error),
@@ -612,7 +617,29 @@ def _get_job_sync(payload: GetJobInput, context: MCPContext) -> GetJobOutput:
     if operation:
         details["operation"] = operation
         underlying.append(_link("operations", operation["id"], "Operational timeline"))
+    guidance = model_workflows.guidance(kind, job) if kind in model_workflows.MODELS else {}
+    next_actions = (
+        model_workflows.next_actions(kind, job) if kind in model_workflows.MODELS else ["get_job"]
+    )
+    terminal = status in {
+        "succeeded",
+        "completed",
+        "complete",
+        "failed",
+        "cancelled",
+        "ready",
+        "deleted",
+    }
     return GetJobOutput(
+        view=payload.view,
+        omitted_fields=["progress", "details"] if payload.view == "summary" else [],
+        project_id=str(context.project.pk),
+        stage=operation.get("stage") if operation else None,
+        last_heartbeat_at=operation.get("last_heartbeat_at") if operation else None,
+        last_progress_at=operation.get("last_progress_at") if operation else None,
+        next_actions=next_actions,
+        action_requirements=guidance.get("action_requirements", {}),
+        poll_after_seconds=guidance.get("poll_after_seconds", None if terminal else 5),
         kind=kind,
         id=str(job.id),
         status=status,
@@ -621,8 +648,8 @@ def _get_job_sync(payload: GetJobInput, context: MCPContext) -> GetJobOutput:
         created_at=created_at,
         updated_at=updated_at,
         completed_at=completed_at,
-        progress=progress,
-        details=details,
+        progress=progress if payload.view == "full" else None,
+        details=details if payload.view == "full" else {},
         resource=primary,
         resource_links=[primary, *underlying],
         summary=f"{label[: 237 - len(status)]}: {status}.",
@@ -701,7 +728,7 @@ def register_observability_tools(catalog) -> None:
             "row examples and preview samples, without starting work.",
             GetJobInput,
             GetJobOutput,
-            _get_job_sync,
+            get_job_sync,
             "free",
         ),
     ]

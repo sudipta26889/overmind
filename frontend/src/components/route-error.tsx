@@ -4,13 +4,44 @@ import { useEffect, useState } from "react";
 import { Link, useRouter } from "@tanstack/react-router";
 import * as z from "zod";
 
+import { ConnectionPanel, ConnectionScene, connectionHeading } from "@/components/connection-scene";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Icon } from "@/components/ui/icons";
+import { PageHeader } from "@/components/ui/page-header";
+import { LoadingState } from "@/components/ui/spinner";
 import { ApiError } from "@/lib/api-error";
-import { hasChunkReloadFlag, isChunkLoadError, tryReloadOnceOnChunkError } from "@/lib/chunk-error";
+import { retryAuthLoad } from "@/lib/auth-load-recovery";
+import { isChunkLoadError } from "@/lib/chunk-error";
 import { errorMessage } from "@/lib/notify";
+
+export function AuthenticationLoadingState({ label = "Loading sign in" }: { label?: string }) {
+  const [delayed, setDelayed] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDelayed(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  return (
+    <ConnectionPanel>
+      <div className="flex min-h-48 flex-col items-center justify-center gap-4 text-center">
+        <img alt="Overmind" height={40} src="/favicon.png" width={40} />
+        <LoadingState label={label} />
+        {delayed && (
+          <div className="space-y-3 motion-safe:animate-in motion-safe:fade-in-0 motion-safe:duration-200">
+            <p className="text-sm text-muted-foreground" role="status">
+              This is taking longer than usual.
+            </p>
+            <Button onClick={() => window.location.reload()} variant="outline">
+              {label === "Loading sign in" ? "Reload sign in" : "Reload page"}
+            </Button>
+          </div>
+        )}
+      </div>
+    </ConnectionPanel>
+  );
+}
 
 export function DetailErrorState({
   action,
@@ -45,16 +76,7 @@ function findZodError(err: unknown, depth = 0): z.ZodError | null {
 export function RouteErrorFallback({ error, reset }: { error: unknown; reset?: () => void }) {
   const router = useRouter();
   const chunkError = isChunkLoadError(error);
-  const awaitingChunkReload = chunkError && !hasChunkReloadFlag();
-  const [reloading, setReloading] = useState(awaitingChunkReload);
-
-  useEffect(() => {
-    if (!awaitingChunkReload) return;
-    tryReloadOnceOnChunkError(error);
-    setReloading(true);
-  }, [awaitingChunkReload, error]);
-
-  if (reloading || awaitingChunkReload) return null;
+  const [retrying, setRetrying] = useState(false);
 
   const notFound = error instanceof ApiError && error.status === 404;
   // A `validateSearch` failure carries the raw issue array as its `.message`,
@@ -71,13 +93,13 @@ export function RouteErrorFallback({ error, reset }: { error: unknown; reset?: (
               <>
                 <Button onClick={() => window.location.reload()}>Refresh page</Button>
                 <Button asChild variant="outline">
-                  <Link to="/">Go to home</Link>
+                  <a href="/">Go to home</a>
                 </Button>
               </>
             }
-            description="The app was updated while you had it open. Refresh to load the latest version."
+            description="Part of the app could not load. Check your connection, then refresh the page."
             icon={Icon.warning}
-            title="New version available"
+            title="Page unavailable"
           />
         </div>
       </div>
@@ -92,17 +114,23 @@ export function RouteErrorFallback({ error, reset }: { error: unknown; reset?: (
             <>
               {!invalidLink && (
                 <Button
-                  onClick={() => {
-                    reset?.();
-                    router.invalidate();
+                  disabled={retrying}
+                  onClick={async () => {
+                    setRetrying(true);
+                    try {
+                      await router.invalidate();
+                      reset?.();
+                    } finally {
+                      setRetrying(false);
+                    }
                   }}
                   variant="outline"
                 >
-                  Try again
+                  {retrying ? "Retrying" : "Try again"}
                 </Button>
               )}
               <Button asChild>
-                <Link to="/">Go to home</Link>
+                <a href="/">Go to home</a>
               </Button>
             </>
           }
@@ -141,5 +169,25 @@ export function RouteNotFound() {
         title="Page not found"
       />
     </div>
+  );
+}
+
+export function AuthenticationLoadError() {
+  useEffect(() => {
+    retryAuthLoad("script");
+  }, []);
+
+  return (
+    <ConnectionScene>
+      <PageHeader className={connectionHeading} title="Sign in unavailable" />
+      <ConnectionPanel>
+        <div className="space-y-5 text-center">
+          <p className="text-sm text-muted-foreground" role="alert">
+            The sign-in service could not load. Check your connection and reload.
+          </p>
+          <Button onClick={() => window.location.reload()}>Reload sign in</Button>
+        </div>
+      </ConnectionPanel>
+    </ConnectionScene>
   );
 }

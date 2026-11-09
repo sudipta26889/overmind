@@ -7,6 +7,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Spinner } from "@/components/ui/spinner";
 import { cn, paginationFromPageLimit } from "@/lib/utils";
 
 interface TablePaginationProps {
@@ -16,6 +17,7 @@ interface TablePaginationProps {
   page: number;
   pageSize: number;
   count: number;
+  loading?: boolean;
   onPageChange: (page: number) => void;
   onPageSizeChange: (size: number) => void;
 }
@@ -24,6 +26,7 @@ export function TablePagination({
   className,
   size = "default",
   count,
+  loading = false,
   page,
   pageSize,
   onPageChange,
@@ -41,8 +44,16 @@ export function TablePagination({
         className
       )}
     >
-      <div className="flex-1 whitespace-nowrap tabular-nums">
-        {pagination.count > 0 ? (
+      <div
+        aria-live="polite"
+        className="flex flex-1 items-center gap-2 whitespace-nowrap tabular-nums"
+      >
+        {loading ? (
+          <>
+            <Spinner size="sm" />
+            Loading page {page}
+          </>
+        ) : pagination.count > 0 ? (
           <>
             {pagination.startItem}–{pagination.endItem} of {pagination.total}{" "}
             {pagination.total === 1 ? "row" : "rows"}
@@ -56,7 +67,11 @@ export function TablePagination({
           <span>Rows per page</span>
           <Select onValueChange={(v) => onPageSizeChange(Number(v))} value={String(pageSize)}>
             {/* w-20, not 70px — three digits plus the chevron need the room. */}
-            <SelectTrigger className="w-20" size={size === "xs" ? "xs" : "sm"}>
+            <SelectTrigger
+              aria-label="Rows per page"
+              className="w-20"
+              size={size === "xs" ? "xs" : "sm"}
+            >
               <SelectValue placeholder={pageSize} />
             </SelectTrigger>
             <SelectContent side="top">
@@ -73,7 +88,7 @@ export function TablePagination({
         </div>
         <div className="flex items-center gap-1">
           <Button
-            disabled={!pagination.hasPrevious}
+            disabled={loading || !pagination.hasPrevious}
             onClick={() => onPageChange(page - 1)}
             size={size === "xs" ? "icon-xs" : "icon-sm"}
             variant="secondary"
@@ -82,7 +97,7 @@ export function TablePagination({
             <Icon.chevronLeft />
           </Button>
           <Button
-            disabled={!pagination.hasNext}
+            disabled={loading || !pagination.hasNext}
             onClick={() => onPageChange(page + 1)}
             size={size === "xs" ? "icon-xs" : "icon-sm"}
             variant="secondary"

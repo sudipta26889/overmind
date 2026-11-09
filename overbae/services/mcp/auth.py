@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 from io import BytesIO
 
 from asgiref.sync import sync_to_async
@@ -20,6 +19,8 @@ from overbae.services.mcp.errors import MCPError, error_payload
 from overbae.services.mcp.oauth import authenticate_access
 
 MCP_PATH = "/api/mcp/"
+# Starlette would redirect the other form. MCP clients do not follow that redirect.
+MCP_PATHS = (MCP_PATH, MCP_PATH.rstrip("/"))
 
 
 def _request_for_scope(scope: Scope) -> ASGIRequest:
@@ -35,28 +36,6 @@ def _auth_error(detail: str) -> MCPError:
     if "user" in detail:
         return MCPError("authentication_failed", "The API key owner is inactive.")
     return MCPError("authentication_failed", "The API key is invalid.")
-
-
-def ip_allowed(token: APIToken, client_ip: str | None) -> bool:
-    allowed_ips = token.allowed_ips or []
-    if not allowed_ips:
-        return True
-    if not client_ip or not isinstance(allowed_ips, list):
-        return False
-    try:
-        address = ipaddress.ip_address(client_ip)
-    except ValueError:
-        return False
-
-    for value in allowed_ips:
-        if not isinstance(value, str):
-            return False
-        try:
-            if address in ipaddress.ip_network(value, strict=False):
-                return True
-        except ValueError:
-            return False
-    return False
 
 
 def _authenticate_sync(scope: Scope) -> MCPContext:
@@ -81,7 +60,7 @@ def _authenticate_sync(scope: Scope) -> MCPContext:
             ),
         )
     try:
-        result = APITokenBackend().authenticate(request)
+        result = APITokenBackend().resolve(request)
     except exceptions.AuthenticationFailed as exc:
         raise _auth_error(str(exc.detail)) from None
 
@@ -93,8 +72,6 @@ def _authenticate_sync(scope: Scope) -> MCPContext:
         raise MCPError("authentication_failed", "An MCP API key is required.")
 
     client_ip = (scope.get("client") or (None, None))[0]
-    if not ip_allowed(token, client_ip):
-        raise MCPError("authentication_failed", "The API key is not valid for this address.")
 
     token_scope = token.scope if isinstance(token.scope, dict) else {}
     resource_ids = token_scope.get("resourceIds")
@@ -150,7 +127,7 @@ class MCPAuthMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http" or scope.get("path") not in {MCP_PATH, MCP_PATH.rstrip("/")}:
+        if scope.get("type") != "http" or scope.get("path") not in MCP_PATHS:
             await self.app(scope, receive, send)
             return
 

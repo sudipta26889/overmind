@@ -13,6 +13,7 @@ from modal_shared.modelfam.families import (
     GEMMA4,
     GPT_OSS,
     LFM2,
+    LFM3,
     LLAMA,
     MINISTRAL,
     MUSE_GLIMMER,
@@ -38,6 +39,7 @@ _FAMILIES: tuple[FamilySpec, ...] = (
     PHI4,
     GEMMA4,
     MUSE_GLIMMER,
+    LFM3,
     LFM2,
     MINISTRAL,
     ANTARES,
@@ -68,10 +70,19 @@ def resolve(model_id: str) -> FamilySpec:
 
 
 def serve_image_key(*blobs: str) -> str:
-    """First non-default FamilySpec.serve_image across id fragments, else ``vllm``."""
+    """Shared-pool image for these ids.
+
+    A bake-off winner is matched by model id before the family default, because
+    one family contains both SGLang and vLLM winners.
+    """
+    from modal_shared.serving.engine import serverless_engine
+
     for blob in blobs:
         if not blob:
             continue
+        engine = serverless_engine(blob)
+        if engine != "vllm":
+            return engine
         key = resolve(blob).serve_image
         if key != "vllm":
             return key
@@ -173,7 +184,7 @@ def fixups_for_model_type(model_type: str) -> tuple[str, ...]:
     mtype = (model_type or "").lower()
     if mtype == "qwen3_5_text":
         return ("nest_qwen3_5_text",)
-    if mtype in ("lfm2", "lfm2_moe") or mtype.startswith("lfm"):
+    if mtype == "lfm2" or mtype.startswith("lfm2"):
         return ("lfm_layer_types",)
     if mtype == "nemotron_h":
         return ("nemotron_h",)

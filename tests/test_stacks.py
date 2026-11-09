@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from modal_shared.modelfam import resolve
 from modal_shared.modelfam.registry import all_families
 from modal_shared.stacks import (
@@ -17,6 +19,8 @@ from modal_shared.stacks import (
     train_function_name,
     worker_cls_name,
 )
+
+pytestmark = pytest.mark.covers("model-runtime")
 
 _MODELS_JSON = Path(__file__).resolve().parents[1] / "overbae" / "modal" / "models.json"
 
@@ -60,9 +64,12 @@ def test_catalog_unsloth_image_matches_family() -> None:
 
 def test_worker_cls_table() -> None:
     assert GPU_CLASS_MAP["L4"] == "L4_vllm"
-    assert SERVE_CLASS_MAP == {}
+    assert SERVE_CLASS_MAP[("L4", "sglang")] == "L4_sglang"
+    assert SERVE_CLASS_MAP[("L4", "sglang_lfm3")] == "L4_sglang_lfm3"
+    assert ("L4", "vllm") not in SERVE_CLASS_MAP
     assert worker_cls_name("H200") == "H200_vllm"
-    assert set(GPU_TIER) == {gpu for gpu, image in WORKER_CLS if image == "vllm"}
+    shared = {gpu for gpu, image in WORKER_CLS if image == "vllm"}
+    assert set(GPU_TIER) - shared == {"H100"}
     for gpu, image in WORKER_CLS:
         assert gpu in GPU_TIER
         assert image in SERVE_STACKS

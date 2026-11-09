@@ -1,3 +1,5 @@
+import ipaddress
+
 from django.utils import timezone
 from rest_framework import exceptions
 from rest_framework.authentication import BaseAuthentication
@@ -5,6 +7,30 @@ from rest_framework.permissions import SAFE_METHODS
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from overbae.models import APIToken
+
+
+def ip_allowed(token: APIToken, client_ip: str | None) -> bool:
+    allowed_ips = token.allowed_ips or []
+    if not allowed_ips:
+        return True
+    if not client_ip or not isinstance(allowed_ips, list):
+        return False
+    try:
+        address = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+    address = getattr(address, "ipv4_mapped", None) or address
+
+    for value in allowed_ips:
+        if not isinstance(value, str):
+            return False
+        try:
+            if address in ipaddress.ip_network(value, strict=False):
+                return True
+        except ValueError:
+            return False
+    return False
+
 
 GUEST_UPGRADE_CODE = "guest_upgrade_required"
 
@@ -44,10 +70,22 @@ class APITokenBackend(BaseAuthentication):
     """``X-Api-Key: <key>`` or ``Authorization: Bearer <key>``.
 
     Must stay ahead of JWT in the auth class list: an unmatched JWT-shaped value
-    returns None so simplejwt gets its turn.
+    returns None so simplejwt gets its turn. A key without ``write`` may only read;
+    the check lives here for the same reason as the guest gate.
     """
 
     def authenticate(self, request):
+        result = self.resolve(request)
+        if (
+            result
+            and request.method not in SAFE_METHODS
+            and "write" not in result[1].scope.get("permission", [])
+        ):
+            raise exceptions.PermissionDenied("This API key is read-only.")
+        return result
+
+    def resolve(self, request):
+        """The key's (user, token) without the method check; MCP filters tools by permission."""
         raw = self._extract_key(request)
         if raw is None:
             return None
@@ -66,6 +104,11 @@ class APITokenBackend(BaseAuthentication):
             raise exceptions.AuthenticationFailed("API key has expired.")
         if not token.user.is_active:
             raise exceptions.AuthenticationFailed("User inactive or deleted.")
+
+        if not ip_allowed(token, request.META.get("REMOTE_ADDR")):
+            raise exceptions.AuthenticationFailed("The API key is not valid for this address.")
+        if not token.is_account_scoped and not token.allowed_project_ids():
+            raise exceptions.AuthenticationFailed("The API key has no accessible project.")
 
         APIToken.objects.filter(pk=token.pk).update(last_used_at=timezone.now())
 

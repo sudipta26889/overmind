@@ -11,6 +11,8 @@ import pytest
 
 import overmind.analytics as analytics
 
+pytestmark = pytest.mark.covers("privacy")
+
 
 @pytest.fixture(autouse=True)
 def _reset_analytics(tmp_path, monkeypatch):
@@ -42,6 +44,7 @@ def test_enabled_defaults_on(monkeypatch):
     assert analytics.enabled() is True
 
 
+@pytest.mark.covers("sdk-install")
 def test_cli_and_client_work_without_posthog(tmp_path):
     script = """
 import sys
@@ -129,6 +132,7 @@ def test_capture_sends_allowed_properties_only(monkeypatch, posthog_client):
     assert "prompt" not in props
 
 
+@pytest.mark.covers("sdk-install")
 def test_capture_swallows_client_errors(monkeypatch, posthog_client):
     monkeypatch.setenv("OVERMIND_ANALYTICS_ENABLED", "true")
     monkeypatch.setattr(analytics, "ensure_identified", lambda **_: False)
@@ -136,114 +140,23 @@ def test_capture_swallows_client_errors(monkeypatch, posthog_client):
     analytics.capture("sdk_init", outcome="keyless")
 
 
-def test_distinct_id_persists(tmp_path, monkeypatch):
-    path = tmp_path / "analytics_id"
-    monkeypatch.setattr(analytics, "_ANALYTICS_ID_PATH", path)
-    first = analytics._distinct_id()
-    second = analytics._distinct_id()
-    assert first == second
-    assert path.read_text(encoding="utf-8").strip() == first
-
-
 @pytest.mark.parametrize(
-    "argv,command",
+    "argv,expected",
     [
-        (["overmind", "sync"], "sync"),
-        (["overmind", "dataset", "upload", "data.jsonl"], "dataset upload"),
-        (["overmind", "optimise", "start", "--json"], "optimise start"),
-        (["overmind", "--version"], ""),
+        (["overmind", "init", "--brief", "private business plan"], "init"),
+        (["overmind", "dataset", "upload", "/private/customers.jsonl", "--json"], "dataset upload"),
+        (["overmind", "connector", "add", "private-provider"], "connector add"),
+        (["overmind", "unknown-private-text"], ""),
     ],
 )
-def test_cli_command_from_argv(argv, command):
-    assert analytics.cli_command_from_argv(argv) == command
-
-
-def test_redact_argv_strips_secrets():
-    line = analytics._redact_argv([
-        "overmind",
-        "sync",
-        "--api-key",
-        "om_super_secret_value_123456",
-        "--project-id",
-        "proj_abc",
-    ])
-    assert line == "overmind sync --api-key [redacted] --project-id proj_abc"
-    assert "om_super_secret" not in line
-
-
-@pytest.mark.parametrize(
-    "argv,flags,args",
-    [
-        (
-            ["overmind", "init", "--ide", "cursor", "--env", "production"],
-            {"ide": "cursor", "env": "production"},
-            [],
-        ),
-        (
-            ["overmind", "dataset", "upload", "data.jsonl", "--json"],
-            {"json": True},
-            ["data.jsonl"],
-        ),
-        (
-            ["overmind", "sync", "--api-key", "om_super_secret_value_123456"],
-            {"api-key": "[redacted]"},
-            [],
-        ),
-        (
-            ["overmind", "init", "--ide=cursor"],
-            {"ide": "cursor"},
-            [],
-        ),
-    ],
-)
-def test_cli_flags_and_args(argv, flags, args):
-    assert analytics.cli_flags_and_args(argv) == (flags, args)
-
-
-def test_track_cli_invocation_emits_full_command(monkeypatch, posthog_client):
-    monkeypatch.setenv("OVERMIND_ANALYTICS_ENABLED", "true")
-    monkeypatch.setattr(analytics, "ensure_identified", lambda **_: False)
-    monkeypatch.setattr(
-        analytics,
-        "_redact_argv",
-        lambda argv=None: "overmind skills list --json",
-    )
-    monkeypatch.setattr(
-        analytics,
-        "cli_flags_and_args",
-        lambda argv=None: ({"json": True}, []),
-    )
-
-    analytics.track_cli_invocation(command="skills list", exit_code=0, duration_ms=42)
-
-    call = posthog_client.capture.call_args
-    assert call.args == ("cli.invoked",)
-    props = call.kwargs["properties"]
-    # ``command`` is the full line people look for in PostHog.
-    assert props["command"] == "overmind skills list --json"
-    assert props["command_path"] == "skills list"
-    assert props["flags"] == {"json": True}
-    assert props["args"] == []
-    assert props["exit_code"] == 0
-    assert props["duration_ms"] == 42
-    assert props["success"] is True
-    assert props["surface"] == "cli"
-    # The CLI process is short-lived: the event must be flushed, not queued.
-    posthog_client.flush.assert_called_once()
-
-
-def test_track_cli_invocation_records_failure(monkeypatch, posthog_client):
-    monkeypatch.setenv("OVERMIND_ANALYTICS_ENABLED", "true")
-    monkeypatch.setattr(analytics, "ensure_identified", lambda **_: False)
-    monkeypatch.setattr(analytics, "_redact_argv", lambda argv=None: "overmind boom")
-
-    analytics.track_cli_invocation(command="boom", exit_code=1, duration_ms=3)
-
-    props = posthog_client.capture.call_args.kwargs["properties"]
-    assert props["command"] == "overmind boom"
-    assert props["command_path"] == "boom"
-    assert props["exit_code"] == 1
-    assert props["success"] is False
+def test_cli_tracks_registered_commands_only(monkeypatch, posthog_client, argv, expected):
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.delenv("OVERMIND_API_KEY", raising=False)
+    assert analytics.cli_command_from_argv() == expected
+    analytics.track_cli_invocation()
+    properties = posthog_client.capture.call_args.kwargs["properties"]
+    assert properties["command_path"] == expected
+    assert not {"command", "flags", "args"} & properties.keys()
 
 
 def test_ensure_identified_caches_per_key(monkeypatch, tmp_path, posthog_client):
@@ -258,7 +171,13 @@ def test_ensure_identified_caches_per_key(monkeypatch, tmp_path, posthog_client)
 
     def fake_me(api_key, base_url):
         me_calls["n"] += 1
-        return {"id": "user-1", "clerk_user_id": "user_clerk_1", "plan": "free", "is_guest": False}
+        return {
+            "id": "user-1",
+            "clerk_user_id": "user_clerk_1",
+            "email": "user@example.com",
+            "plan": "free",
+            "is_guest": False,
+        }
 
     monkeypatch.setattr(analytics, "_fetch_me", fake_me)
 
@@ -272,4 +191,5 @@ def test_ensure_identified_caches_per_key(monkeypatch, tmp_path, posthog_client)
     assert call.args == ("$identify",)
     assert call.kwargs["distinct_id"] == "user_clerk_1"
     assert call.kwargs["properties"]["$anon_distinct_id"]
+    assert call.kwargs["properties"]["$set"]["email"] == "user@example.com"
     assert call.kwargs["properties"]["$set"]["plan"] == "free"

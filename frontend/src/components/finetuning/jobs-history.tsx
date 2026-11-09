@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/select";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useActivityHighlights } from "@/hooks/use-activity";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   useFinetuningRunBaseModelsQuery,
@@ -125,6 +126,7 @@ export function JobsHistory({
   onMonitorRun,
   onPeekJob,
 }: JobsHistoryProps) {
+  const highlights = useActivityHighlights();
   const {
     ft_dataset: datasetFilter,
     ft_model: modelFilter,
@@ -219,6 +221,7 @@ export function JobsHistory({
             fallback="queued"
             progress={status === "running" ? percent : null}
             status={status}
+            taskId={row.original.jobs.find((job) => job.status === status)?.id}
           />
         );
       },
@@ -471,6 +474,7 @@ export function JobsHistory({
       }}
       onPageChange={(p) => onSearchChange({ page: p })}
       onPageSizeChange={(s) => onSearchChange({ page: 1, page_size: s })}
+      onRetry={() => refetch()}
       onRowClick={onMonitorRun}
       onRowMouseEnter={(run) => {
         for (const key of finetuningUnseenKeys(run.jobs)) clearUnseenCompletion(key);
@@ -479,9 +483,11 @@ export function JobsHistory({
       page={page}
       pageSize={pageSize}
       rowClassName={(run) =>
-        finetuningUnseenKeys(run.jobs).some((key) => unseenKeys.has(key))
-          ? "bg-wash-subtle"
-          : undefined
+        run.jobs.some((job) => highlights[`training_job:${job.id}`])
+          ? "activity-highlight"
+          : finetuningUnseenKeys(run.jobs).some((key) => unseenKeys.has(key))
+            ? "bg-wash-subtle"
+            : undefined
       }
       storageKey="training:runs-table-cols"
       toolbar={toolbar}

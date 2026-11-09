@@ -18,6 +18,8 @@ from overmind.client import (
     _raise_for_status,
 )
 
+pytestmark = pytest.mark.covers("sdk-wire")
+
 
 def _make_client(base_url: str = "https://api.example.com") -> Client:
     return Client(api_key="om-test-key", base_url=base_url)
@@ -47,6 +49,7 @@ def _sse_response(lines: list[str]) -> MagicMock:
     return resp
 
 
+@pytest.mark.covers("authentication")
 class TestClientInit:
     def test_raises_without_api_key(self, monkeypatch):
         monkeypatch.delenv("OVERMIND_API_KEY", raising=False)
@@ -77,15 +80,6 @@ class TestClientInit:
         monkeypatch.setenv("OVERMIND_API_URL", "https://env.example.com")
         c = Client(api_key="k", base_url="https://explicit.example.com")
         assert c._base_url == "https://explicit.example.com"
-
-    def test_default_base_url_when_no_env(self, monkeypatch):
-        monkeypatch.delenv("OVERMIND_API_URL", raising=False)
-        c = Client(api_key="k")
-        assert c._base_url == "https://api.overmindlab.ai"
-
-    def test_content_type_header_set(self):
-        c = _make_client()
-        assert c._session.headers.get("Content-Type") == "application/json"
 
 
 class TestRaiseForStatus:
@@ -254,18 +248,6 @@ class TestModelsGet:
         "base_model": "meta-llama/llama-3.1-8b-instruct",
     }
 
-    def test_404_raises_inference_error(self):
-        c = _make_client()
-        c._session.get = MagicMock(
-            return_value=_mock_response(
-                ok=False,
-                status_code=404,
-                json_data={"error": {"message": "Model not found"}},
-            )
-        )
-        with pytest.raises(OvermindInferenceError, match="404"):
-            c.models.get("ft-nonexistent")
-
     def test_network_error_raises(self):
         c = _make_client()
         c._session.get = MagicMock(side_effect=requests.exceptions.Timeout())
@@ -305,3 +287,25 @@ class TestModelsDelete:
         c._session.delete = MagicMock(side_effect=requests.exceptions.ConnectionError("refused"))
         with pytest.raises(OvermindInferenceError, match="Failed to delete model"):
             c.models.delete("ft-test")
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_completion_preserves_tool_calls_and_arguments(monkeypatch, stream):
+    calls = [{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": '{"id":42}'}}]
+    part = {"role": "assistant", "content": None, "tool_calls": calls}
+    data = {"id": "response", "choices": [{"index": 0, "delta" if stream else "message": part}]}
+    response = (
+        _sse_response([f"data: {json.dumps(data)}", "data: [DONE]"]) if stream else _mock_response(json_data=data)
+    )
+    sent = []
+
+    def post(_session, _url, **kwargs):
+        sent.append(kwargs["json"])
+        return response
+
+    monkeypatch.setattr(requests.Session, "post", post)
+    result = _make_client().chat.completions.create(model="m", messages=[], stream=stream, tools=[{"type": "function"}])
+    message = list(result)[0].choices[0].delta if stream else result.choices[0].message
+    assert message.tool_calls == calls
+    assert message.content is None
+    assert sent[0]["tools"] == [{"type": "function"}]

@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// covers: console-logic
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -47,8 +48,11 @@ beforeEach(() => {
     name: "titanic",
     operation: { source_import: { can_resume: true } },
     project: "project",
+    roles: [],
     source_spec: {},
     state: "error",
+    work: null,
+    workspace_id: "dataset-1",
   });
   state.retry.mockImplementation(() => new Promise(() => {}));
   queryClient = new QueryClient({
@@ -86,9 +90,12 @@ function showNotebook() {
 
 it("retries a failed import once and prevents duplicate clicks while the request is pending", async () => {
   showNotebook();
-  const button = screen.getByRole("button", { name: "Resume import" }) as HTMLButtonElement;
+  const button = (await screen.findByRole("button", {
+    name: "Resume import",
+  })) as HTMLButtonElement;
   expect(button.disabled).toBe(false);
-  expect(screen.getByText("The import worker stopped.")).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "Preparation error" }));
+  expect(await screen.findByText("The import worker stopped.")).toBeTruthy();
   fireEvent.click(button);
   await waitFor(() => expect(state.retry).toHaveBeenCalledWith({ id: "dataset" }));
   await waitFor(() => expect(button.disabled).toBe(true));
@@ -96,10 +103,10 @@ it("retries a failed import once and prevents duplicate clicks while the request
   expect(state.retry).toHaveBeenCalledTimes(1);
 });
 
-it("gates retry for guests without submitting a mutation", () => {
+it("gates retry for guests without submitting a mutation", async () => {
   state.guest = true;
   showNotebook();
-  fireEvent.click(screen.getByRole("button", { name: "Resume import" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Resume import" }));
   expect(state.upgrade).toHaveBeenCalledOnce();
   expect(state.retry).not.toHaveBeenCalled();
 });

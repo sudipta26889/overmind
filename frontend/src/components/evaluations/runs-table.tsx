@@ -22,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useActivityActor } from "@/hooks/use-activity";
 import { useDebouncedValue } from "@/hooks/use-debounced-value";
 import {
   useDeleteEvalRunMutation,
@@ -51,8 +52,19 @@ const STATUS_FILTER_LABELS: Record<string, string> = {
   running: "Running",
 };
 
-export function StatusBadge({ status, progress }: { status: string; progress?: number | null }) {
-  return <JobStatusBadge fallback="pending" progress={progress} status={status} />;
+export function StatusBadge({
+  status,
+  progress,
+  taskId,
+}: {
+  status: string;
+  progress?: number | null;
+  taskId?: string;
+}) {
+  const actorKind = useActivityActor("eval_run", taskId);
+  return (
+    <JobStatusBadge actorKind={actorKind} fallback="pending" progress={progress} status={status} />
+  );
 }
 
 function runProgressPercent(progress?: EvalRunProgress | null): number | null {
@@ -108,7 +120,7 @@ export function RunsTable({
   // Server returns the runs' distinct datasets, name-ordered — no client sort.
   const { data: datasetOptions = [] } = useEvalRunDatasetsQuery(projectId);
 
-  const { data, isLoading, error } = useEvalRunsQuery({
+  const { data, isLoading, error, refetch } = useEvalRunsQuery({
     capability: capabilityFilter !== "all" ? capabilityFilter : undefined,
     dataset: datasetFilter !== "all" ? datasetFilter : undefined,
     ordering,
@@ -290,7 +302,7 @@ export function RunsTable({
       header: "Name",
       meta: { orderingField: "name" },
       minSize: 160,
-      size: 240,
+      size: 220,
     },
     {
       accessorKey: "status",
@@ -304,6 +316,7 @@ export function RunsTable({
           <StatusBadge
             progress={r.status === "running" ? runProgressPercent(r.progress) : null}
             status={r.status ?? "pending"}
+            taskId={r.id}
           />
         );
       },
@@ -551,6 +564,7 @@ export function RunsTable({
       }}
       onPageChange={(p) => onSearchChange({ page: p })}
       onPageSizeChange={(s) => onSearchChange({ page: 1, page_size: s })}
+      onRetry={() => refetch()}
       // Carry the whole search, not just `projectId`: the breadcrumb back out
       // rebuilds this URL from the detail page's search.
       onRowClick={(r) =>

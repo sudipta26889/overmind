@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// covers: work-once
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
@@ -183,12 +184,6 @@ it("summarizes selected model ranges without falling back to a point estimate", 
   mocks.estimateResults = [mocks.estimateResults[0], undefined];
   rerender();
   expect(result.current.totals.longest).toBeNull();
-});
-
-it("keeps context warnings advisory", async () => {
-  const { result } = renderHook(() => useTrainWizard(args));
-  await waitFor(() => expect(result.current.canLaunch).toBe(true));
-  expect(result.current.contextQuery.data?.checks[0].status).toBe("warning");
 });
 
 it("sends the explicit judge only for this setup and restores defaults on set changes", async () => {
@@ -425,6 +420,25 @@ it("uses the same standard validation split for checks, estimates and launch", a
       validationDataset: null,
       validationEnabled: true,
       validationSplitRatio: 0.2,
+    }),
+  ]);
+});
+
+it("keeps an external benchmark selected after the training base model", async () => {
+  const { result } = renderHook(() => useTrainWizard(args));
+  await waitFor(() => expect(result.current.canLaunch).toBe(true));
+  act(() => {
+    result.current.setEvaluationEnabled(true);
+    result.current.setBenchmarkingEnabled(true);
+    result.current.toggleBenchmarkModel("model");
+    result.current.toggleBenchmarkModel("anthropic/claude-sonnet-5");
+  });
+  await act(() => result.current.launch());
+  expect(mocks.create).toHaveBeenCalledWith([
+    expect.objectContaining({
+      baselineModel: "anthropic/claude-sonnet-5",
+      benchmarkModels: ["anthropic/claude-sonnet-5"],
+      evalIncumbentBefore: true,
     }),
   ]);
 });

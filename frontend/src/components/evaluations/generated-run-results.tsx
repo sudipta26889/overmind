@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { useQueries } from "@tanstack/react-query";
+import { useQueries, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef } from "@tanstack/react-table";
 
 import { EntityRef } from "@/components/entity-ref";
@@ -33,7 +33,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { fetchEvalRunRows, isActiveRunStatus } from "@/hooks/use-evaluations";
+import {
+  evalRowsPollingInterval,
+  fetchEvalRunRows,
+  isActiveRunStatus,
+} from "@/hooks/use-evaluations";
 import { TITLE } from "@/lib/typography";
 import type { EvalRun, EvalRunRow } from "@/openapi";
 
@@ -123,11 +127,20 @@ function Payload({ title, value }: { title: string; value: unknown }) {
 
 export function GeneratedRunResults({ runs }: { runs: EvalRun[] }) {
   const datapointsRef = useRef<HTMLElement>(null);
+  const queryClient = useQueryClient();
   const queries = useQueries({
     queries: runs.map((run) => ({
-      queryFn: () => fetchEvalRunRows(run.id),
-      queryKey: ["eval-run-rows", run.id],
-      refetchInterval: isActiveRunStatus(run.status) ? 4000 : (false as const),
+      // The key changes when a run finishes; show the rows polled while it ran.
+      placeholderData: () =>
+        queryClient.getQueryData<Awaited<ReturnType<typeof fetchEvalRunRows>>>([
+          "eval-run-rows",
+          run.id,
+          true,
+        ]),
+      queryFn: ({ signal }: { signal: AbortSignal }) => fetchEvalRunRows(run.id, signal),
+      queryKey: ["eval-run-rows", run.id, isActiveRunStatus(run.status)],
+      refetchInterval: (q: { state: { status: string; data?: { count: number } } }) =>
+        evalRowsPollingInterval(q, isActiveRunStatus(run.status)),
     })),
   });
   const points = alignRunDatapoints(
@@ -198,7 +211,7 @@ export function GeneratedRunResults({ runs }: { runs: EvalRun[] }) {
       {runs
         .filter((run) => run.error)
         .map((run) => (
-          <p className="text-sm text-destructive" key={run.id}>
+          <p className="text-sm text-muted-foreground" key={run.id}>
             {label(run)}: {run.error}
           </p>
         ))}
@@ -306,6 +319,9 @@ export function GeneratedRunResults({ runs }: { runs: EvalRun[] }) {
             setPageSize(size);
             setPage(1);
           }}
+          onRetry={() =>
+            Promise.all(queries.filter((query) => query.isError).map((query) => query.refetch()))
+          }
           onRowClick={(row) => setSelected(row.key)}
           page={currentPage}
           pageSize={pageSize}
@@ -437,7 +453,9 @@ export function GeneratedRunResults({ runs }: { runs: EvalRun[] }) {
                   </div>
                   {sample ? (
                     <>
-                      {sample.error && <p className="text-sm text-destructive">{sample.error}</p>}
+                      {sample.error && (
+                        <p className="text-sm text-muted-foreground">{sample.error}</p>
+                      )}
                       {sample.degraded && (
                         <p className="text-sm text-warning">
                           {sample.degradedReason || "Degraded result"}

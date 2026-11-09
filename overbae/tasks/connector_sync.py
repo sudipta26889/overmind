@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from math import ceil
 from typing import Any
 
 from celery import shared_task
 from celery.exceptions import SoftTimeLimitExceeded
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 from overbae.api.otlp import enqueue_scoring
+from overbae.services.connectors.progress import checkpoint_progress
 from overbae.services.connectors.schema import CONNECTOR_VERSION_ATTR
+from overbae.services.connectors.sync import connector_imported_spans
 from overbae.services.span_pricing import stamp_span_cost
 
 logger = logging.getLogger(__name__)
@@ -123,6 +126,7 @@ def _upsert_spans(project, span_dicts: list[dict[str, Any]], credential=None, jo
     }
     new_spans = []
     updated_spans = []
+    repaired_spans = []
     for s in span_dicts:
         capability = s.get("capability")
         fields = {k: v for k, v in s.items() if k not in ("span_id", "capability")}
@@ -136,8 +140,24 @@ def _upsert_spans(project, span_dicts: list[dict[str, Any]], credential=None, jo
             )
             continue
         incoming_version = _row_version(s)
-        if incoming_version is None or incoming_version <= (_row_version(current) or -1):
+        current_version = _row_version(current)
+        repaired = bool(
+            (current.attributes or {}).get("connector.incomplete_ancestry")
+            and not (s.get("attributes") or {}).get("connector.incomplete_ancestry")
+            and (
+                incoming_version is None
+                or incoming_version >= (current_version if current_version is not None else -1)
+            )
+        )
+        if not repaired and (
+            incoming_version is None
+            or incoming_version <= (current_version if current_version is not None else -1)
+        ):
             continue
+        if repaired:
+            current.eval_attributes = {}
+            current.eval_claimed_at = None
+            repaired_spans.append(current)
         for key in _UPDATE_FIELDS:
             if key == "capability":
                 current.capability = capability
@@ -149,6 +169,10 @@ def _upsert_spans(project, span_dicts: list[dict[str, Any]], credential=None, jo
         _match_capabilities_by_name(project, updated_spans)
         _stamp_conversations(project, updated_spans)
         Span.objects.bulk_update(updated_spans, [*_UPDATE_FIELDS, "conversation"])
+
+    if repaired_spans:
+        Span.objects.bulk_update(repaired_spans, ["eval_attributes", "eval_claimed_at"])
+        enqueue_scoring(repaired_spans)
 
     if new_spans:
         _match_capabilities_by_name(project, new_spans)
@@ -176,13 +200,15 @@ def _apply_backoff(credential, exc: Exception) -> dict:
     auth_failure = status_code in (401, 403)
 
     if status_code == 429:
-        delay = int(getattr(exc, "retry_after", None) or _BACKOFF_BASE_SECONDS)
+        delay = ceil(getattr(exc, "retry_after", None) or _BACKOFF_BASE_SECONDS)
         _save_sync_state(
             credential,
             sync_status=ConnectorCredential.SyncStatus.ERROR,
             sync_error=str(exc)[:1000],
             next_poll_at=timezone.now() + timedelta(seconds=delay),
         )
+        if not credential.auto_sync_enabled:
+            _schedule_next_chunk(credential, delay=delay)
         return {"status": "error", "retry_after": delay, "error": str(exc)}
 
     if auth_failure or retry >= _MAX_SYNC_RETRIES:
@@ -223,17 +249,26 @@ def _apply_backoff(credential, exc: Exception) -> dict:
         delay,
         exc,
     )
+    if not credential.auto_sync_enabled:
+        _schedule_next_chunk(credential, delay=delay)
     return {"status": "error", "retry_after": delay, "error": str(exc)}
 
 
-def _schedule_next_chunk(credential) -> None:
+def _schedule_next_chunk(credential, *, delay: int = 2) -> None:
     from overbae.models import ConnectorCredential
 
     # The chunk that is already running passed the active check at entry.
     # Deactivation has to stop the continuation it is about to publish.
     if not ConnectorCredential.objects.filter(pk=credential.pk, is_active=True).exists():
         return
-    sync_connector_chunk.apply_async(args=[str(credential.id)], countdown=2)
+    sync_connector_chunk.apply_async(args=[str(credential.id)], countdown=delay)
+
+
+def _add_imported(credential, spans: int, traces: int) -> None:
+    type(credential).objects.filter(pk=credential.pk).update(
+        total_spans_imported=F("total_spans_imported") + spans,
+        total_traces_imported=F("total_traces_imported") + traces,
+    )
 
 
 def _run_adapter_chunk(credential, cursor: dict) -> dict:
@@ -242,7 +277,7 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
     from overbae.services.connectors import get_adapter
 
     adapter = get_adapter(credential)
-    page = adapter.fetch_page(dict(cursor))
+    page = adapter.fetch_page(cursor)
 
     config = credential.active_config()
     target_project = (
@@ -252,6 +287,8 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
 
     # Empty backfill completion (no windows left) — flip to LIVE without a run row.
     if page.mode == "backfill" and page.done and not page.units and page.window_from is None:
+        if page.next_state.get("progress"):
+            checkpoint_progress(credential, page.next_state["progress"], gained=0, done=True)
         _save_sync_state(
             credential,
             sync_status=ConnectorCredential.SyncStatus.LIVE,
@@ -273,6 +310,9 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
 
     imported = 0
     traces_seen = 0
+    # A source trace is new only when none of its spans existed. Pages can repeat a
+    # tree and chunks can retry, so counting visits would inflate the total.
+    gained = 0
     try:
         for unit in page.units:
             traces_seen += 1
@@ -281,7 +321,9 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
                 credential=credential,
                 project=target_project,
             )
-            imported += _upsert_spans(target_project, span_dicts, credential=credential)
+            created = _upsert_spans(target_project, span_dicts, credential=credential)
+            imported += created
+            gained += bool(span_dicts) and created == len(span_dicts)
     except Exception as exc:
         run.status = ConnectorSyncRun.Status.FAILED
         run.error = str(exc)[:1000]
@@ -289,6 +331,7 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
         run.traces_seen = traces_seen
         run.spans_created = imported
         run.save()
+        _add_imported(credential, imported, gained)
         raise
 
     run.status = ConnectorSyncRun.Status.COMPLETED
@@ -297,12 +340,21 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
     run.spans_created = imported
     run.save()
 
+    _add_imported(credential, imported, gained)
+    if page.mode == "backfill" and page.done:
+        # A chunk killed by the hard time limit leaves its spans uncounted; settle once.
+        persisted = connector_imported_spans(credential)
+        type(credential).objects.filter(pk=credential.pk).update(
+            total_spans_imported=persisted.count(),
+            total_traces_imported=persisted.values(f"attributes__{adapter.source}.trace_id")
+            .distinct()
+            .count(),
+        )
     credential.refresh_from_db()
-    new_traces = credential.total_traces_imported + traces_seen
-    type(credential).objects.filter(pk=credential.pk).update(
-        total_spans_imported=credential.total_spans_imported + imported,
-        total_traces_imported=new_traces,
-    )
+    new_traces = credential.total_traces_imported
+
+    if page.mode == "backfill" and page.next_state.get("progress"):
+        checkpoint_progress(credential, page.next_state["progress"], gained=gained, done=page.done)
 
     if page.done:
         _save_sync_state(
@@ -334,7 +386,7 @@ def _run_adapter_chunk(credential, cursor: dict) -> dict:
         ),
         sync_cursor=page.next_state,
         backfill_imported=(new_traces if page.mode == "backfill" else credential.backfill_imported),
-        backfill_total=None if page.mode == "backfill" else credential.backfill_total,
+        backfill_total=credential.backfill_total,
         sync_error="",
         sync_retry_count=0,
         last_synced_at=timezone.now(),

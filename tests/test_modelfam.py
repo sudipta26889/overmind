@@ -29,6 +29,8 @@ from modal_shared.stacks import (
     TRAIN_U2026_10_7,
 )
 
+pytestmark = pytest.mark.covers("model-runtime")
+
 _MODELS_JSON = Path(__file__).resolve().parents[1] / "overbae" / "modal" / "models.json"
 
 # Ordering cases — first match wins.
@@ -41,6 +43,7 @@ _ORDERING = [
     ("microsoft/Phi-4-mini-instruct", "phi4"),
     ("google/gemma-4-E4B-it", "gemma4"),
     ("unsloth/Muse-Glimmer-30B", "muse_glimmer"),
+    ("LiquidAI/LFM3-1.7B", "lfm3"),
     ("LiquidAI/LFM2.5-1.2B-Instruct", "lfm2"),
     ("mistralai/Ministral-3-3B-Instruct-2512", "ministral"),
     ("fdtn-ai/antares-1b", "antares"),
@@ -81,7 +84,11 @@ def test_models_json_all_resolve() -> None:
 def test_serve_image_key_from_base_model() -> None:
     assert serve_image_key("ft-abc", "unsloth/Muse-Glimmer-30B") == "vllm"
     assert serve_image_key("ft-abc") == "vllm"
-    assert serve_image_key("Qwen/Qwen3-8B") == "vllm"
+    assert serve_image_key("ft-abc", "Qwen/Qwen3-8B") == "sglang"
+    assert serve_image_key("Qwen/Qwen3-8B") == "sglang"
+    assert serve_image_key("unsloth/Qwen3-14B") == "sglang"
+    assert serve_image_key("Qwen/Qwen3-Coder-30B-A3B-Instruct") == "vllm"
+    assert serve_image_key("LiquidAI/LFM3-1.7B") == "sglang_lfm3"
 
 
 def test_serve_image_from_checkpoint_finetune_ids() -> None:
@@ -108,7 +115,7 @@ def test_serve_image_from_checkpoint_finetune_ids() -> None:
             base_model="Qwen/Qwen3-0.6B",
             model_type="qwen3",
         )
-        == "vllm"
+        == "sglang"
     )
     assert serve_image_from_checkpoint(model_name="ft-4ff3114a-muse-glimmer-30b") == "vllm"
 
@@ -239,6 +246,7 @@ def test_muse_pretok_headers_match_tool_turns() -> None:
 def test_fixups_for_model_type() -> None:
     assert "nest_qwen3_5_text" in fixups_for_model_type("qwen3_5_text")
     assert "lfm_layer_types" in fixups_for_model_type("lfm2")
+    assert fixups_for_model_type("lfm3") == ()
     assert "nemotron_h" in fixups_for_model_type("nemotron_h")
     assert "granite_layer_types" in fixups_for_model_type("granite")
     assert "granite_layer_types" in fixups_for_model_type("granitemoehybrid")
@@ -393,6 +401,12 @@ def test_serve_strips_training_chat_template(tmp_path) -> None:
 def test_lfm_lora_targets() -> None:
     assert resolve("LiquidAI/LFM2.5-1.2B").lora_target_modules is not None
     assert "out_proj" in resolve("LiquidAI/LFM2.5-1.2B").lora_target_modules
+    lfm3 = resolve("LiquidAI/LFM3-1.7B")
+    assert lfm3.key == "lfm3"
+    assert lfm3.trust_remote_code is True
+    assert lfm3.train_image == TRAIN_U2026_10_7
+    assert "o_proj" in (lfm3.lora_target_modules or "")
+    assert lfm3.tool_call_parser == "qwen3_coder"
 
 
 _LFM_ALWAYS_ON = """
@@ -419,10 +433,23 @@ _QWEN_OPTIONAL = """
 """
 
 
+_LFM3_OPTIONAL = """
+{%- if add_generation_prompt -%}
+    {{- "<|im_start|>assistant\\n" -}}
+    {%- if enable_thinking -%}
+        {{- "<think>" -}}
+    {%- else -%}
+        {{- "<think></think>" -}}
+    {%- endif -%}
+{%- endif -%}
+"""
+
+
 def test_is_always_on_thinking_template() -> None:
     assert is_always_on_thinking_template(_LFM_ALWAYS_ON)
     assert not is_always_on_thinking_template(_LFM_INSTRUCT)
     assert not is_always_on_thinking_template(_QWEN_OPTIONAL)
+    assert not is_always_on_thinking_template(_LFM3_OPTIONAL)
     assert not is_always_on_thinking_template("")
 
 

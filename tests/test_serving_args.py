@@ -5,12 +5,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from modal_shared.serving.args import (
     CUDAGRAPH_CAPTURE_SIZES,
     MAX_LORA_SLOTS,
     VllmServeContext,
     build_vllm_args,
 )
+from modal_shared.serving.decision_http import (
+    decision_base_vllm_command,
+    decision_vllm_command,
+    probabilities_for,
+    systemone_body,
+)
+
+pytestmark = pytest.mark.covers("model-runtime")
 
 
 def _checkpoint(tmp_path: Path, *, experts: int = 0) -> Path:
@@ -28,6 +38,32 @@ def _args(path: Path, **kw) -> list[str]:
         model_path=str(path), model_name="deploy-1", max_model_len=8192, port=8000, **kw
     )
     return build_vllm_args(ctx)
+
+
+def test_kv_cache_is_fp8(tmp_path: Path) -> None:
+    cmd = _args(_checkpoint(tmp_path))
+    assert cmd[cmd.index("--kv-cache-dtype") + 1] == "fp8"
+
+
+def test_ampere_triton_families_keep_bf16_kv(tmp_path: Path) -> None:
+    for base in ("openai/gpt-oss-20b", "google/gemma-4-26B-A4B-it", "google/gemma-4-E4B-it"):
+        cmd = _args(_checkpoint(tmp_path), base_model=base, gpu_type="A100-80GB")
+        assert cmd[cmd.index("--kv-cache-dtype") + 1] == "bfloat16"
+    kept = _args(_checkpoint(tmp_path), base_model="Qwen/Qwen3-32B", gpu_type="A100-80GB")
+    assert kept[kept.index("--kv-cache-dtype") + 1] == "fp8"
+    hopper = _args(_checkpoint(tmp_path), base_model="openai/gpt-oss-20b", gpu_type="H200")
+    assert hopper[hopper.index("--kv-cache-dtype") + 1] == "fp8"
+
+
+def test_capture_sizes_stay_within_the_sequence_cap(tmp_path: Path) -> None:
+    cmd = _args(_checkpoint(tmp_path), max_num_seqs=4)
+    start = cmd.index("--cudagraph-capture-sizes") + 1
+    emitted = []
+    for token in cmd[start:]:
+        if token.startswith("--"):
+            break
+        emitted.append(token)
+    assert emitted == ["1", "2", "4"]
 
 
 def test_graphs_captured_and_never_eager(tmp_path: Path) -> None:
@@ -68,9 +104,199 @@ def test_base_gets_a_distinct_served_name(tmp_path: Path) -> None:
     assert cmd[cmd.index("--served-model-name") + 1] == "deploy-1--base"
 
 
+def test_checkpoint_cap_uses_full_attention_layers(tmp_path: Path) -> None:
+    from modal_shared.serving.capacity import arch_from_config, sequence_cap_for_checkpoint
+
+    arch = arch_from_config(
+        {
+            "num_hidden_layers": 24,
+            "num_key_value_heads": 2,
+            "head_dim": 256,
+            "layer_types": ["linear_attention"] * 18 + ["full_attention"] * 6,
+        }
+    )
+    assert arch == (6, 2, 256)
+
+    checkpoint = tmp_path / "weights"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text(
+        '{"num_hidden_layers": 32, "num_key_value_heads": 8, "head_dim": 128}'
+    )
+    (checkpoint / "model.safetensors").write_bytes(b"x" * 1024)
+    assert sequence_cap_for_checkpoint(checkpoint, vram_gb=24, max_model_len=512) == 32
+
+
 def test_base_keeps_its_name_without_adapters(tmp_path: Path) -> None:
     cmd = _args(_checkpoint(tmp_path))
     assert cmd[cmd.index("--served-model-name") + 1] == "deploy-1"
+
+
+def test_sglang_dflash_argv_and_engine_choice() -> None:
+    from modal_shared.serving.engine import engine_for, serverless_engine
+    from modal_shared.serving.sglang import build_sglang_args, sglang_tool_parser
+
+    cmd = build_sglang_args(
+        model_path="/tmp/folded",
+        served_name="dedicated/ft",
+        port=8000,
+        draft_model="/weights/.drafts/z-lab--Qwen3.5-4B-DFlash",
+        draft_tokens=15,
+        tool_call_parser="qwen3_coder",
+        reasoning_parser="openai_gptoss",
+    )
+    assert cmd[cmd.index("--attention-backend") + 1] == "fa3"
+    ada = build_sglang_args(
+        model_path="/tmp/folded",
+        served_name="dedicated/ft",
+        port=8000,
+        gpu_type="L4",
+    )
+    assert ada[ada.index("--attention-backend") + 1] == "flashinfer"
+    oss = build_sglang_args(
+        model_path="/tmp/folded",
+        served_name="dedicated/ft",
+        port=8000,
+        gpu_type="A100-80GB",
+        model="openai/gpt-oss-20b",
+    )
+    assert oss[oss.index("--attention-backend") + 1] == "triton"
+    assert cmd[cmd.index("--tool-call-parser") + 1] == "qwen3_coder"
+    assert cmd[cmd.index("--reasoning-parser") + 1] == "gpt-oss"
+    nemotron = build_sglang_args(
+        model_path="/tmp/folded",
+        served_name="dedicated/ft",
+        port=8000,
+        reasoning_parser="nemotron_v3",
+    )
+    assert nemotron[nemotron.index("--reasoning-parser") + 1] == "nemotron_3"
+    assert sglang_tool_parser("openai") == "gpt-oss"
+    assert sglang_tool_parser("llama3_json") == "llama3"
+    assert sglang_tool_parser("muse_glimmer") == "muse"
+    assert cmd[cmd.index("--speculative-algorithm") + 1] == "DFLASH"
+    assert cmd[cmd.index("--speculative-num-draft-tokens") + 1] == "15"
+    mtp_cmd = build_sglang_args(
+        model_path="/tmp/folded",
+        served_name="dedicated/ft",
+        port=8000,
+        mtp=(3, 1, 4),
+        tool_call_parser="qwen3_coder",
+    )
+    assert mtp_cmd[mtp_cmd.index("--speculative-algorithm") + 1] == "EAGLE"
+    assert mtp_cmd[mtp_cmd.index("--speculative-num-steps") + 1] == "3"
+    assert mtp_cmd[mtp_cmd.index("--speculative-eagle-topk") + 1] == "1"
+    assert mtp_cmd[mtp_cmd.index("--speculative-num-draft-tokens") + 1] == "4"
+    assert "--speculative-draft-model-path" not in mtp_cmd
+    assert "--mamba-scheduler-strategy" not in cmd
+    assert engine_for("Qwen/Qwen3.5-4B") == "sglang"
+    assert engine_for("unsloth/Qwen3.5-9B") == "sglang"
+    assert engine_for("Qwen/Qwen3.8-27B") == "sglang"
+    assert engine_for("openai/gpt-oss-20b") == "sglang"
+    assert engine_for("google/gemma-4-26B-A4B-it") == "vllm"
+    assert engine_for("unsloth/Muse-Glimmer-30B") == "vllm"
+    assert engine_for("Qwen/Qwen3-Coder-30B-A3B-Instruct") == "vllm"
+    assert engine_for("meta-llama/Llama-3.1-8B-Instruct") == "vllm"
+    assert engine_for("Qwen/Qwen3-14B") == "vllm"
+    assert engine_for("LiquidAI/LFM3-1.7B") == "sglang_lfm3"
+    assert serverless_engine("Qwen/Qwen3-14B") == "sglang"
+    assert serverless_engine("unsloth/Llama-3.2-1B-Instruct") == "sglang"
+    assert serverless_engine("Qwen/Qwen3-Coder-30B-A3B-Instruct") == "vllm"
+    assert serverless_engine("LiquidAI/LFM3-1.7B") == "sglang_lfm3"
+    assert serverless_engine("openai/gpt-oss-20b") == "vllm"
+    gemma = build_sglang_args(
+        model_path="/tmp/folded",
+        served_name="dedicated/ft",
+        port=8000,
+        gpu_type="L40S",
+        model="google/gemma-4-E2B-it",
+    )
+    assert gemma[gemma.index("--attention-backend") + 1] == "triton"
+    lora_cmd = build_sglang_args(
+        model_path="/tmp/base",
+        served_name="base",
+        port=8000,
+        gpu_type="L4",
+        enable_lora=True,
+        max_lora_rank=16,
+    )
+    assert lora_cmd[lora_cmd.index("--max-lora-rank") + 1] == "16"
+    assert lora_cmd[lora_cmd.index("--lora-target-modules") + 1] == "all"
+    named = build_sglang_args(
+        model_path="/tmp/base",
+        served_name="base",
+        port=8000,
+        gpu_type="L4",
+        enable_lora=True,
+        lora_target_modules="q_proj,k_proj",
+        mem_fraction="0.92",
+    )
+    start = named.index("--lora-target-modules")
+    assert named[start + 1 : start + 3] == ["q_proj", "k_proj"]
+    assert named[named.index("--mem-fraction-static") + 1] == "0.92"
+    assert "--enable-lora" not in cmd
+    lfm3 = build_sglang_args(
+        model_path="/tmp/folded",
+        served_name="dedicated/lfm3",
+        port=8000,
+        gpu_type="H100",
+        model="LiquidAI/LFM3-1.7B",
+    )
+    assert "--attention-backend" not in lfm3
+
+
+def test_dflash_argv_for_the_three_bases(tmp_path: Path) -> None:
+    from modal_shared.serving.speculative import draft_for, draft_volume_path, mtp_for
+
+    cmd = _args(
+        _checkpoint(tmp_path),
+        base_model="unsloth/Qwen3-4B",
+        draft_model="/weights/.drafts/z-lab--Qwen3-4B-DFlash-b16",
+        draft_tokens=15,
+    )
+    payload = json.loads(cmd[cmd.index("--speculative-config") + 1])
+    assert payload == {
+        "method": "dflash",
+        "model": "/weights/.drafts/z-lab--Qwen3-4B-DFlash-b16",
+        "num_speculative_tokens": 15,
+    }
+    assert "--cudagraph-capture-sizes" not in cmd
+    mtp = _args(_checkpoint(tmp_path), base_model="Qwen/Qwen3.5-4B", mtp_tokens=1)
+    mtp_payload = json.loads(mtp[mtp.index("--speculative-config") + 1])
+    assert mtp_payload == {"method": "mtp", "num_speculative_tokens": 1}
+    assert "--cudagraph-capture-sizes" not in mtp
+    for repo in (
+        "Qwen/Qwen3.5-4B",
+        "unsloth/Qwen3.5-4B",
+        "Qwen/Qwen3.5-2B",
+        "unsloth/Qwen3.5-2B",
+        "Qwen/Qwen3.5-0.8B",
+        "unsloth/Qwen3.5-0.8B",
+        "Qwen/Qwen3.5-9B",
+        "unsloth/Qwen3.5-9B",
+        "Qwen/Qwen3.6-27B",
+        "unsloth/Qwen3.6-27B",
+    ):
+        assert mtp_for(repo) == (3, 1, 4)
+        assert draft_for(repo) is None
+    assert draft_for("Qwen/Qwen3-4B") == ("z-lab/Qwen3-4B-DFlash-b16", 15)
+    assert draft_volume_path("/weights", draft_for("Qwen/Qwen3-4B")[0]).startswith(
+        "/weights/.drafts/"
+    )
+    assert draft_for("unsloth/Qwen3.8-27B") == ("z-lab/Qwen3.8-27B-DFlash2", 7)
+    assert draft_for("Qwen/Qwen3.8-27B") == ("z-lab/Qwen3.8-27B-DFlash2", 7)
+    assert draft_for("unsloth/Muse-Glimmer-30B") == ("z-lab/Muse-Glimmer-30B-DFlash2", 7)
+    assert draft_for("unsloth/Llama-3.1-8B-Instruct") == (
+        "z-lab/LLaMA3.1-8B-Instruct-DFlash-UltraChat",
+        15,
+    )
+    assert draft_for("unsloth/gemma-4-26B-A4B-it") == ("z-lab/gemma-4-26B-A4B-it-DFlash", 15)
+    assert draft_for("unsloth/gemma-4-31B-it") == ("z-lab/gemma-4-31B-it-DFlash", 15)
+    assert draft_for("unsloth/Qwen3.5-27B") == ("z-lab/Qwen3.5-27B-DFlash", 15)
+    assert draft_for("unsloth/Qwen3.5-27B", vram_gb=80) is None
+    assert draft_for("Qwen/Qwen3.5-27B", vram_gb=80) is None
+    assert draft_for("unsloth/Qwen3.5-27B", vram_gb=141) == ("z-lab/Qwen3.5-27B-DFlash", 15)
+    assert draft_for("unsloth/Qwen3.5-35B-A3B") == ("z-lab/Qwen3.5-35B-A3B-DFlash", 15)
+    assert draft_for("Qwen/Qwen3-14B") is None
+    assert "--speculative-config" not in _args(_checkpoint(tmp_path), base_model="Qwen/Qwen3-14B")
 
 
 def test_lora_slots_capped(tmp_path: Path) -> None:
@@ -103,3 +329,85 @@ def test_chat_template_read_from_adapter_dir(tmp_path: Path) -> None:
         chat_template_dir=str(adapter),
     )
     assert cmd[cmd.index("--chat-template") + 1].startswith(str(adapter))
+
+
+def test_decision_vllm_command_serves_one_adapter(tmp_path: Path) -> None:
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text(json.dumps({"r": 8}))
+    cmd = decision_vllm_command(
+        model_path="/tmp/serve",
+        served_name="decision",
+        adapter_path=str(adapter),
+        max_lora_rank=0,
+        max_model_len=4096,
+    )
+    assert cmd[cmd.index("--max-loras") + 1] == "1"
+    assert cmd[cmd.index("--max-lora-rank") + 1] == "8"
+    assert cmd[cmd.index("--lora-modules") + 1] == f"decision={adapter}"
+    assert "--load-format" not in cmd
+    base = decision_base_vllm_command(
+        model_path="vllm-sr/d3-nano", served_name="vllm-sr/d3-nano", max_model_len=4096
+    )
+    assert "--enable-lora" not in base
+    assert base[base.index("--served-model-name") + 1] == "vllm-sr/d3-nano"
+
+
+def test_systemone_probabilities_follow_the_option_order() -> None:
+    request = {
+        "state": "The invoice is overdue.",
+        "question": "What is the risk?",
+        "kind": "choice",
+        "options": ["low", "high"],
+    }
+    body = systemone_body(request, "decision")
+    assert body["model"] == "decision"
+    assert body["questions"]["0"]["criteria"] == {"low": "low", "high": "high"}
+    assert probabilities_for(request, {"probabilities": {"low": 0.2, "high": 0.8}}) == [0.2, 0.8]
+    noul = {**request, "kind": "noul"}
+    assert probabilities_for(noul, {"noul": 0.75}) == [0.25, 0.75]
+
+
+def test_binary_serving_keeps_custom_false_and_true_criteria():
+    request = {"state": "state", "question": "Choose", "kind": "noul", "options": ["deny", "allow"]}
+    question = systemone_body(request, "decision")["questions"]["0"]
+    assert question["criteria"] == {"false": "deny", "true": "allow"}
+    request["options"] = ["allow", "deny"]
+    assert systemone_body(request, "decision")["questions"]["0"]["criteria"] == {
+        "false": "allow",
+        "true": "deny",
+    }
+
+
+def test_nemotron_expert_lora_is_marked_3d() -> None:
+    from modal_shared.serving.nemotron_lora import mark
+
+    class NemotronHForCausalLM:
+        is_non_gated_moe = True
+
+    mark(NemotronHForCausalLM)
+    assert NemotronHForCausalLM.is_3d_moe_weight is True
+
+
+def test_lfm3_hidden_dims_and_unsloth_target_rewrite(tmp_path: Path) -> None:
+    from modal_shared.serving.lfm3_lora import hidden_dim, stacked_multiply
+    from modal_shared.serving.sglang import normalize_sglang_adapter
+
+    assert hidden_dim("in_proj", 2048, 7680) == (2048, 6144)
+    assert hidden_dim("out_proj", 2048, 7680) == (2048, 2048)
+    assert hidden_dim("w1", 2048, 7680) == (2048, 7680)
+    assert hidden_dim("w3", 2048, 7680) == (2048, 7680)
+    assert hidden_dim("w2", 2048, 7680) == (7680, 2048)
+    assert hidden_dim("q_proj", 2048, 7680) is None
+    assert stacked_multiply("in_proj") == 3
+    assert stacked_multiply("w1") is None
+
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    config = adapter / "adapter_config.json"
+    config.write_text(json.dumps({"target_modules": "model\\.layers.*"}))
+    normalize_sglang_adapter(adapter, keep_targets="q_proj,in_proj")
+    assert json.loads(config.read_text())["target_modules"] == ["q_proj", "in_proj"]
+    config.write_text(json.dumps({"target_modules": "model\\.layers.*"}))
+    normalize_sglang_adapter(adapter)
+    assert json.loads(config.read_text())["target_modules"] == "all-linear"

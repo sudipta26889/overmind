@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from factories import make_project, make_user
+from factories import make_project, make_span, make_user
 from rest_framework import status
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -9,7 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from overbae.api.scoping import project_ids_for
 from overbae.models import APIToken, Project, ProjectMembership, User
 
-pytestmark = pytest.mark.django_db
+pytestmark = [pytest.mark.django_db, pytest.mark.covers("authentication")]
 
 
 def _jwt(user: User) -> APIClient:
@@ -93,6 +93,59 @@ def test_account_api_key_can_mint_project_scoped_key():
     assert r.data["key"].startswith("ovr_")
 
 
+def test_project_api_key_mints_only_for_its_own_project():
+    user, own, sibling = make_user(), make_project(), make_project()
+    ProjectMembership.objects.create(user=user, project=own)
+    ProjectMembership.objects.create(user=user, project=sibling)
+    client, _ = _api_key_client(user, project=own)
+
+    account = {"name": "x", "scope": {"scope": "account", "permission": ["read", "write"]}}
+    pinned = {
+        "name": "x",
+        "scope": {"scope": "project", "resourceIds": [str(sibling.id)], "permission": ["read"]},
+    }
+    for body in (account, {"name": "x", "project": str(sibling.id)}, pinned):
+        r = client.post("/api/auth/api-keys/", body, format="json")
+        assert r.status_code == status.HTTP_403_FORBIDDEN, body
+
+    r = client.post("/api/auth/api-keys/", {"name": "x", "project": str(own.id)}, format="json")
+    assert r.status_code == status.HTTP_201_CREATED
+    assert r.data["scope"]["resourceIds"] == [str(own.id)]
+    assert APIToken.objects.filter(user=user).count() == 2
+
+
+def test_read_only_api_key_cannot_write():
+    user, project = make_user(), make_project()
+    ProjectMembership.objects.create(user=user, project=project)
+    raw, _ = APIToken.create_for_user(user, project=project, permission=["read"])
+    client = APIClient()
+    client.credentials(HTTP_X_API_KEY=raw)
+
+    assert client.get(f"/api/projects/{project.id}/").status_code == status.HTTP_200_OK
+    r = client.patch(f"/api/projects/{project.id}/", {"name": "renamed"}, format="json")
+    assert r.status_code == status.HTTP_403_FORBIDDEN
+    project.refresh_from_db()
+    assert project.name != "renamed"
+
+
+def test_api_key_mints_only_permissions_it_holds():
+    user, project = make_user(), make_project()
+    ProjectMembership.objects.create(user=user, project=project)
+    raw, _ = APIToken.create_for_user(user, project=project, permission=["write"])
+    client = APIClient()
+    client.credentials(HTTP_X_API_KEY=raw)
+
+    wider = client.post("/api/auth/api-keys/", {"project": str(project.id)}, format="json")
+    assert wider.status_code == status.HTTP_403_FORBIDDEN
+
+    same = {
+        "scope": {"scope": "project", "resourceIds": [str(project.id)], "permission": ["write"]}
+    }
+    r = client.post("/api/auth/api-keys/", same, format="json")
+    assert r.status_code == status.HTTP_201_CREATED
+    assert r.data["scope"]["permission"] == ["write"]
+
+
 def test_api_key_current_returns_scope():
     user, project = make_user(), make_project()
     ProjectMembership.objects.create(user=user, project=project)
@@ -136,3 +189,72 @@ def test_project_key_does_not_see_sibling_membership():
     ProjectMembership.objects.create(user=user, project=b)
     _, token = APIToken.create_for_user(user, project=a)
     assert [str(pid) for pid in project_ids_for(user, token)] == [str(a.id)]
+
+
+def test_removed_membership_revokes_project_key_access():
+    user, project = make_user(), make_project()
+    membership = ProjectMembership.objects.create(user=user, project=project)
+    client, _ = _api_key_client(user, project=project)
+    assert client.get(f"/api/projects/{project.pk}/").status_code == 200
+    membership.delete()
+    assert client.get(f"/api/projects/{project.pk}/").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "allowed_ips,address,expected",
+    [
+        (["203.0.113.0/24"], "203.0.113.10", 200),
+        (["203.0.113.0/24"], "198.51.100.10", 401),
+        (["203.0.113.0/24"], "::ffff:203.0.113.10", 200),
+        (["2001:db8:1::/48"], "2001:db8:1::10", 200),
+        (["2001:db8:1::/48"], "2001:db8:2::10", 401),
+        ([], "198.51.100.10", 200),
+    ],
+)
+def test_rest_key_enforces_ip_network(allowed_ips, address, expected):
+    user = make_user()
+    raw, token = APIToken.create_for_user(user)
+    token.allowed_ips = allowed_ips
+    token.save(update_fields=["allowed_ips"])
+    client = APIClient()
+    client.credentials(HTTP_X_API_KEY=raw)
+    assert client.get("/api/auth/me/", REMOTE_ADDR=address).status_code == expected
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_clerk_rejects_inactive_accounts(clerk, linked):
+    user = make_user(is_active=False)
+    clerk_id = clerk.user(user.email)
+    if linked:
+        user.clerk_user_id = clerk_id
+        user.save(update_fields=["clerk_user_id"])
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {clerk.token(clerk_id)}")
+    assert client.get("/api/auth/me/").status_code == 401
+    user.refresh_from_db()
+    assert user.is_active is False
+    if not linked:
+        assert user.clerk_user_id != clerk_id
+
+
+@pytest.mark.covers("tenancy")
+@pytest.mark.parametrize("route", ["capabilities", "eval-sets", "eval-matrix"])
+def test_project_key_cannot_create_in_sibling_project(route):
+    user = make_user()
+    own, sibling = make_project(member=user), make_project(member=user)
+    client, _ = _api_key_client(user, project=own)
+    body = {"project": str(sibling.pk), "name": "Private", "type": "llm", "source": "Correct"}
+    response = client.post(f"/api/{route}/", body, format="json")
+    assert response.status_code == (400 if route == "capabilities" else 403)
+
+
+@pytest.mark.covers("tenancy")
+def test_project_key_cannot_read_sibling_trace():
+    user = make_user()
+    own, sibling = make_project(member=user), make_project(member=user)
+    span = make_span(sibling, trace_id="1" * 32)
+    client, _ = _api_key_client(user, project=own)
+    assert client.get(f"/api/traces/{span.trace_id}/").status_code == 404
+    response = client.get("/api/traces/", {"project": str(sibling.pk)})
+    assert response.status_code == 200
+    assert response.data["results"] == []

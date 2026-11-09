@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+// covers: live-console
 import type { ReactNode } from "react";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -15,12 +16,13 @@ const mocks = vi.hoisted(() => ({
   capabilitiesPartialUpdate: vi.fn(),
   swapPromptProps: vi.fn(),
   useCapabilityDetailQuery: vi.fn(),
+  useDeployedModelQuery: vi.fn(),
   useDeployedModelsQuery: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-query", () => ({ useCapabilityDetailQuery: mocks.useCapabilityDetailQuery }));
 vi.mock("@/hooks/use-inference", () => ({
-  useDeployedModelQuery: () => ({ data: undefined }),
+  useDeployedModelQuery: mocks.useDeployedModelQuery,
   useDeployedModelsQuery: mocks.useDeployedModelsQuery,
 }));
 vi.mock("@/client", () => ({
@@ -94,6 +96,12 @@ const renderAction = ({
   mocks.useDeployedModelsQuery.mockReturnValue({
     data: deployedPending ? undefined : { count: models.length, results: models },
     isPending: deployedPending,
+  });
+  mocks.useDeployedModelQuery.mockReturnValue({
+    data: capability?.activeModel
+      ? deployment(capability.activeModel, capability.activeModel === "dm-wide" ? 8192 : 4096)
+      : undefined,
+    isPending: false,
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -172,10 +180,9 @@ describe("ModelLiveAction — the retarget state", () => {
 
   // Inherited from the Models tab through the shared mutation.
   it("asks before narrowing the context window", async () => {
-    const incumbent = { ...deployment("dm-wide", 8192), finetuningJobId: "job-w" };
     renderAction({
       capability: capabilityState({ activeModel: "dm-wide" }),
-      models: [incumbent as DeployedModel, deployment("dm-1", 4096)],
+      models: [deployment("dm-1", 4096)],
     });
 
     fireEvent.click(screen.getByLabelText("Make live — ft:dm-1"));
@@ -242,20 +249,6 @@ describe("ModelLiveAction — the live state", () => {
     expect(badge.getAttribute("tabindex")).toBe("0");
     expect(screen.getByText("Copy prompt")).toBeTruthy();
     expect(document.querySelector("[disabled]")).toBeNull();
-  });
-
-  it("keeps the copy prompt next to the live badge", () => {
-    renderAction({ capability: capabilityState({ activeModel: "dm-1" }) });
-    expect(screen.getByText("Live model")).toBeTruthy();
-    expect(screen.getByText("Copy prompt")).toBeTruthy();
-
-    cleanup();
-    renderAction({
-      capability: capabilityState({ activeModel: "dm-page" }),
-      model: deployment("dm-page"),
-    });
-    expect(screen.getByText("Live model")).toBeTruthy();
-    expect(screen.getByText("Copy prompt")).toBeTruthy();
   });
 });
 

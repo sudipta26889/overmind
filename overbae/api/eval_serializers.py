@@ -7,7 +7,7 @@ from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 
-from overbae.api.serializers import _user_project_ids
+from overbae.api.scoping import project_ids_for
 from overbae.core.model_registry import judge_picker_models
 from overbae.innermind import context, deterministic, generation, runs
 from overbae.innermind.definitions import DefinitionSource, definition_source
@@ -22,6 +22,7 @@ from overbae.models import (
     ModelRef,
     Project,
 )
+from overbae.services.activity import asset, record
 from overbae.services.datasets import rows as row_store
 from overbae.services.datasets import use
 from overbae.services.datasets.lifecycle import DatasetError
@@ -34,7 +35,8 @@ EXPECTATION_MAX_CHARS = 1_000
 def require_membership(serializer, project):
     if project is None:
         return project
-    if project.id not in _user_project_ids(serializer.context["request"].user):
+    request = serializer.context["request"]
+    if project.id not in project_ids_for(request.user, getattr(request, "auth", None)):
         raise PermissionDenied("You are not a member of this project.")
     return project
 
@@ -49,6 +51,23 @@ def require_same_project(project, **objects) -> None:
 
 class EvalMatrixSerializer(serializers.ModelSerializer):
     definition_source = serializers.SerializerMethodField()
+
+    @transaction.atomic
+    def create(self, validated_data):
+
+        row = super().create(validated_data)
+        assets = [asset("evaluation", row.pk, row.name)]
+        if row.capability_id:
+            assets.append(asset("capability", row.capability_id, row.capability.name))
+        record(
+            key=f"evaluation:{row.pk}",
+            project_id=row.project_id,
+            user_id=row.created_by_id,
+            kind="evaluation_added",
+            action="Added an evaluation",
+            assets=assets,
+        )
+        return row
 
     def get_definition_source(self, obj) -> DefinitionSource:
         return definition_source(obj)
@@ -550,6 +569,12 @@ class OverallComparisonSerializer(serializers.Serializer):
     status = serializers.CharField()
 
 
+class ComparisonCoverageSerializer(serializers.Serializer):
+    observed_rows = serializers.IntegerField()
+    baseline_scored = serializers.IntegerField()
+    candidate_scored = serializers.IntegerField()
+
+
 class EvalRunComparisonSerializer(serializers.Serializer):
     baseline_run_id = serializers.UUIDField()
     candidate_run_id = serializers.UUIDField()
@@ -557,6 +582,7 @@ class EvalRunComparisonSerializer(serializers.Serializer):
     candidate_label = serializers.CharField()
     overall = OverallComparisonSerializer()
     paired = serializers.IntegerField()
+    coverage = ComparisonCoverageSerializer()
     wins = serializers.IntegerField()
     losses = serializers.IntegerField()
     ties = serializers.IntegerField()

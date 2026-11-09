@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import dataclasses
 
 import pytest
 from opentelemetry.sdk.trace import TracerProvider
@@ -18,6 +19,8 @@ import overmind.tracing as tracing
 from overmind import attrs
 from overmind.lifecycle import RunHandle, run
 from overmind.tracing import _span_processor_on_start, start_span, task
+
+pytestmark = pytest.mark.covers("sdk-wire")
 
 
 @pytest.fixture
@@ -180,6 +183,7 @@ def test_exception_marks_the_run_failed_and_reraises(exporter):
     assert root.attributes[attrs.ERROR_TYPE] == "ValueError"
 
 
+@pytest.mark.covers("sdk-install")
 def test_run_is_a_noop_when_uninitialised(monkeypatch):
     monkeypatch.setattr(tracing, "_initialized", False)
 
@@ -266,6 +270,7 @@ def test_run_decorator_callable_failure_degrades_to_none(exporter):
     assert "conversation.id" not in _by_name(exporter, "r").attributes
 
 
+@pytest.mark.covers("sdk-install")
 def test_run_decorator_is_noop_when_uninitialised(monkeypatch):
     monkeypatch.setattr(tracing, "_initialized", False)
 
@@ -281,3 +286,41 @@ def test_bare_run_decoration_raises():
 
         @run
         def main() -> None: ...
+
+
+def test_run_restores_outer_conversation(exporter):
+    with tracing.session("outer"):
+        with run("first", conversation_id="customer-1"):
+            pass
+        with run("second"):
+            pass
+    assert _by_name(exporter, "first").attributes["conversation.id"] == "customer-1"
+    assert _by_name(exporter, "second").attributes["conversation.id"] == "outer"
+
+
+def test_turns_with_same_behavior_are_separate_per_capability(exporter):
+    with run("root"):
+        for identity in ["cap-a", "cap-b", "cap-a"]:
+            with tracing.capability(id=identity), task("answer", unit="turn"):
+                pass
+    turns = [s for s in exporter.get_finished_spans() if s.name == "answer"]
+    assert len(turns) == 2
+    assert {s.attributes[attrs.CAPABILITY_ID] for s in turns} == {"cap-a", "cap-b"}
+
+
+@pytest.mark.covers("privacy")
+def test_run_redacts_nested_dataclass_fields(exporter):
+    @dataclasses.dataclass
+    class Credentials:
+        password: str
+        count: int
+
+    @run("secret-result")
+    def operation():
+        return {"result": Credentials(password="never-export-this", count=3)}
+
+    operation()
+    output = _by_name(exporter, "secret-result").attributes["outputs"]
+    assert "never-export-this" not in output
+    assert "redacted" in output
+    assert "3" in output

@@ -3,12 +3,12 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from conftest import EVAL_ROWS, TRAIN_ROWS, import_version, review_fixture
+from conftest import EVAL_ROWS, TRAIN_ROWS, frozen_dataset, import_version, review_fixture
 
 from overbae.models import Capability, Cell, Dataset, EvalRun, Project
 from overbae.services.datasets import diff, land, lifecycle, paths, store, use
 
-pytestmark = pytest.mark.django_db
+pytestmark = [pytest.mark.django_db, pytest.mark.covers("lineage")]
 
 
 def _project() -> Project:
@@ -142,6 +142,14 @@ def test_use_marks_the_cell_and_starts_a_new_major(django_assert_num_queries):
         assert dataset.versions(chain=[]) == {}
 
 
+def test_versions_see_a_use_made_after_the_cells_were_prefetched():
+    dataset = frozen_dataset(_project(), contract="train")
+    child = Cell.objects.create(dataset=dataset, position=1, title="step", state="ok")
+    loaded = Dataset.objects.prefetch_related("cells").get(pk=dataset.pk)
+    use.freeze(child)
+    assert loaded.versions()[child.id] == "2.0"
+
+
 def test_a_used_cell_is_protected_and_blocks_deletion():
     project = _project()
     dataset = _landed(project, [dict(r) for r in EVAL_ROWS], intent="eval")
@@ -182,3 +190,14 @@ def test_diff_marks_added_and_changed_values_and_lists_removed_rows(tmp_path):
     assert [r["source_row"] for r in removed] == [1]
     detail = diff.between(before, after)
     assert detail["changed_examples"][0]["x"] == {"before": "c", "after": "C"}
+
+
+def test_diff_accepts_quoted_column_names(tmp_path):
+    before, after = tmp_path / "before.parquet", tmp_path / "after.parquet"
+    name = 'say"hello'
+    store.write_rows(before, [{"source_row": 0, name: "before"}])
+    store.write_rows(after, [{"source_row": 0, name: "after"}])
+    assert diff.marks(before, after, [0]) == {0: {"before": {name: "before"}}}
+    detail = diff.between(before, after)
+    assert detail["changed_columns"] == {name: 1}
+    assert detail["changed_examples"][0][name] == {"before": "before", "after": "after"}

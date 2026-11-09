@@ -32,6 +32,7 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
 from django.db import connection
+from django.db.models import Q
 from django.utils import timezone
 
 from overbae.innermind import comparison
@@ -79,6 +80,7 @@ from overbae.models import (
 from overbae.models.traces import usage_slice
 from overbae.services import native_evaluation, training_plans
 from overbae.services import sync as sync_service
+from overbae.services.activity import asset, record
 from overbae.services.capabilities import identity as capability_identity
 from overbae.services.datasets import exploration as dataset_exploration
 from overbae.services.datasets import land as dataset_land
@@ -610,6 +612,14 @@ def seed_model_workflows(project):
         )
 
 
+def reset_demo_billing(owner_email: str) -> None:
+    # Delete before the project cascade clears the ledger's project foreign key.
+    BillingTelemetry.objects.filter(
+        Q(project__slug__in=(SLUG, *RETIRED_SLUGS))
+        | Q(user__email=owner_email, idempotency_key="topup:cs_live_seed_a1B2c3")
+    ).delete()
+
+
 class Command(BaseCommand):
     help = "Seed the Support Copilot demo project"
 
@@ -679,6 +689,7 @@ class Command(BaseCommand):
 
         self.stdout.write("Clearing the previous seed...")
 
+        reset_demo_billing(owner_email)
         slugs = (SLUG, *RETIRED_SLUGS)
         doomed_datasets = list(
             Dataset.objects.filter(project__slug__in=slugs).values_list("id", flat=True)
@@ -707,10 +718,6 @@ class Command(BaseCommand):
         User.objects.filter(email__endswith=f"@{RETIRED_DOMAIN}").delete()
         User.objects.filter(email__endswith=f"@{TEAM_DOMAIN}").delete()
         Feedback.objects.filter(user__isnull=True).delete()
-        # Ledger rows outlive the project cascade; a re-run must not trip their idempotency keys.
-        BillingTelemetry.objects.filter(user__email=owner_email).exclude(
-            service=BillingService.FREE_CREDITS
-        ).delete()
 
         # ── People and project ───────────────────────────────────────────────────────────
 
@@ -4337,6 +4344,32 @@ class Command(BaseCommand):
         # ── Summary ──────────────────────────────────────────────────────────────────────
 
         seed_model_workflows(project)
+
+        demo_assets = [asset("dataset", dataset.pk, dataset.name) for dataset in seed_datasets[:2]]
+        for index, (kind, action) in enumerate(
+            [
+                ("agent_connected", "Connected to Overmind"),
+                ("repository_synced", "Synced repository"),
+                ("capabilities_available", "Capabilities available"),
+                ("first_trace", "Received first trace"),
+                ("source_uploaded", "Uploaded source"),
+                ("source_ready", "Source ready"),
+                ("preparation_published", "Published dataset preparation"),
+            ]
+        ):
+            event = record(
+                key=f"demo-activity:{project.pk}:{kind}",
+                project_id=project.pk,
+                user_id=owner.pk,
+                kind=kind,
+                action=action,
+                actor_kind="demo",
+                actor_name="Demo",
+                assets=demo_assets
+                if kind.startswith("source_") or kind == "preparation_published"
+                else [],
+            )
+            stamp(event, days_ago(1, m=30 - index), days_ago(1, m=30 - index))
         self.stdout.write("\nSeed complete — Support Copilot.")
         for label, count in [
             ("Capabilities", Capability.objects.filter(project=project).count()),

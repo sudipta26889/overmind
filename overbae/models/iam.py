@@ -182,6 +182,17 @@ def project_scope(project_id, *, permission: list[str] | None = None) -> dict:
     }
 
 
+def delegation_denial(scope: dict, project_id, permission: list[str] | None = None) -> str | None:
+    """Why a key holding ``scope`` cannot create a key for ``project_id`` (None: account)."""
+    if scope.get("scope") != "account" and (
+        project_id is None or str(project_id) not in scope.get("resourceIds", [])
+    ):
+        return "A project API key can only create a key for its own project."
+    if not set(permission or ["read", "write"]) <= set(scope.get("permission", [])):
+        return "An API key can only create a key with permissions it holds."
+    return None
+
+
 class APIToken(models.Model):
     """Only the SHA-256 hash is stored; the plaintext key is returned once.
 
@@ -225,16 +236,11 @@ class APIToken(models.Model):
         return (self.scope or {}).get("scope") == "account"
 
     def allowed_project_ids(self):
-        if self.is_account_scoped:
-            return list(
-                ProjectMembership.objects.filter(user_id=self.user_id).values_list(
-                    "project_id", flat=True
-                )
-            )
-        raw = (self.scope or {}).get("resourceIds") or []
-        if raw:
-            return raw
-        return [self.project_id] if self.project_id else []
+        memberships = ProjectMembership.objects.filter(user_id=self.user_id)
+        if not self.is_account_scoped:
+            resource_ids = (self.scope or {}).get("resourceIds") or [self.project_id]
+            memberships = memberships.filter(project_id__in=resource_ids)
+        return list(memberships.values_list("project_id", flat=True))
 
     @staticmethod
     def hash_raw_key(raw: str) -> str:

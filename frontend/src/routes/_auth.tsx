@@ -13,13 +13,14 @@ import {
 import apiClient from "@/client";
 import { OutOfCreditsDialog } from "@/components/billing/out-of-credits-dialog";
 import { BreadcrumbSwitcher } from "@/components/breadcrumb-switcher";
+import { ConnectionScene } from "@/components/connection-scene";
 import { WorkshopSidebar } from "@/components/datasets/workshop-sidebar";
 import { CreateAccountDialog } from "@/components/guest/create-account-dialog";
 import { HeaderCredits } from "@/components/header-credits";
 import { ProjectSelector } from "@/components/project-selector";
+import { AuthenticationLoadingState } from "@/components/route-error";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icons";
-import { LoadingState } from "@/components/ui/spinner";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAuthContext } from "@/contexts/auth-context";
 import { WorkshopSidebarContext } from "@/contexts/workshop-sidebar-context";
@@ -61,6 +62,7 @@ const DYNAMIC_PARENTS = new Set([
   "observability",
   "datasets",
   "optimiser",
+  "inference",
 ]);
 
 const HIDDEN_BREADCRUMB_PATHS = new Set(["/evaluations/runs"]);
@@ -119,6 +121,13 @@ function useCachedName(
     select: (experiment) => `${experiment.capabilityName || "Run"} · ${experiment.id.slice(0, 8)}`,
   });
 
+  const deployedModelNameQuery = useQuery({
+    enabled: kind === "inference" && !!slug,
+    queryFn: () => apiClient.deployedModels.deployedModelsRetrieve({ id: slug ?? "" }),
+    queryKey: ["deployed-model", slug],
+    select: (model) => model.modelId,
+  });
+
   const evaluationNameQuery = useQuery({
     enabled: kind === "evaluations" && evaluationFormat !== "decision" && !!slug,
     queryFn: () => apiClient.evalRuns.evalRunsRetrieve({ id: slug ?? "" }),
@@ -144,6 +153,7 @@ function useCachedName(
   if (kind === "projects") return projectNameQuery.data;
   if (kind === "datasets") return datasetNameQuery.data;
   if (kind === "optimiser") return experimentNameQuery.data;
+  if (kind === "inference") return deployedModelNameQuery.data;
   return undefined;
 }
 
@@ -449,9 +459,9 @@ function RouteComponent() {
   // A signed-out visitor is redirected to /login by beforeLoad.
   if (!isLoaded || !isSignedIn) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <LoadingState className="max-w-5xl" fullPage label="Loading workspace" />
-      </div>
+      <ConnectionScene>
+        <AuthenticationLoadingState label="Loading workspace" />
+      </ConnectionScene>
     );
   }
 
@@ -467,9 +477,9 @@ function RouteComponent() {
 
   if (onboardingQuery.isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <LoadingState className="max-w-5xl" fullPage label="Loading workspace" />
-      </div>
+      <ConnectionScene>
+        <AuthenticationLoadingState label="Loading workspace" />
+      </ConnectionScene>
     );
   }
 

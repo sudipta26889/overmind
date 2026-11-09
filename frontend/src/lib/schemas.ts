@@ -1,10 +1,6 @@
 import * as z from "zod";
 
-import {
-  DeployedModelsListStatusEnum,
-  EvalRunsActivityListStatusEnum,
-  FinetuningJobsListStatusEnum,
-} from "@/openapi";
+import { EvalRunsActivityListStatusEnum, FinetuningJobsListStatusEnum } from "@/openapi";
 
 export const projectIdSearchSchema = z.object({
   // Reopens the create-project modal (`createProject=new`).
@@ -160,8 +156,8 @@ export const datasetsSearchSchema = projectIdSearchSchema.extend({
     .optional(),
   /** A capability id, or the `NO_CAPABILITY` sentinel for datasets attached to none. */
   ds_capability: z.string().optional().default("all"),
-  ds_intent: z
-    .enum(["all", "train", "eval", "pending", "explore"])
+  ds_role: z
+    .enum(["all", "training", "development", "calibration", "evaluation", "source", "unassigned"])
     .optional()
     .default("all")
     .catch("all"),
@@ -174,11 +170,25 @@ export const datasetsSearchSchema = projectIdSearchSchema.extend({
 export const inferenceSearchSchema = projectIdSearchSchema.extend({
   /** A capability id, the `NO_CAPABILITY` sentinel for deployments attached to none, or "all". */
   inf_capability: z.string().optional().default("all"),
+  inf_deployment: z.enum(["all", "serverless", "dedicated"]).optional().default("all"),
+  inf_ordering: z
+    .enum([
+      "-created_at",
+      "recent_requests",
+      "-recent_requests",
+      "recent_success_rate",
+      "-recent_success_rate",
+      "recent_latency",
+      "-recent_latency",
+      "recent_speed",
+      "-recent_speed",
+    ])
+    .optional()
+    .default("-created_at"),
   /** DRF `?search=` — matches the model id, its base model, or the job's name. */
   inf_search: z.string().optional().default(""),
   page: z.coerce.number().min(1).optional().default(1),
   page_size: z.coerce.number().min(5).max(100).optional().default(25),
-  status: z.enum(Object.values(DeployedModelsListStatusEnum)).optional().catch(undefined),
 });
 
 export type InferenceSearch = z.infer<typeof inferenceSearchSchema>;

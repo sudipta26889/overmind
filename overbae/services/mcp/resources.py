@@ -15,7 +15,7 @@ from django.db.models import Prefetch, Q
 from mcp import types
 from mcp.server.lowlevel.helper_types import ReadResourceContents
 from mcp.shared.exceptions import McpError
-from pydantic import AnyUrl
+from pydantic import AnyUrl, ValidationError
 
 from modal_shared.decisions import DECISION_OBJECTIVES
 from modal_shared.training_telemetry import STARTUP_LABELS
@@ -46,15 +46,20 @@ from overbae.models import (
     SignalEvent,
     SignalSubscription,
     Span,
+    TrainingCheckpoint,
     TrainingPreparation,
 )
 from overbae.services import (
+    activity,
+    dedicated,
+    dedicated_progress,
     inference_requests,
     model_workflows,
     operational_progress,
     training_monitoring,
 )
 from overbae.services.codebase.flow import build_capability_flow
+from overbae.services.connectors.progress import sync_progress
 from overbae.services.datasets import paths, pipeline_bindings, pipeline_packages, workbench
 from overbae.services.datasets.admission import status as landing_admission_status
 from overbae.services.datasets.imports import status as import_status
@@ -71,6 +76,7 @@ from overbae.services.inference_live import worker_status
 from overbae.services.inference_metrics import model_activity, model_metrics, monitoring_options
 from overbae.services.mcp import CONTRACT_VERSION
 from overbae.services.mcp.context import get_context, project_context
+from overbae.services.mcp.contracts.activity import InspectActivityInput, InspectActivityOutput
 from overbae.services.mcp.contracts.datasets import (
     next_actions,
     serialize_dataset_detail,
@@ -250,7 +256,7 @@ def _dataset_upload_resource(uri: str) -> dict:
                 "values": ["decision_train", "decision_eval", "chat_train", "model_eval"],
                 "scope": "Declare on the final step. Validates the complete output, including nested decision targets, in both preview and publish. Technical compatibility does not establish target meaning.",
             },
-            "batch_rows": "Optional per-step integer 1–100000. The script runs in separate bounded containers over consecutive row batches; outputs concatenate in source order and all steps publish atomically. Declare only for independent row transformations, never global sorting, grouping, splitting or deduplication. Choose a batch whose expanded JSONL input and output each fit half the declared scratch_mb. Each batch gets the package time limit; progress reports completed batches and rows. Global row checks run after concatenation.",
+            "batch_rows": "Optional per-step integer 1–100000. The script runs as a separate bounded sandbox run for each consecutive row batch; outputs concatenate in source order and all steps publish atomically. Declare only for independent row transformations, never global sorting, grouping, splitting or deduplication. Choose a batch whose expanded JSONL input and output each fit half the declared scratch_mb. Each batch gets the package time limit; progress reports completed batches and rows. Global row checks run after concatenation.",
             "corrections": "Edit the same recipe family and run the corrected package from its original source cell. Successful publication replaces the displayed process; no repair-history view or disconnected prepared-v2 sources. Pinned training and evaluation inputs remain reproducible internally. Recipe ownership is project-scoped, not tied to the dataset or capability; reuse only when source and task semantics are compatible.",
             "source_boundary": "Upload original source bytes once with pinned upstream revision metadata. Register retained transformation code before full-data processing. Locally prepared derivatives must use lineage-bound external import, never masquerade as an independent source upload.",
             "script_arguments": ["input.jsonl", "output.jsonl", "parameters.json"],
@@ -268,7 +274,7 @@ def _dataset_upload_resource(uri: str) -> dict:
         "json_selection": "For a JSON object containing a row array under a nonstandard field, pass --json-rows-field FIELD explicitly. The selected top-level field is recorded in extraction metadata; original file bytes and wrapper metadata remain downloadable. No target meaning is inferred.",
         "written_intent": "Use start_dataset with a brief and the user's explicit intent and capability. Its upload.argv carries exact project/dataset identities; replace FILE with the inspected local path. For a new upload, --brief records the original request.",
         "existing_dataset": "Use overmind dataset upload FILE --project-id PROJECT --dataset DATASET --json to add files to an existing workshop. Each upload appends a recorded import cell after the current chain, preserving earlier versions and source evidence. Inspect the dataset and poll get_job(kind=dataset_run) for completion. REST source accepts uploads; landing does not start preparation.",
-        "documents": "PDF, DOCX, Markdown, UTF-8 text and PNG/JPEG/WebP images are extracted by the batch worker (100 MiB per document, 2000 pages per PDF). Upload reservations return the file-type byte limit. Original bytes and element/page evidence are retained. PDF extraction preserves native text and automatically runs local English Tesseract OCR on scanned pages and embedded images. Direct images are capped at 64 megapixels; animated images are rejected. OCR engine/version, page regions, upright image coordinates and recognition confidence are retained. Reading order and visual table structure are not reconstructed. Upload inspection returns rows=null until extraction. get_job(kind=dataset_run) exposes file/stage and measured OCR-page progress under progress.landing.",
+        "documents": "PDF, DOCX, Markdown, UTF-8 text and PNG/JPEG/WebP images are extracted by the batch worker (100 MiB per document, 2000 pages per PDF). Upload reservations return the file-type byte limit. Original bytes and element/page evidence are retained. PDF extraction preserves native text and automatically runs local English Tesseract OCR on scanned pages and embedded images. Direct images are capped at 64 megapixels; animated images are rejected. OCR engine/version, page regions, upright image coordinates and recognition confidence are retained. Reading order and visual table structure are not reconstructed. A document with no text lands with rows=0 and extraction.status=no_text; only a source with no text at all fails. Upload inspection returns rows=null until extraction. get_job(kind=dataset_run) exposes file/stage and measured OCR-page progress under progress.landing.",
         "pdf_text_recovery": {
             "trigger": "Pages where the primary native parser returned no text are checked with PDFium before OCR, including selectable Type 3 font layers.",
             "evidence": "Source extraction.native_text_recovery records engine/version, recovered pages, rows, characters, control_characters and reason. Row extraction methods distinguish pdfium-native-text from tesseract-ocr; page regions remain retained.",
@@ -508,6 +514,7 @@ def connector_resource_payload(project, connector, uri: str) -> dict:
     config = connector.active_config()
     mapping, assignment_details = _connector_mapping(project, connector)
     runs = list(connector.runs.order_by("-started_at")[:51])
+    progress = sync_progress(connector)
     return {
         "uri": uri,
         "kind": "connector",
@@ -544,6 +551,7 @@ def connector_resource_payload(project, connector, uri: str) -> dict:
             "next_poll_at": connector.next_poll_at,
             "backfill_imported": connector.backfill_imported,
             "backfill_total": connector.backfill_total,
+            "progress": progress.model_dump(mode="json") if progress else None,
             "total_spans_imported": connector.total_spans_imported,
             "total_traces_imported": connector.total_traces_imported,
             "has_error": bool(connector.sync_error),
@@ -1069,14 +1077,32 @@ def _finetune_resource(project, value: str, uri: str) -> dict:
     }
 
 
+def _dedicated_payload(deployment) -> dict | None:
+    row = dedicated.live_for(deployment)
+    if row is None:
+        return None
+    return {
+        "id": str(row.id),
+        "model_id": row.public_model_id,
+        "status": row.status,
+        "gpu_type": row.gpu_type,
+        "min_replicas": row.min_replicas,
+        "max_replicas": row.max_replicas,
+        "scale_to_zero": row.scale_to_zero,
+        "idle_shutdown_seconds": row.idle_shutdown_seconds,
+        "running_replicas": row.running_replicas,
+        "credits_per_gpu_hour": str(row.credits_per_gpu_hour),
+        "accrued_credits": str(row.accrued_credits),
+        "error": row.error_message[:1_000],
+        "startup": dedicated_progress.summary(row),
+    }
+
+
 def _deployment_resource(project, value: str, uri: str) -> dict:
     query = DeployedModel.objects.filter(project=project).select_related(
         "finetuning_job__capability"
     )
-    normalized_id = uuid_reference(value)
-    deployment = query.filter(id=normalized_id).first() if normalized_id else None
-    if deployment is None:
-        deployment = query.filter(model_id=value).first()
+    deployment = dedicated.deployed_model(query, value)
     if deployment is None:
         raise _not_found("deployment", value)
     params = parse_qs(urlparse(uri).query, keep_blank_values=True)
@@ -1114,6 +1140,7 @@ def _deployment_resource(project, value: str, uri: str) -> dict:
         "error": deployment.error_message[:1_000],
         "created_at": deployment.created_at,
         "deployed_at": deployment.deployed_at,
+        "dedicated": _dedicated_payload(deployment),
     }
 
 
@@ -1433,6 +1460,12 @@ def interface_resource():
         "transfer_protocol_version": 1,
         "catalog_sha256": hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest(),
         "tool_count": len(manifest),
+        "credit_reporting": {
+            "tool": "get_credit_balance",
+            "units": "100 credits = 1 USD; decimal values are exact JSON strings.",
+            "scope": "Account and project credentials expose the connection owner's account balance, lifetime grants/spending and account-wide usage by service. No project_id is required; since filters usage, not lifetime totals.",
+            "task_budget": "Save observed_at before work, reuse it as since, and compare usage.spent_credits with the agreed budget before further paid work. Concurrent spending in the reported scope is included; unposted charges and external coding-agent costs are excluded. No reservation or hard spending cap is created. A zero recorded total does not prove pending work is free. With billing_enabled=false, metering is uncapped.",
+        },
         "training_measurements": {
             "planning": "save_training_plan retains immutable source/task, prepared versions, partition and attributed audit/baseline/sanity evidence. Full training requires no pilot; bind create_training_experiment with stage full directly. Stage pilot and measured pilot selection are optional. Primary metric is a JSON Pointer into check metrics; optional pilot selection requires finite task metrics and a verified checkpoint from matching data, and limits full recipes to declared budget-field changes. Hardware profiles are not quality pilots. New upstream identities require new matching evidence; old snapshots stay reproducible.",
             "monitoring": "A frozen monitoring policy controls bounded development checks, generation scoring, checkpoint selection and optional early stopping. inspect_training_progress pages durable checks and exact evidence without invoking workers. cancel_finetune preserves completed evidence and records remote acknowledgement separately. Development metrics are not final benchmarks. Native target distributions and mean-only denominators remain distinct.",
@@ -1506,6 +1539,97 @@ def _read_resource_sync(project, raw_uri: str) -> dict:
         raise _not_found("resource", raw_uri)
     segments = [unquote(part) for part in parsed.path.split("/") if part]
     host = parsed.netloc
+    if host == "deployments" and len(segments) == 2 and segments[0] == "dedicated":
+        return _deployment_resource(project, "/".join(segments), raw_uri)
+    if host == "checkpoints" and len(segments) == 1:
+        checkpoint = TrainingCheckpoint.objects.filter(
+            job__project=project, pk=uuid_reference(segments[0])
+        ).first()
+        if checkpoint is None:
+            raise _not_found("checkpoint", segments[0])
+        return {
+            "uri": raw_uri,
+            "id": str(checkpoint.pk),
+            "training_job_id": str(checkpoint.job_id),
+            "identity": checkpoint.identity,
+            "state": checkpoint.state,
+            "step": checkpoint.step,
+            "attempt": checkpoint.attempt,
+            "selected": checkpoint.selected,
+            "created_at": checkpoint.created_at,
+            "training_resource_uri": f"overmind://finetunes/{checkpoint.job_id}?project_id={project.pk}",
+        }
+    if host == "eval-rows" and len(segments) == 1:
+        row = EvalMatrix.objects.filter(project=project, pk=uuid_reference(segments[0])).first()
+        if row is None:
+            raise _not_found("eval row", segments[0])
+        params = parse_qs(parsed.query)
+        try:
+            offset = int(params.get("offset", [0])[0])
+            limit = int(params.get("limit", [20])[0])
+            source_offset = int(params.get("source_offset", [0])[0])
+            if offset < 0 or source_offset < 0 or not 1 <= limit <= 100:
+                raise ValueError
+        except ValueError:
+            raise MCPError("invalid_input", "Use nonnegative offsets and limit 1–100.") from None
+        definition = {**row.snapshot(), "enabled": row.enabled, "updated_at": row.updated_at}
+        if params.get("revision"):
+            revision = row.revisions.filter(pk=uuid_reference(params["revision"][0])).first()
+            if revision is None:
+                raise _not_found("eval revision", params["revision"][0])
+            definition = dict(revision.definition)
+        source = definition["source"]
+        definition["source"] = source[source_offset : source_offset + 12000]
+        revisions = row.revisions.order_by("-created_at", "-pk")
+        total = revisions.count()
+        return {
+            "uri": raw_uri,
+            "id": str(row.pk),
+            "project_id": str(project.pk),
+            **definition,
+            "source_page": {
+                "offset": source_offset,
+                "total": len(source),
+                "next_offset": source_offset + 12000
+                if source_offset + 12000 < len(source)
+                else None,
+            },
+            "revisions": [
+                {
+                    "id": str(revision.pk),
+                    "created_at": revision.created_at,
+                    "resource_uri": f"overmind://eval-rows/{row.pk}?project_id={project.pk}&revision={revision.pk}",
+                }
+                for revision in revisions[offset : offset + limit]
+            ],
+            "revision_total": total,
+            "next_offset": offset + limit if offset + limit < total else None,
+        }
+    if host == "activity" and not segments:
+        params = parse_qs(parsed.query, keep_blank_values=True)
+        try:
+            values = InspectActivityInput.model_validate(
+                {key: value[0] for key, value in params.items() if key != "project_id"}
+            )
+            if any(len(value) != 1 for value in params.values()):
+                raise ValueError
+        except (ValidationError, ValueError):
+            raise MCPError(
+                "invalid_input", "Use offset >= 0, limit 1–100 and path=agent|data."
+            ) from None
+        context = get_context()
+        query = activity.visible(
+            context.user,
+            [project.pk],
+            project.pk,
+            include_account=context.token.scope.get("scope") != "project",
+        )
+        return InspectActivityOutput.model_validate(
+            {
+                **activity.feed(query, offset=values.offset, limit=values.limit),
+                "milestones": activity.milestones(query, values.path),
+            }
+        ).model_dump(mode="json")
     if host == "interface" and segments == ["current"]:
         return interface_resource()
     if host == "project" and segments == ["current"]:
@@ -1715,6 +1839,13 @@ def resource_list() -> list[types.Resource]:
             description="The project's newest signal events and its unseen count. Account connections must add ?project_id=ID.",
             mimeType=JSON_MIME,
         ),
+        types.Resource(
+            name="activity",
+            title="Activity and onboarding",
+            uri="overmind://activity",
+            description="Saved outcomes and setup milestones. Account connections add project_id; optional offset, limit (1–100), path=agent|data. Reads never mark notifications seen.",
+            mimeType=JSON_MIME,
+        ),
     ]
 
 
@@ -1744,6 +1875,8 @@ def resource_templates() -> list[types.ResourceTemplate]:
             "overmind://pipeline-diagnostics/{id}",
             "Untrusted script diagnostics; step, channel, offset and limit",
         ),
+        ("checkpoint", "overmind://checkpoints/{id}", "Retained checkpoint identity"),
+        ("eval-row", "overmind://eval-rows/{row}", "Evaluation row definition"),
         ("eval-run", "overmind://eval-runs/{eval_run}", "Evaluation run status"),
         (
             "eval-set",

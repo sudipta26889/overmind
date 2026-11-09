@@ -3,7 +3,7 @@
 
 import { useEffect, useRef } from "react";
 
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import apiClient, { fetchWithAuth } from "@/client";
 import { notify } from "@/lib/notify";
@@ -140,7 +140,13 @@ export const activeCellOf = (dataset: Dataset | null | undefined): Cell | null =
 };
 
 export const isBusy = (ds: Dataset | null | undefined): boolean =>
-  !!ds && (ds.state === "running" || ds.state === "landing");
+  !!ds &&
+  (["queued", "running"].includes(ds.work?.status ?? "") ||
+    ds.state === "running" ||
+    ds.state === "landing");
+
+export const openPreparation = (ds: Dataset | null | undefined) =>
+  ds?.work && ["preparing", "paused"].includes(ds.work.status) ? ds.work : null;
 
 /** The used-version block consumers carry (`cell_info`). */
 export interface UsedVersionInfo {
@@ -217,10 +223,20 @@ export function useDatasetPreparationQuery(datasetId: string, cell?: string, rev
   });
 }
 
+export function useDatasetWorkbenchQuery(datasetId: string) {
+  return useQuery({
+    queryFn: ({ signal }) =>
+      apiClient.datasets.datasetsWorkbenchRetrieve({ id: datasetId, limit: 1 }, { signal }),
+    queryKey: ["datasets", datasetId, "workbench"],
+    // Failed runs preserve the active cell; they cannot be inferred from its state.
+    refetchInterval: 5000,
+  });
+}
+
 export function useDatasetsQuery(projectId: string | undefined, filters: DatasetListFilters = {}) {
   return useQuery<PaginatedDatasetList>({
     enabled: !!projectId,
-    placeholderData: keepPreviousData,
+    placeholderData: (previous, query) => (query?.queryKey[2] === projectId ? previous : undefined),
     queryFn: () =>
       apiClient.datasets.datasetsList({
         capability: filters.capability || undefined,
@@ -502,6 +518,15 @@ export const useCancelDatasetMutation = (id: string) => {
   return useMutation({
     mutationFn: () => apiClient.datasets.datasetsCancelCreate({ id }),
     onError: (error) => notify.error(error, "Cancellation request failed"),
+    onSuccess: () => invalidateDataset(qc, id),
+  });
+};
+
+export const useEndPreparationMutation = (id: string) => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.datasets.datasetsEndPreparationCreate({ id }),
+    onError: (error) => notify.error(error, "Couldn't end the preparation"),
     onSuccess: () => invalidateDataset(qc, id),
   });
 };

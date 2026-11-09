@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Manager, Max, Q
+from django.db.models import Count, Manager, Max, Prefetch, Q
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
@@ -18,10 +18,12 @@ from overbae.api.native_evaluation import NativeEvaluationSerializer
 from overbae.api.scoping import project_ids_for
 from overbae.core.errors import InputValidationError
 from overbae.core.model_registry import CATALOG, judge_picker_models
+from overbae.innermind import evidence
 from overbae.models import (
     APIToken,
     BillingTelemetry,
     Capability,
+    Cell,
     ConnectorCredential,
     ConnectorSyncRun,
     Conversation,
@@ -46,11 +48,13 @@ from overbae.services.codebase.flow import (
     capability_input_keys,
     capability_tool_names,
 )
+from overbae.services.connectors.progress import sync_progress
 from overbae.services.datasets import use as dataset_use
 from overbae.services.datasets.lifecycle import DatasetError
 from overbae.services.deployment import deployment_progress
 from overbae.services.model_activation import start_activation
 from overbae.services.serving_context import evaluation_budget, serving_plan
+from overbae.services.trace_errors import captured_errors
 from overbae.services.training_contract import (
     baseline_evaluation_enabled,
     contract,
@@ -63,10 +67,6 @@ from overbae.services.training_preparation import setup_job_for_launch
 from overbae.services.training_record import requested_configuration, run_record
 
 logger = logging.getLogger(__name__)
-
-
-def _user_project_ids(user):
-    return set(ProjectMembership.objects.filter(user=user).values_list("project_id", flat=True))
 
 
 def _first_float(attrs: dict, *keys: str) -> float | None:
@@ -384,21 +384,49 @@ class UserOnboardingSerializer(serializers.ModelSerializer):
 
 def _validate_project_ownership(serializer_instance, value):
     """Shared validation: ensure project belongs to the requesting user."""
-    user = serializer_instance.context["request"].user
-    if value.id not in _user_project_ids(user):
+    request = serializer_instance.context["request"]
+    if value.id not in project_ids_for(request.user, getattr(request, "auth", None)):
         raise serializers.ValidationError("You are not a member of this project.")
     return value
 
 
-def _capability_product(capability):
-    """The newest active cell among the datasets bound to the capability."""
-    from overbae.models import Dataset  # noqa: PLC0415
+def capability_products(queryset):
+    datasets = (
+        Dataset.objects.select_related("active")
+        .prefetch_related(
+            Prefetch(
+                "cells",
+                queryset=Cell.objects.filter(state=Cell.State.OK).order_by("-position")[:1],
+                to_attr="latest_ok_cells",
+            )
+        )
+        .order_by("-updated_at")[:5]
+    )
+    return queryset.prefetch_related(
+        Prefetch("datasets", queryset=datasets, to_attr="product_datasets")
+    )
 
-    for dataset in Dataset.objects.filter(capability=capability).order_by("-updated_at")[:5]:
-        cell = dataset.active_cell
+
+def _capability_product(capability):
+    if hasattr(capability, "_product_cell"):
+        return capability._product_cell
+    datasets = getattr(capability, "product_datasets", None)
+    if datasets is None:
+        datasets = (
+            capability_products(Capability.objects.filter(pk=capability.pk)).get().product_datasets
+        )
+    capability._product_cell = None
+    for dataset in datasets:
+        active = dataset.active
+        cell = (
+            active
+            if active and active.dataset_id == dataset.pk and active.state == Cell.State.OK
+            else next(iter(dataset.latest_ok_cells), None)
+        )
         if cell is not None:
-            return cell
-    return None
+            capability._product_cell = cell
+            break
+    return capability._product_cell
 
 
 def _capability_live_dataset_size(capability) -> int:
@@ -756,11 +784,39 @@ class CapabilitySerializer(serializers.ModelSerializer):
         return attrs
 
 
+class CapturedErrorSerializer(serializers.Serializer):
+    source = serializers.CharField()
+    type = serializers.CharField(allow_blank=True)
+    message = serializers.CharField(allow_blank=True)
+    stacktrace = serializers.CharField(allow_blank=True)
+
+
+class TraceErrorDetailsSerializer(serializers.Serializer):
+    summary = serializers.CharField()
+    records = CapturedErrorSerializer(many=True)
+    context = serializers.DictField(child=serializers.CharField())
+
+
 class SpanSerializer(serializers.ModelSerializer):
     """Full span — used both for ``/api/traces/{trace_id}/`` (one span row in
     the per-trace list) and as the per-row representation for any span query."""
 
     is_root = serializers.BooleanField(read_only=True)
+    input_attribute = serializers.SerializerMethodField()
+    output_attribute = serializers.SerializerMethodField()
+    error_details = serializers.SerializerMethodField()
+
+    @extend_schema_field(TraceErrorDetailsSerializer(allow_null=True))
+    def get_error_details(self, obj):
+        return captured_errors(obj)
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_input_attribute(self, obj):
+        return evidence.input_attribute(obj)
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_output_attribute(self, obj):
+        return evidence.output_attribute(obj)
 
     class Meta:
         model = Span
@@ -779,11 +835,14 @@ class SpanSerializer(serializers.ModelSerializer):
             "duration_ns",
             "status_code",
             "status_message",
+            "error_details",
             "service_name",
             "resource_attrs",
             "scope_name",
             "scope_version",
             "attributes",
+            "input_attribute",
+            "output_attribute",
             "events",
             "links",
             "capability",
@@ -854,6 +913,12 @@ class RootSpanListSerializer(serializers.ModelSerializer):
     )
     source = serializers.SerializerMethodField()
     trace_status = serializers.SerializerMethodField()
+    error_summary = serializers.SerializerMethodField()
+
+    @extend_schema_field(serializers.CharField(allow_null=True))
+    def get_error_summary(self, obj):
+        details = captured_errors(obj)
+        return details["summary"] if details else None
 
     class Meta:
         model = Span
@@ -870,6 +935,7 @@ class RootSpanListSerializer(serializers.ModelSerializer):
             "kind",
             "status_code",
             "status_message",
+            "error_summary",
             "start_time_ns",
             "end_time_ns",
             "duration_ns",
@@ -1034,7 +1100,7 @@ class ModelSwapPromptRequestSerializer(serializers.Serializer):
         default=False,
         help_text=(
             "Write this one deployment's concrete model id into the code instead of the "
-            "capability's permanent alias."
+            "capability's permanent alias. A run without a capability is always pinned."
         ),
     )
 
@@ -1042,16 +1108,16 @@ class ModelSwapPromptRequestSerializer(serializers.Serializer):
 class ModelSwapPromptSerializer(serializers.Serializer):
     prompt = serializers.CharField()
     pin = serializers.BooleanField()
-    capability_id = serializers.UUIDField()
-    capability_name = serializers.CharField()
+    capability_id = serializers.UUIDField(allow_null=True)
+    capability_name = serializers.CharField(allow_blank=True)
     old_model = serializers.CharField()
     new_model = serializers.CharField()
 
 
 def _describe_cell(job: FinetuningJob) -> dict | None:
-    from overbae.services.datasets import use  # noqa: PLC0415 — avoid import cycle
-
-    return use.describe(job.cell if job.cell_id else None)
+    if not job.cell_id:
+        return None
+    return dataset_use.describe(job.cell, chain=job.cell.dataset.prefetched_chain())
 
 
 class FinetuningJobListSerializer(serializers.ModelSerializer):
@@ -2217,6 +2283,19 @@ class ConnectorCapabilityMappingResponseSerializer(serializers.Serializer):
     relabeled_span_count = serializers.IntegerField()
 
 
+class ConnectorSyncProgressSerializer(serializers.Serializer):
+    state = serializers.ChoiceField(choices=["estimating", "importing", "waiting", "complete"])
+    total_estimate = serializers.IntegerField(allow_null=True)
+    observations_total = serializers.IntegerField(allow_null=True)
+    imported = serializers.IntegerField()
+    count_basis = serializers.CharField()
+    traces_per_second = serializers.FloatField(allow_null=True)
+    estimated_seconds_remaining = serializers.IntegerField(allow_null=True)
+    counted_at = serializers.DateTimeField(allow_null=True)
+    last_progress_at = serializers.DateTimeField(allow_null=True)
+    retry_at = serializers.DateTimeField(allow_null=True)
+
+
 class ConnectorCredentialSerializer(serializers.ModelSerializer):
     api_key = serializers.CharField(
         write_only=True,
@@ -2227,6 +2306,12 @@ class ConnectorCredentialSerializer(serializers.ModelSerializer):
     api_secret = serializers.CharField(write_only=True, required=False, allow_blank=True)
     api_key_hint = serializers.SerializerMethodField(read_only=True)
     active_config = serializers.SerializerMethodField(read_only=True)
+    sync_progress = serializers.SerializerMethodField(read_only=True)
+
+    @extend_schema_field(ConnectorSyncProgressSerializer(allow_null=True))
+    def get_sync_progress(self, obj):
+        progress = sync_progress(obj)
+        return progress.model_dump(mode="json") if progress else None
 
     class Meta:
         model = ConnectorCredential
@@ -2246,6 +2331,7 @@ class ConnectorCredentialSerializer(serializers.ModelSerializer):
             "sync_status",
             "backfill_imported",
             "backfill_total",
+            "sync_progress",
             "sync_error",
             "api_version",
             "verified_at",
@@ -2267,6 +2353,7 @@ class ConnectorCredentialSerializer(serializers.ModelSerializer):
             "sync_status",
             "backfill_imported",
             "backfill_total",
+            "sync_progress",
             "sync_error",
             "api_version",
             "verified_at",
@@ -2302,6 +2389,8 @@ class ConnectorCredentialSerializer(serializers.ModelSerializer):
             if config.target_project_id
             else None,
             "lookback_days": config.lookback_days,
+            "backfill_from": config.backfill_from.isoformat() if config.backfill_from else None,
+            "backfill_to": config.backfill_to.isoformat() if config.backfill_to else None,
             "effective_from": config.effective_from.isoformat(),
         }
 
@@ -2309,7 +2398,9 @@ class ConnectorCredentialSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if request is None:
             return value
-        allowed = {str(pid) for pid in project_ids_for(request.user, request.auth)}
+        allowed = {
+            str(pid) for pid in project_ids_for(request.user, getattr(request, "auth", None))
+        }
         if str(value.pk) not in allowed:
             raise serializers.ValidationError(
                 "This API key is scoped to another project."
@@ -2586,6 +2677,7 @@ class SubscriptionSerializer(serializers.Serializer):
     start_date = serializers.DateTimeField(allow_null=True)
     end_date = serializers.DateTimeField(allow_null=True)
     cancel_at_period_end = serializers.BooleanField()
+    can_manage_renewal = serializers.BooleanField()
     usage = PlanUsageSerializer()
 
 
@@ -2711,9 +2803,27 @@ class InferenceActivityQuerySerializer(InferenceMonitoringQuerySerializer):
     granularity = serializers.ChoiceField(choices=["minute", "hour", "day"], default="minute")
 
 
+class DedicatedUsagePointSerializer(serializers.Serializer):
+    bucket = serializers.DateTimeField()
+    credits = serializers.FloatField()
+
+
+class DedicatedUsageBreakdownSerializer(serializers.Serializer):
+    gpu_type = serializers.CharField(allow_null=True)
+    credits = serializers.FloatField()
+
+
+class DedicatedUsageSerializer(serializers.Serializer):
+    credits = serializers.FloatField(allow_null=True)
+    gpu_hours = serializers.FloatField(allow_null=True)
+    points = DedicatedUsagePointSerializer(many=True)
+    breakdown = DedicatedUsageBreakdownSerializer(many=True)
+
+
 class InferenceMetricsSerializer(serializers.Serializer):
     """Aggregate usage/latency/cost for a deployed model (from InferenceCall)."""
 
+    dedicated_usage = DedicatedUsageSerializer()
     last_request_at = serializers.DateTimeField(allow_null=True)
     cost_recorded_request_count = serializers.IntegerField()
     failed_request_count = serializers.IntegerField()

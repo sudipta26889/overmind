@@ -12,10 +12,15 @@ from overmind.config import (
     dump,
     load,
     protect_secret_file,
+    resolve_api_credentials,
 )
+from overmind.tracing import get_api_settings
 from overmind.utils import convert_json_to_toml
 
+pytestmark = pytest.mark.covers("privacy")
 
+
+@pytest.mark.covers("sdk-wire")
 def test_dump_writes_nested_capability_card(tmp_path: Path):
     path = tmp_path / "overmind.toml"
     dump(
@@ -65,6 +70,7 @@ def test_dump_writes_nested_capability_card(tmp_path: Path):
     assert credentials_path(path).stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.covers("sdk-wire")
 def test_load_accepts_legacy_json_string_card(tmp_path: Path):
     path = tmp_path / "overmind.toml"
     card = {"task": "legacy", "trajectory_map": [{"id": "a"}]}
@@ -119,6 +125,7 @@ def test_convert_json_to_toml_preserves_card_shape(tmp_path: Path):
     assert loaded.project_name == tmp_path.name
 
 
+@pytest.mark.covers("sdk-wire")
 def test_convert_json_to_toml_keeps_scan_modes_utilities_and_policy(tmp_path: Path):
     src = tmp_path / "overmind_capabilities.json"
     src.write_text(
@@ -160,6 +167,7 @@ def test_convert_json_to_toml_keeps_scan_modes_utilities_and_policy(tmp_path: Pa
     assert wire["writer"]["capability_card"]["modes"][0]["name"] == "outline"
 
 
+@pytest.mark.covers("authentication")
 def test_credentials_only_apply_to_their_project(tmp_path: Path):
     path = tmp_path / "overmind.toml"
     dump(Config(api_key="project-a-key", project_id="project-a"), path)
@@ -168,23 +176,25 @@ def test_credentials_only_apply_to_their_project(tmp_path: Path):
     assert load(path).api_key == ""
 
 
-def test_secret_file_is_locally_excluded_and_must_not_be_tracked(tmp_path: Path):
+def test_overmind_dir_is_ignored_without_touching_git_metadata(tmp_path: Path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    exclude = tmp_path / ".git" / "info" / "exclude"
+    before = exclude.read_text() if exclude.exists() else None
     secret = tmp_path / ".overmind" / "credentials.toml"
 
     protect_secret_file(secret, repo_root=tmp_path)
+    (tmp_path / ".overmind" / "scan.json").write_text("{}\n")
 
-    exclude = subprocess.run(
-        ["git", "rev-parse", "--git-path", "info/exclude"],
+    assert (exclude.read_text() if exclude.exists() else None) == before
+    match = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-v", ".overmind/scan.json"],
         cwd=tmp_path,
         capture_output=True,
         check=True,
         text=True,
     )
-    exclude_path = tmp_path / exclude.stdout.strip()
-    assert "/.overmind/credentials.toml" in exclude_path.read_text().splitlines()
+    assert match.stdout.startswith(".overmind/.gitignore:")
 
-    secret.parent.mkdir(parents=True, exist_ok=True)
     secret.write_text('api-key = "tracked"\n')
     subprocess.run(["git", "add", "-f", ".overmind/credentials.toml"], cwd=tmp_path, check=True)
     with pytest.raises(SecretFileError, match="tracked file"):
@@ -209,3 +219,42 @@ def test_secret_file_still_works_without_git(tmp_path: Path):
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr("overmind.config.subprocess.run", missing_git)
         protect_secret_file(secret, repo_root=tmp_path)
+
+    assert (tmp_path / ".overmind" / ".gitignore").read_text() == "*\n"
+
+
+@pytest.mark.covers("privacy")
+@pytest.mark.parametrize("override", ["argument", "environment"])
+@pytest.mark.parametrize(
+    "base_url", ["https://api.overmindlab.ai", "https://overmind.example.org", "http://localhost:8000"]
+)
+def test_saved_key_cannot_follow_an_endpoint_override(tmp_path, monkeypatch, override, base_url):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("OVERMIND_API_URL", raising=False)
+    cfg = Config(api_key="bound-secret", base_url=base_url, project_id="project")
+    dump(cfg, Path("overmind.toml"))
+    assert resolve_api_credentials("", "", cfg) == ("bound-secret", base_url)
+    assert get_api_settings() == ("bound-secret", base_url)
+    url = "https://different.example"
+    if override == "environment":
+        monkeypatch.setenv("OVERMIND_API_URL", url)
+        url = ""
+    with pytest.raises(ValueError, match="different API"):
+        resolve_api_credentials("", url, cfg)
+    with pytest.raises(ValueError, match="different API"):
+        get_api_settings(base_url=url)
+    assert resolve_api_credentials("explicit-other-key", url, cfg) == (
+        "explicit-other-key",
+        "https://different.example",
+    )
+
+
+@pytest.mark.covers("authentication")
+def test_project_key_reference_resolves_before_the_account_key(monkeypatch):
+    cfg = Config(api_key="env:PROJECT_KEY", base_url="https://api.example", project_id="project")
+    monkeypatch.setenv("OVERMIND_API_KEY", "account-key")
+    monkeypatch.delenv("OVERMIND_API_URL", raising=False)
+    monkeypatch.setenv("PROJECT_KEY", "project-key")
+    assert resolve_api_credentials("", "", cfg) == ("project-key", "https://api.example")
+    monkeypatch.delenv("PROJECT_KEY")
+    assert resolve_api_credentials("", "", cfg) == ("account-key", "https://api.example")

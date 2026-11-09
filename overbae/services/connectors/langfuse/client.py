@@ -1,41 +1,32 @@
-"""Langfuse REST client — v2 observations with v1 traces fallback.
-
-Auth: Basic (public_key, secret_key). Default host: https://cloud.langfuse.com.
-v2 observations is Cloud-only; self-hosted v3 returns 404 — probe caches
-``api_version`` on the credential.
-
-Cloud rate-limits deprecated reads (GET /traces, GET /observations) at 15/min
-on Hobby and tells high-volume callers to use v2. Ingest stays on v2; v1 is
-only for self-hosted 404s.
-"""
+"""Langfuse REST reads with bounded pages and provider-directed retries."""
 
 from __future__ import annotations
 
 import json
-import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from math import isfinite
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 
 from overbae.services.connectors.records import LangFuseObservation
-from overbae.services.connectors.windows import TimeWindow, plan_windows
+from overbae.services.connectors.windows import TimeWindow
 
 ApiVersion = Literal["v1", "v2", "unknown"]
 
 _DEFAULT_HOST = "https://cloud.langfuse.com"
 _V2_FIELDS = "core,basic,time,io,metadata,model,usage,prompt,metrics,trace_context"
-_V2_PAGE_SIZE = 100  # v2 allows up to 1000; stay conservative
-_DEPRECATED_READ_PREFIXES = ("/api/public/traces", "/api/public/observations")
-_DEPRECATED_MIN_INTERVAL = 4.5  # Hobby deprecated-read bucket is 15/min
+_V2_PAGE_SIZE = 1000
+_TRACE_FILTER_BATCH_SIZE = 150
+_TRACE_FILTER_MAX_URL_CHARS = 12_000
+_V1_PAGE_SIZE = 100
+_DEFAULT_RETRY_AFTER = 24.0
 _429_ATTEMPTS = 4
 _429_WAIT_CAP = 60.0
-
-_deprecated_gate = threading.Lock()
-_deprecated_next = 0.0
 
 
 class LangFuseError(Exception):
@@ -60,10 +51,18 @@ class LangFuseProject:
 class LangFuseClient:
     """Thin synchronous wrapper around the Langfuse public REST API."""
 
-    def __init__(self, public_key: str, secret_key: str, base_url: str = ""):
+    def __init__(
+        self,
+        public_key: str,
+        secret_key: str,
+        base_url: str = "",
+        *,
+        retry_attempts: int = _429_ATTEMPTS,
+    ):
         self.base_url = (base_url or _DEFAULT_HOST).rstrip("/")
         self._auth = (public_key, secret_key)
         self._api_version: ApiVersion = "unknown"
+        self.retry_attempts = retry_attempts
 
     @property
     def api_version(self) -> ApiVersion:
@@ -74,10 +73,8 @@ class LangFuseClient:
         clean = {k: v for k, v in params.items() if v is not None}
         url = f"{self.base_url}{path}"
         last_429 = ""
-        last_retry_after = _DEPRECATED_MIN_INTERVAL
-        for attempt in range(_429_ATTEMPTS):
-            if _is_deprecated_read(path):
-                _pace_deprecated_read()
+        last_retry_after = _DEFAULT_RETRY_AFTER
+        for attempt in range(self.retry_attempts):
             try:
                 resp = httpx.get(url, auth=self._auth, params=clean, timeout=60)
             except httpx.RequestError as exc:
@@ -86,7 +83,7 @@ class LangFuseClient:
             if resp.status_code == 429:
                 last_429 = resp.text[:200]
                 last_retry_after = _retry_after_seconds(resp)
-                if attempt < _429_ATTEMPTS - 1:
+                if attempt < self.retry_attempts - 1 and last_retry_after <= _429_WAIT_CAP:
                     time.sleep(last_retry_after)
                     continue
                 break
@@ -119,15 +116,17 @@ class LangFuseClient:
 
     def probe_capabilities(self) -> ApiVersion:
         """Detect v2 observations support; cache on the client instance."""
+        now = datetime.now(UTC)
+        day = TimeWindow(start=now - timedelta(days=1), end=now)
         try:
             self._get(
                 "/api/public/v2/observations",
                 limit=1,
                 fields="core",
-                fromStartTime=_iso(datetime.now(UTC) - timedelta(days=1)),
-                toStartTime=_iso(datetime.now(UTC)),
+                fromStartTime=_iso(day.start),
+                toStartTime=_iso(day.end),
             )
-            self._api_version = "v2"
+            self._api_version = "v2" if self._v2_reads_data(day) else "v1"
         except LangFuseError as exc:
             msg = str(exc).lower()
             # 404 / "not found" / beta gate → fall back to v1 traces.
@@ -138,51 +137,62 @@ class LangFuseClient:
                 raise
         return self._api_version
 
+    def _v2_reads_data(self, window: TimeWindow) -> bool:
+        attempts, self.retry_attempts = self.retry_attempts, 1
+        try:
+            self.volume(window)
+        except LangFuseError as exc:
+            return exc.status_code != 404
+        finally:
+            self.retry_attempts = attempts
+        return True
+
     def count(
         self,
         *,
         window: TimeWindow | None = None,
         lookback_days: int | None = None,
     ) -> int:
-        """Best-effort count of traces in *window* / lookback.
+        """Estimate trace volume from semantic roots in one aggregate request.
 
-        Walks pages until exhausted. Used by the wizard preview — not a hot path.
+        Roots are not guaranteed to be one-to-one with trace IDs. Never scan
+        the full dataset merely to populate a preview or progress indicator.
         """
-        n = 0
-        for _ in self.iter_ingest_units(
-            window_from=window.start if window else None,
-            window_to=window.end if window else None,
-            lookback_days=lookback_days,
-            windows=[window] if window is not None else None,
-        ):
-            n += 1
-        return n
+        end = window.end if window else datetime.now(UTC)
+        start = (
+            window.start
+            if window
+            else (
+                end - timedelta(days=lookback_days)
+                if lookback_days
+                else datetime(1970, 1, 1, tzinfo=UTC)
+            )
+        )
+        return self.volume(TimeWindow(start=start, end=end))["roots"]
 
-    def iter_ingest_units(
-        self,
-        *,
-        window_from: datetime | None = None,
-        window_to: datetime | None = None,
-        lookback_days: int | None = None,
-        windows: list[TimeWindow] | None = None,
-    ) -> Iterator[list[LangFuseObservation]]:
-        """Yield observation trees (one list per trace), newest windows first.
-
-        Pass *windows* to skip re-planning (used by the chunk task which already
-        selected the next TimeWindow).
-        """
-        if self._api_version == "unknown":
-            self.probe_capabilities()
-
-        if windows is None:
-            max_lookback = timedelta(days=lookback_days) if lookback_days else None
-            windows = plan_windows(window_from, window_to, max_lookback=max_lookback)
-
-        for window in windows:
-            if self._api_version == "v2":
-                yield from self._iter_v2_traces(window)
-            else:
-                yield from self._iter_v1_traces(window)
+    def volume(self, window: TimeWindow) -> dict[str, int]:
+        """Count observations and semantic roots without consuming read pages."""
+        query = {
+            "view": "observations",
+            "metrics": [{"measure": "count", "aggregation": "count"}],
+            "dimensions": [{"field": "isRootObservation"}],
+            "filters": [],
+            "fromTimestamp": _iso(max(window.start, datetime(1970, 1, 1, tzinfo=UTC))),
+            "toTimestamp": _iso(window.end),
+        }
+        data = self._get("/api/public/v2/metrics", query=json.dumps(query))
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            raise LangFuseError("Langfuse did not return a valid volume count.")
+        roots = observations = 0
+        for row in rows:
+            value = row.get("count_count")
+            if not isinstance(value, (int, float)) or value < 0:
+                raise LangFuseError("Langfuse did not return a valid volume count.")
+            observations += int(value)
+            if row.get("isRootObservation") is True:
+                roots += int(value)
+        return {"roots": roots, "observations": observations}
 
     def _iter_v2_observations(self, **filters) -> Iterator[LangFuseObservation]:
         """Page the v2 observations endpoint, following the meta cursor."""
@@ -190,9 +200,12 @@ class LangFuseClient:
         seen: set[str] = set()
         while True:
             observations, cursor = self._v2_observation_page(cursor=cursor, **filters)
+            if cursor and cursor in seen:
+                raise LangFuseError(
+                    "Langfuse repeated a pagination cursor; the page was not imported."
+                )
             yield from observations
-            # A repeated cursor would page forever inside a worker.
-            if not cursor or not observations or cursor in seen:
+            if not cursor:
                 break
             seen.add(cursor)
 
@@ -201,19 +214,26 @@ class LangFuseClient:
         *,
         cursor: str | None = None,
         expand_metadata: str | None = None,
+        limit: int = _V2_PAGE_SIZE,
         **filters,
     ) -> tuple[list[LangFuseObservation], str | None]:
         data = self._get(
             "/api/public/v2/observations",
-            limit=_V2_PAGE_SIZE,
+            limit=limit,
             fields=_V2_FIELDS,
             expandMetadata=expand_metadata,
             cursor=cursor,
             **filters,
         )
-        observations = [_observation_from_v2(raw) for raw in data.get("data") or []]
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            raise LangFuseError("Langfuse did not return a valid observations page.")
         next_cursor = (data.get("meta") or {}).get("cursor")
-        return observations, next_cursor if next_cursor != cursor else None
+        if next_cursor and (next_cursor == cursor or not rows):
+            raise LangFuseError(
+                "Langfuse returned a stalled pagination cursor; the page was not imported."
+            )
+        return [_observation_from_row(raw) for raw in rows], next_cursor
 
     def fetch_trace_observations(
         self, trace_id: str, *, expand_metadata: str | None = None
@@ -227,10 +247,12 @@ class LangFuseClient:
         *,
         cursor: str | None = None,
         expand_metadata: str | None = None,
+        limit: int = _V2_PAGE_SIZE,
     ) -> tuple[list[list[LangFuseObservation]], str | None]:
         """Complete touched traces because a cursor page can split one trace."""
         observations, next_cursor = self._v2_observation_page(
             cursor=cursor,
+            limit=limit,
             expand_metadata=expand_metadata,
             fromStartTime=_iso(window.start) if window.start.year > 1 else None,
             toStartTime=_iso(window.end),
@@ -239,47 +261,85 @@ class LangFuseClient:
         for observation in observations:
             by_trace.setdefault(observation.trace_id or observation.id, []).append(observation)
 
-        trees: list[list[LangFuseObservation]] = []
-        for trace_id, page_group in by_trace.items():
-            if not all(observation.trace_id for observation in page_group):
-                trees.append(page_group)
-                continue
-            whole_trace = self.fetch_trace_observations(trace_id, expand_metadata=expand_metadata)
-            if whole_trace:
-                trees.append(whole_trace)
+        # Complete the selected trees without a request per trace. No time filter:
+        # parents and siblings can fall outside the discovery page's window.
+        trace_ids = [tid for tid, group in by_trace.items() if all(o.trace_id for o in group)]
+        complete: dict[str, list[LangFuseObservation]] = {}
+        for batch in _trace_batches(trace_ids):
+            if len(batch) == 1:
+                observations = self.fetch_trace_observations(
+                    batch[0], expand_metadata=expand_metadata
+                )
+            else:
+                observations = self._iter_v2_observations(
+                    filter=json.dumps(
+                        [
+                            {
+                                "type": "stringOptions",
+                                "column": "traceId",
+                                "operator": "any of",
+                                "value": batch,
+                            }
+                        ]
+                    ),
+                    expand_metadata=expand_metadata,
+                )
+            for observation in observations:
+                if observation.trace_id not in batch:
+                    raise LangFuseError(
+                        "Langfuse returned observations outside the requested trace batch."
+                    )
+                complete.setdefault(observation.trace_id, []).append(observation)
+            if any(tid not in complete for tid in batch):
+                raise LangFuseError(
+                    "Langfuse did not return every requested trace; the page was not imported."
+                )
+        trees = [complete.get(tid, group) for tid, group in by_trace.items()]
         return trees, next_cursor
 
-    def _iter_v2_traces(
+    def fetch_v1_trace_page(
         self,
         window: TimeWindow,
-    ) -> Iterator[list[LangFuseObservation]]:
-        """Page v2 observations, group by traceId, yield complete trees."""
-        yield from self._group_observations(
-            self._iter_v2_observations(
-                fromStartTime=_iso(window.start) if window.start.year > 1 else None,
-                toStartTime=_iso(window.end),
-            )
+        *,
+        cursor: str | None = None,
+        limit: int = _V1_PAGE_SIZE,
+    ) -> tuple[list[list[LangFuseObservation]], str | None]:
+        page = int(cursor or 1)
+        data = self._get(
+            "/api/public/observations",
+            page=page,
+            limit=min(limit, _V1_PAGE_SIZE),
+            fromStartTime=_iso(window.start) if window.start.year > 1 else None,
+            toStartTime=_iso(window.end),
         )
+        rows = data.get("data")
+        if not isinstance(rows, list):
+            raise LangFuseError("Langfuse did not return a valid observations page.")
+        trace_ids = dict.fromkeys(row["traceId"] for row in rows if row.get("traceId"))
+        trees = [tree for trace_id in trace_ids if (tree := self._v1_trace_tree(trace_id))]
+        trees += [[_observation_from_v1_row(row, {})] for row in rows if not row.get("traceId")]
+        pages = (data.get("meta") or {}).get("totalPages") or page
+        return trees, str(page + 1) if page < pages else None
 
-    def _group_observations(
-        self, observations: Iterator[LangFuseObservation]
-    ) -> Iterator[list[LangFuseObservation]]:
-        by_trace: dict[str, list[LangFuseObservation]] = {}
-        for obs in observations:
-            by_trace.setdefault(obs.trace_id or obs.id, []).append(obs)
+    def _v1_trace_tree(self, trace_id: str) -> list[LangFuseObservation]:
+        trace = self._get(f"/api/public/traces/{quote(trace_id, safe='')}")
+        return [_observation_from_v1_row(row, trace) for row in trace.get("observations") or []]
 
-        def _trace_ts(obs_list: list[LangFuseObservation]) -> str:
-            return max((o.start_time or "") for o in obs_list)
 
-        for tid in sorted(by_trace, key=lambda t: _trace_ts(by_trace[t]), reverse=True):
-            group = by_trace[tid]
-            # A trace straddling the window arrives in pieces, and the missing
-            # parents would make its children look like roots. Span ids are
-            # stable and the writer never revisits them, so a half tree would
-            # stay wrong forever — refetch the whole trace instead.
-            if _is_partial_tree(group):
-                group = self.fetch_trace_observations(tid) or group
-            yield group
+def _trace_batches(trace_ids: list[str]) -> Iterator[list[str]]:
+    batch: list[str] = []
+    size = 0
+    for trace_id in trace_ids:
+        length = len(quote(json.dumps(trace_id), safe="")) + 4
+        if batch and (
+            len(batch) == _TRACE_FILTER_BATCH_SIZE or size + length > _TRACE_FILTER_MAX_URL_CHARS
+        ):
+            yield batch
+            batch, size = [], 0
+        batch.append(trace_id)
+        size += length
+    if batch:
+        yield batch
 
 
 def _iso(dt: datetime) -> str:
@@ -288,47 +348,47 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _is_deprecated_read(path: str) -> bool:
-    return path.startswith(_DEPRECATED_READ_PREFIXES)
-
-
-def _pace_deprecated_read() -> None:
-    global _deprecated_next
-    with _deprecated_gate:
-        now = time.monotonic()
-        wait = _deprecated_next - now
-        if wait > 0:
-            time.sleep(wait)
-        _deprecated_next = time.monotonic() + _DEPRECATED_MIN_INTERVAL
-
-
 def _retry_after_seconds(resp: httpx.Response) -> float:
     header = resp.headers.get("Retry-After")
     if header:
         try:
-            return min(float(header), _429_WAIT_CAP)
+            seconds = float(header)
+            if isfinite(seconds) and seconds >= 0:
+                return seconds
         except ValueError:
             pass
     try:
         details = (json.loads(resp.text) or {}).get("details") or {}
-        raw = details.get("retryAfter") or details.get("retry_after")
+        raw = details.get(
+            "retryAfterSeconds", details.get("retryAfter", details.get("retry_after"))
+        )
         if raw is not None:
-            return min(float(raw), _429_WAIT_CAP)
+            seconds = float(raw)
+            if isfinite(seconds) and seconds >= 0:
+                return seconds
     except (TypeError, ValueError, json.JSONDecodeError):
         pass
-    return _DEPRECATED_MIN_INTERVAL
+    return _DEFAULT_RETRY_AFTER
 
 
-def _is_partial_tree(observations: list[LangFuseObservation]) -> bool:
-    """True when this group cannot be the whole trace: a parent is missing, or
-    nothing in it is a root."""
-    ids = {o.id for o in observations}
-    if any(o.parent_observation_id and o.parent_observation_id not in ids for o in observations):
-        return True
-    return not any(o.is_root_observation or o.parent_observation_id is None for o in observations)
+def _observation_from_v1_row(row: dict[str, Any], trace: dict[str, Any]) -> LangFuseObservation:
+    return _observation_from_row(
+        {
+            **row,
+            "traceName": trace.get("name"),
+            "tags": trace.get("tags"),
+            "sessionId": trace.get("sessionId"),
+            "userId": trace.get("userId"),
+            "release": row.get("release") or trace.get("release"),
+            "totalCost": row.get("totalCost", row.get("calculatedTotalCost")),
+            "usageDetails": row.get("usageDetails")
+            or {k: v for k, v in (row.get("usage") or {}).items() if k != "unit"},
+            "isRootObservation": row.get("parentObservationId") is None,
+        }
+    )
 
 
-def _observation_from_v2(raw: dict[str, Any]) -> LangFuseObservation:
+def _observation_from_row(raw: dict[str, Any]) -> LangFuseObservation:
     return LangFuseObservation(
         id=raw["id"],
         trace_id=raw.get("traceId"),

@@ -10,7 +10,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
+
 DEFAULT_PATH = Path("overmind.toml")
+DEFAULT_BASE_URL = "https://api.overmindlab.ai"
 CREDENTIALS_PATH = Path(".overmind") / "credentials.toml"
 
 
@@ -73,7 +79,7 @@ class Capability:
 @dataclass
 class Config:
     api_key: str = ""
-    base_url: str = "https://api.overmindlab.ai"
+    base_url: str = DEFAULT_BASE_URL
     project_id: str = ""
     project_name: str = ""
     repo_summary: str = ""
@@ -149,6 +155,42 @@ class Config:
         self.capabilities = caps
 
 
+def _expand_key(value: str) -> str:
+    return os.environ.get(value[4:], "") if value.startswith("env:") else value
+
+
+def resolve_api_key(cli_key: str, config: Config | None) -> str:
+    if cli_key:
+        return cli_key
+    toml_key = _expand_key(config.api_key if config else "")
+    if config and config.project_id and toml_key:
+        return toml_key
+    return os.environ.get("OVERMIND_API_KEY", "") or toml_key
+
+
+def resolve_api_url(cli_url: str, config: Config | None) -> str:
+    if cli_url:
+        return cli_url.rstrip("/")
+    env = os.environ.get("OVERMIND_API_URL")
+    if env:
+        return env.rstrip("/")
+    if config and config.base_url:
+        return config.base_url.rstrip("/")
+    return DEFAULT_BASE_URL
+
+
+def resolve_api_credentials(api_key: str, api_url: str, config: Config | None) -> tuple[str, str]:
+    key = resolve_api_key(api_key, config)
+    url = resolve_api_url(api_url, config)
+    bound_key = _expand_key(config.api_key if config else "")
+    if bound_key and key == bound_key and url != config.base_url.rstrip("/"):
+        raise ValueError(
+            "Repository credentials belong to a different API. "
+            "Use the repository's saved endpoint or an explicit matching connection. No request was sent."
+        )
+    return key, url
+
+
 class SecretFileError(RuntimeError):
     pass
 
@@ -179,6 +221,11 @@ def _safe_local_target(path: Path, repo_root: Path) -> Path:
 
 def protect_secret_file(path: Path, *, repo_root: Path) -> None:
     path = _safe_local_target(path, repo_root)
+    # A directory-local ignore file needs no write under .git/, which agent sandboxes protect.
+    ignore = path.parent / ".gitignore"
+    if not ignore.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ignore.write_text("*\n")
     try:
         root_result = subprocess.run(
             ["git", "-C", str(repo_root.resolve()), "rev-parse", "--show-toplevel"],
@@ -203,22 +250,6 @@ def protect_secret_file(path: Path, *, repo_root: Path) -> None:
             )
             if tracked.returncode == 0:
                 raise SecretFileError(f"Refusing to write an API key to tracked file {relative.as_posix()}")
-
-            exclude_result = subprocess.run(
-                ["git", "-C", str(git_root), "rev-parse", "--git-path", "info/exclude"],
-                capture_output=True,
-                check=False,
-                text=True,
-            )
-            if exclude_result.returncode == 0:
-                exclude_path = Path(exclude_result.stdout.strip())
-                if not exclude_path.is_absolute():
-                    exclude_path = git_root / exclude_path
-                entry = f"/{relative.as_posix()}"
-                existing = exclude_path.read_text() if exclude_path.exists() else ""
-                if entry not in existing.splitlines():
-                    exclude_path.parent.mkdir(parents=True, exist_ok=True)
-                    exclude_path.write_text(f"{existing.rstrip()}\n{entry}\n" if existing.strip() else f"{entry}\n")
 
     if path.exists():
         path.chmod(0o600)
@@ -249,8 +280,6 @@ def _metric_from_dict(raw: dict) -> EvalMetric:
 
 
 def _load_toml(path: Path) -> dict:
-    import tomllib
-
     with path.open("rb") as fh:
         return tomllib.load(fh)
 
@@ -266,7 +295,7 @@ def saved_project_api_key(path: Path = DEFAULT_PATH) -> str:
     raw = _load_toml(path)
     secrets = _load_toml(secret_path)
     project_id = str(raw.get("project-id") or raw.get("project_id") or "")
-    base_url = str(raw.get("base-url") or raw.get("base_url") or "https://api.overmindlab.ai")
+    base_url = str(raw.get("base-url") or raw.get("base_url") or DEFAULT_BASE_URL)
     if (
         project_id
         and str(secrets.get("project-id") or "") == project_id
@@ -288,7 +317,7 @@ def _strip_none(value: Any) -> Any:
 def load(path: Path = DEFAULT_PATH) -> Config:
     raw = _load_toml(path)
     project_id = str(raw.get("project-id") or raw.get("project_id") or "")
-    base_url = str(raw.get("base-url") or raw.get("base_url") or "https://api.overmindlab.ai")
+    base_url = str(raw.get("base-url") or raw.get("base_url") or DEFAULT_BASE_URL)
     caps_raw = raw.get("capabilities") or {}
     caps: dict[str, Capability] = {}
     for slug, body in caps_raw.items():

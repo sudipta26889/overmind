@@ -22,7 +22,7 @@ from overbae.models import (
     DatasetPipelineRunner,
     Project,
 )
-from overbae.services import operational_progress
+from overbae.services import activity, operational_progress
 from overbae.services.datasets import (
     events,
     lifecycle,
@@ -781,6 +781,16 @@ def execute(run_id, *, script_executor=None):
                 Dataset.objects.filter(pk=dataset.pk).update(
                     active=cell, state=Dataset.State.IDLE, error="", updated_at=timezone.now()
                 )
+                activity.record(
+                    key=f"mcp-task:{dataset.project_id}:dataset_pipeline:{run.pk}",
+                    task_kind="dataset_pipeline",
+                    task_id=run.pk,
+                    project_id=dataset.project_id,
+                    kind="preparation_published",
+                    action="Published dataset preparation",
+                    assets=[activity.asset("dataset", dataset.pk, dataset.name)],
+                )
+                activity.update_task(dataset.project_id, "dataset_pipeline", run.pk, "completed")
                 if binding:
                     binding.checkpoint = run.specification["binding_checkpoint"]
                     binding.error = ""
@@ -821,17 +831,16 @@ def external_rows(records):
 
 
 def cancel(dataset):
+    landing = operations.cancel(dataset.pk, only_landing=True) is not None
     with transaction.atomic():
         Dataset.objects.select_for_update().get(pk=dataset.pk)
         changed = dataset.pipeline_runs.filter(state__in=["queued", "running"]).update(
             state="cancelled", lease_until=None, updated_at=timezone.now()
         )
-        if changed:
+        if changed and not landing:
             Dataset.objects.filter(pk=dataset.pk).update(
                 state=Dataset.State.IDLE, updated_at=timezone.now()
             )
-        elif Dataset.objects.filter(pk=dataset.pk, state=Dataset.State.LANDING).exists():
-            operations.cancel(dataset.pk)
         transaction.on_commit(lambda: events.publish(dataset.pk, {"type": "dataset_changed"}))
     return changed
 

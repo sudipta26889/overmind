@@ -5,12 +5,12 @@ from collections import defaultdict
 from datetime import timedelta
 from itertools import pairwise
 
-from django.db.models import Aggregate, Avg, Count, FloatField, Max, Q, Sum
-from django.db.models.functions import Trunc
+from django.db.models import Aggregate, Avg, Count, F, FloatField, Max, Q, Sum
+from django.db.models.functions import Cast, NullIf, Substr, Trunc
 from django.utils import timezone
 
 from overbae.core.errors import InputValidationError
-from overbae.models import DeployedModel
+from overbae.models import BillingTelemetry, DeployedModel
 from overbae.services.model_catalog import estimate_cost
 
 # Cap the per-model sample pulled into Python for percentile math. Bounds memory
@@ -32,6 +32,27 @@ MONITORING_PERIODS = {
     "all": None,
 }
 MONITORING_SOURCES = ("all", "application")
+
+
+def recent_traffic_annotations() -> dict:
+    end = timezone.now()
+    recent = Q(
+        inference_calls__created_at__gte=end - MONITORING_PERIODS["24h"],
+        inference_calls__created_at__lte=end,
+        inference_calls__source="application",
+    )
+    successful = Q(inference_calls__outcome="succeeded")
+    return {
+        "recent_requests": Count("inference_calls", filter=recent),
+        "recent_success_rate": 100.0
+        * Count("inference_calls", filter=recent & ~Q(inference_calls__outcome="failed"))
+        / NullIf(Count("inference_calls", filter=recent), 0),
+        "recent_latency": Median("inference_calls__end_to_end_ms", filter=recent & successful),
+        "recent_speed": Median(
+            "inference_calls__tokens_per_second",
+            filter=recent & successful & Q(inference_calls__is_cold=False),
+        ),
+    }
 
 
 def monitoring_options(period="all", source="all") -> dict:
@@ -125,6 +146,7 @@ def model_metrics(deployed: DeployedModel, *, period="all", source="all") -> dic
         .first()
     )
     return {
+        "dedicated_usage": dedicated_usage(deployed, period),
         "last_request_at": agg["last_request_at"],
         "cost_recorded_request_count": agg["cost_recorded_request_count"],
         "failed_request_count": agg["failed_request_count"],
@@ -237,3 +259,51 @@ def model_activity(
             }
         )
     return {"points": points}
+
+
+def dedicated_usage(deployed, period):
+    monitoring_options(period)
+    end = timezone.now()
+    duration = MONITORING_PERIODS[period]
+    ids = [str(pk) for pk in deployed.dedicated_deployments.values_list("pk", flat=True)]
+    entries = (
+        BillingTelemetry.objects.filter(
+            project_id=deployed.project_id,
+            service="dedicated-inference",
+            timestamp__lte=end,
+        )
+        .annotate(deployment_ref=Substr("idempotency_key", 11, 36))
+        .filter(deployment_ref__in=ids)
+    )
+    if duration:
+        entries = entries.filter(timestamp__gte=end - duration)
+    entries = entries.annotate(
+        gpu_minutes=Cast("metadata__minutes", FloatField())
+        * Cast("metadata__replicas", FloatField()),
+    )
+    totals = entries.aggregate(
+        amount=Sum("amount"),
+        minutes=Sum("gpu_minutes"),
+        count=Count("pk"),
+        measured=Count("gpu_minutes"),
+    )
+    granularity = "minute" if period == "1h" else "hour" if period in ("24h", "7d") else "day"
+    points = list(
+        entries.annotate(bucket=Trunc("timestamp", granularity))
+        .values("bucket")
+        .annotate(credits=-Sum("amount") * 100)
+        .order_by("bucket")
+    )
+    breakdown = list(
+        entries.values(gpu_type=F("metadata__gpu_type"))
+        .annotate(credits=-Sum("amount") * 100)
+        .order_by("gpu_type")
+    )
+    return {
+        "credits": -totals["amount"] * 100 if totals["amount"] is not None else None,
+        "gpu_hours": totals["minutes"] / 60
+        if totals["minutes"] is not None and totals["count"] == totals["measured"]
+        else None,
+        "points": points,
+        "breakdown": breakdown,
+    }

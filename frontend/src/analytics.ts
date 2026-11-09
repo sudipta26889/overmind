@@ -1,36 +1,60 @@
-import posthog from "posthog-js";
-
 const selfHosted = import.meta.env.VITE_SELF_HOSTED === "true";
+const enabled = !selfHosted && import.meta.env.MODE !== "development";
 
-if (!selfHosted && import.meta.env.MODE !== "development") {
-  posthog.init("phc_XrIVhixaz5sOqrdzpRwwqlvKXilmcy3PWPgdk0pemZa", {
-    api_host: "https://v.overmindlab.ai",
-    defaults: "2026-01-30",
-    person_profiles: "identified_only",
-  });
-}
+const client = enabled
+  ? import("posthog-js")
+      .then(({ default: posthog }) => {
+        posthog.init(
+          import.meta.env.VITE_PUBLIC_POSTHOG_KEY ||
+            "phc_XrIVhixaz5sOqrdzpRwwqlvKXilmcy3PWPgdk0pemZa",
+          {
+            api_host: import.meta.env.VITE_PUBLIC_POSTHOG_HOST || "https://v.overmindlab.ai",
+            defaults: "2026-01-30",
+            person_profiles: "identified_only",
+          }
+        );
+        return posthog;
+      })
+      // Analytics delivery must not block rendering or recursively report its own load failure.
+      .catch(() => undefined)
+  : undefined;
 
-if (!selfHosted && import.meta.env.MODE !== "development" && typeof window !== "undefined") {
+// Browsers mask cross-origin errors as "Script error.", ResizeObserver loop notices are benign,
+// and wallet extensions inject scripts that throw on window.ethereum. None has an actionable frame.
+const IGNORED_WINDOW_ERRORS = [/^Script error\.?$/, /ResizeObserver loop/, /window\.ethereum/];
+
+if (enabled && typeof window !== "undefined") {
   window.addEventListener("error", (event) => {
-    posthog.captureException(event.error ?? new Error(String(event.message)));
+    const text = `${event.message} ${event.error instanceof Error ? event.error.message : ""}`;
+    if (IGNORED_WINDOW_ERRORS.some((pattern) => pattern.test(text.trim()))) return;
+    void client?.then((posthog) =>
+      posthog?.captureException(event.error ?? new Error(String(event.message)))
+    );
   });
   window.addEventListener("unhandledrejection", (event) => {
     const reason = event.reason instanceof Error ? event.reason : new Error(String(event.reason));
-    posthog.captureException(reason);
+    void client?.then((posthog) => posthog?.captureException(reason));
   });
 }
 
 export const trackEvent = (event: string, properties?: Record<string, any>) => {
-  if (!selfHosted && import.meta.env.MODE !== "development") {
-    posthog.capture(event, properties);
-  }
+  void client?.then((posthog) => posthog?.capture(event, properties));
 };
 
 export const identifyUser = ({
   userId,
   clerkUserId,
-}: Partial<{ userId: string; clerkUserId: string }>) => {
-  if (!selfHosted && import.meta.env.MODE !== "development" && userId && clerkUserId) {
-    posthog.identify(userId, { clerkUserId: clerkUserId });
+  email,
+  name,
+}: Partial<{ userId: string; clerkUserId: string; email: string; name: string }>) => {
+  if (userId && clerkUserId) {
+    const properties: Record<string, string> = { clerkUserId };
+    if (email) properties.email = email;
+    if (name) properties.name = name;
+    void client?.then((posthog) => posthog?.identify(userId, properties));
   }
+};
+
+export const resetUser = () => {
+  void client?.then((posthog) => posthog?.reset());
 };

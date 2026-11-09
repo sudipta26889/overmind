@@ -1,62 +1,81 @@
-import { useState } from "react";
-
-import { Alert } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icons";
+import { trackEvent } from "@/analytics";
+import { PromptAgentActions } from "@/components/quickstart/prompt-agent-actions";
 import { config } from "@/config";
-import { writeClipboardText } from "@/lib/clipboard";
 import { onboardingPrompt } from "@/lib/mcp-setup";
 import { cn } from "@/lib/utils";
 
 export function OnboardWithAiPanel({
   className,
+  compact = false,
   datasetId,
   onPromptCopied,
   projectId,
   waitingHint,
 }: {
   className?: string;
+  compact?: boolean;
   datasetId?: string;
   onPromptCopied?: () => void;
   projectId?: string;
   waitingHint?: string;
 }) {
-  const [promptCopied, setPromptCopied] = useState(false);
-  const [copyError, setCopyError] = useState("");
-
   const prompt = onboardingPrompt(
     window.location.origin,
     config.apiUrl,
-    datasetId && projectId ? { datasetId, projectId } : undefined
+    projectId ? { datasetId, projectId } : undefined
   );
 
-  const copyPrompt = () =>
-    writeClipboardText(prompt).then(
-      () => {
-        setCopyError("");
-        setPromptCopied(true);
-        onPromptCopied?.();
-        setTimeout(() => setPromptCopied(false), 2000);
-      },
-      () => setCopyError("Couldn't copy — select the prompt text and copy it manually.")
-    );
-
+  const guide = `${window.location.origin}/setup.md`;
   return (
-    <div className={cn("space-y-3", className)}>
-      <p className="text-xs text-muted-foreground">
-        {datasetId
-          ? "Open a workspace in your coding agent and paste the prompt. It prepares the uploaded data here; no repository is needed."
-          : "Open your repository in your coding agent with the repo root as the workspace folder, then paste the prompt."}{" "}
-        Your agent signs in to Overmind through its MCP connection.
+    <div className={cn(compact ? "space-y-2" : "space-y-3", className)}>
+      {!compact && (
+        <p className="text-xs text-muted-foreground">
+          {datasetId
+            ? "Open a workspace in your coding agent and paste the prompt. It prepares the uploaded data here; no repository is needed."
+            : "Open your repository in your coding agent with the repo root as the workspace folder, then paste the prompt."}{" "}
+          Your agent signs in to Overmind through its MCP connection.
+        </p>
+      )}
+      <p
+        aria-label={compact ? "Setup prompt" : undefined}
+        className={cn(
+          "rounded-sm border border-border bg-wash-subtle px-3 py-2 text-sm text-foreground [overflow-wrap:anywhere]",
+          !compact && "whitespace-break-spaces rounded-md"
+        )}
+      >
+        {compact ? (
+          <>
+            {prompt.slice(0, -guide.length).replace(/\s+/g, " ")}
+            <a
+              className="underline underline-offset-2"
+              href={guide}
+              rel="noreferrer"
+              target="_blank"
+            >
+              {guide}
+            </a>
+          </>
+        ) : (
+          prompt
+        )}
       </p>
-      <p className="break-all whitespace-break-spaces rounded-md border border-border bg-wash-subtle px-3 py-2 font-mono text-xs text-foreground">
-        {prompt}
-      </p>
-      <Button className="w-full gap-2" onClick={() => void copyPrompt()} size="sm" type="button">
-        {promptCopied ? <Icon.success /> : <Icon.copy />}
-        {promptCopied ? "Prompt copied" : "Copy onboarding prompt"}
-      </Button>
-      {copyError ? <Alert variant="destructive">{copyError}</Alert> : null}
+      <PromptAgentActions
+        onCopied={() => {
+          trackEvent("setup_prompt_copied", { dataset_id: datasetId, project_id: projectId });
+          onPromptCopied?.();
+        }}
+        onCopyFailed={() =>
+          trackEvent("setup_prompt_copy_failed", { dataset_id: datasetId, project_id: projectId })
+        }
+        onOpenClicked={(agent) =>
+          trackEvent("setup_prompt_open_clicked", {
+            agent,
+            dataset_id: datasetId,
+            project_id: projectId,
+          })
+        }
+        prompt={prompt}
+      />
       {waitingHint ? <p className="text-xs text-muted-foreground">{waitingHint}</p> : null}
     </div>
   );

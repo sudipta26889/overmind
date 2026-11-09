@@ -2,17 +2,20 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 
 import { useAuth, useUser } from "@clerk/clerk-react";
 
-import { trackEvent } from "@/analytics";
+import { resetUser, trackEvent } from "@/analytics";
 import apiClient, {
   clearTokens,
   getAccessToken,
-  ResponseError,
+  getLocalAccountId,
+  getLocalIdentity,
+  rememberLocalIdentity,
   setAsyncTokenGetter,
   setTokens,
 } from "@/client";
 import { config } from "@/config";
 import { setStoredProjectId } from "@/hooks/use-project-search-sync";
 import { getContext } from "@/integrations/tanstack-query";
+import { isPermanentApiRefusal } from "@/lib/api-error";
 import { emitGuestUpgrade, hasGuestSession, markGuestSession } from "@/lib/guest";
 import { notify } from "@/lib/notify";
 
@@ -64,8 +67,8 @@ function ClerkAuthProvider({ children }: { children: React.ReactNode }) {
   // A guest runs on the stored JWT pair so client.ts can refresh it; Clerk's
   // getter would switch that flow off.
   useEffect(() => {
-    setAsyncTokenGetter(guestActive ? null : () => getToken());
-  }, [getToken, guestActive]);
+    setAsyncTokenGetter(guestActive ? null : getToken, clerkSignedIn ? (user?.id ?? null) : null);
+  }, [getToken, guestActive, clerkSignedIn, user?.id]);
 
   useEffect(() => {
     if (!clerkSignedIn || !guestActive || claimingRef.current) return;
@@ -75,7 +78,10 @@ function ClerkAuthProvider({ children }: { children: React.ReactNode }) {
       let settled = true;
       try {
         const token = await getToken();
-        if (!token) return;
+        if (!token) {
+          settled = false;
+          return;
+        }
         const claimed = await apiClient.auth.authGuestClaimCreate({
           guestClaimRequest: { clerkToken: token },
         });
@@ -83,13 +89,13 @@ function ClerkAuthProvider({ children }: { children: React.ReactNode }) {
         trackEvent("guest_claimed");
       } catch (err) {
         // A refusal is final; a transport failure keeps the guest so a reload retries.
-        settled = err instanceof ResponseError && err.response.status < 500;
+        settled = isPermanentApiRefusal(err);
         notify.error(err, "Could not attach the demo workspace to this account.");
       } finally {
         if (settled) {
           // Synchronous, before the state flip: the re-render fires queries at
           // once, and they must carry the Clerk token, not nothing.
-          setAsyncTokenGetter(() => getToken());
+          setAsyncTokenGetter((options) => getToken(options));
           clearTokens();
           setGuestActive(false);
           void getContext().queryClient.invalidateQueries();
@@ -111,9 +117,11 @@ function ClerkAuthProvider({ children }: { children: React.ReactNode }) {
       : null;
 
   const handleSignOut = useCallback(async () => {
+    await signOut();
     clearTokens();
     setGuestActive(false);
-    await signOut();
+    resetUser();
+    getContext().queryClient.clear();
   }, [signOut]);
 
   const beginGuestSession = useCallback((access: string, refresh: string, projectId: string) => {
@@ -147,13 +155,28 @@ function readIsSignedIn(): boolean {
   return !!localStorage.getItem("jwt_access");
 }
 
+function readLocalUser(): AuthUser | null {
+  const identity = getLocalIdentity();
+  return identity ? { ...identity, name: identity.email, picture: null } : null;
+}
+
 function SelfHostedAuthProvider({ children }: { children: React.ReactNode }) {
   const [isSignedIn, setIsSignedIn] = useState(readIsSignedIn);
   const [isGuest, setIsGuest] = useState(hasGuestSession);
-  const [user, setUser] = useState<AuthUser | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(readLocalUser);
+  const identityRequest = useRef(0);
+  const accountId = useRef(getLocalAccountId());
 
   const refreshAuth = useCallback(() => {
+    const request = ++identityRequest.current;
     const signedIn = readIsSignedIn();
+    const nextAccountId = getLocalAccountId();
+    if (accountId.current !== nextAccountId) {
+      getContext().queryClient.clear();
+      resetUser();
+    }
+    accountId.current = nextAccountId;
+    setUser((previous) => (previous?.id === nextAccountId ? previous : readLocalUser()));
     setIsSignedIn(signedIn);
     setIsGuest(hasGuestSession());
     if (!signedIn) {
@@ -163,6 +186,8 @@ function SelfHostedAuthProvider({ children }: { children: React.ReactNode }) {
     void apiClient.auth
       .authMeRetrieve()
       .then((me) => {
+        if (request !== identityRequest.current) return;
+        rememberLocalIdentity(me);
         setUser({
           email: me.email,
           id: String(me.id),
@@ -171,7 +196,7 @@ function SelfHostedAuthProvider({ children }: { children: React.ReactNode }) {
         });
       })
       .catch(() => {
-        setUser(null);
+        // A failed verification must not erase the identity needed for in-place recovery.
       });
   }, []);
 
@@ -185,10 +210,13 @@ function SelfHostedAuthProvider({ children }: { children: React.ReactNode }) {
   const getToken = useCallback(async () => localStorage.getItem("jwt_access"), []);
 
   const handleSignOut = useCallback(async () => {
+    identityRequest.current++;
     clearTokens();
     setIsSignedIn(false);
     setIsGuest(false);
     setUser(null);
+    resetUser();
+    getContext().queryClient.clear();
   }, []);
 
   const beginGuestSession = useCallback((access: string, refresh: string, projectId: string) => {

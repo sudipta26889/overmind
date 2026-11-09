@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import Case, CharField, Count, Q, Sum, Value, When
+from django.db.models.fields.json import KeyTextTransform
+from django.utils import timezone
 
-from overbae.models import BillingService, BillingTelemetry, User
+from overbae.models import BillingService, BillingTelemetry, FinetuningJob, User
 from overbae.services import model_catalog
 
 logger = logging.getLogger(__name__)
@@ -23,8 +26,46 @@ MIN_TOPUP_USD = 1
 MAX_TOPUP_USD = 1000
 
 
+def credit_report(
+    user: User,
+    *,
+    since: datetime | None,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    window = Q(amount__lt=0) & (Q(timestamp__gte=since) if since is not None else Q())
+    rows = list(
+        BillingTelemetry.objects.filter(user=user, timestamp__lte=observed_at)
+        .values("service")
+        .annotate(
+            balance=Sum("amount"),
+            granted=Sum("amount", filter=Q(amount__gt=0), default=Decimal("0")),
+            spent=Sum("amount", filter=Q(amount__lt=0), default=Decimal("0")),
+            used=Sum("amount", filter=window, default=Decimal("0")),
+        )
+        .order_by("service")
+    )
+    by_service = [
+        {"service": row["service"], "spent_credits": -row["used"] * CREDITS_PER_USD}
+        for row in rows
+        if row["used"]
+    ]
+    return {
+        "balance_credits": sum((row["balance"] for row in rows), Decimal("0")) * CREDITS_PER_USD,
+        "granted_credits": sum((row["granted"] for row in rows), Decimal("0")) * CREDITS_PER_USD,
+        "spent_credits": -sum((row["spent"] for row in rows), Decimal("0")) * CREDITS_PER_USD,
+        "usage": {
+            "spent_credits": -sum((row["used"] for row in rows), Decimal("0")) * CREDITS_PER_USD,
+            "by_service": by_service,
+        },
+    }
+
+
 class InsufficientCredits(Exception):  # noqa: N818
     """Raised when the user has no credits left for paid work."""
+
+
+def to_credits(amount_usd: Decimal) -> Decimal:
+    return (amount_usd * CREDITS_PER_USD).quantize(Decimal("0.01"))
 
 
 def balance_usd(user: User) -> Decimal:
@@ -187,3 +228,63 @@ def charge_llm_usage(
             getattr(user, "pk", None),
         )
         return None
+
+
+def project_credit_report(
+    user,
+    project,
+    *,
+    since=None,
+    before=None,
+    training_job=None,
+    training_experiment=None,
+    offset=0,
+    limit=20,
+):
+    """Account-owned posted charges; missing attribution stays in the null group."""
+    observed_at = timezone.now()
+    query = BillingTelemetry.objects.filter(
+        user=user, project=project, amount__lt=0, timestamp__lte=observed_at
+    )
+    if since:
+        query = query.filter(timestamp__gte=since)
+    if before:
+        query = query.filter(timestamp__lt=before)
+    query = query.annotate(
+        training_job_id=Case(
+            When(
+                service=BillingService.FINETUNING_JOB, then=KeyTextTransform("job_id", "metadata")
+            ),
+            default=Value(None),
+            output_field=CharField(),
+        )
+    )
+    if training_job:
+        query = query.filter(training_job_id=str(training_job))
+    if training_experiment:
+        jobs = FinetuningJob.objects.filter(
+            project=project, group_id=training_experiment
+        ).values_list("id", flat=True)
+        query = query.filter(training_job_id__in=[str(pk) for pk in jobs])
+    grouped = (
+        query.values("service", "training_job_id")
+        .annotate(spent_credits=-Sum("amount") * CREDITS_PER_USD, entries=Count("pk"))
+        .order_by("service", "training_job_id")
+    )
+    total = grouped.count()
+    spent = -query.aggregate(amount=Sum("amount", default=Decimal("0")))["amount"] * CREDITS_PER_USD
+    return {
+        "project_id": str(project.pk),
+        "observed_at": observed_at,
+        "since": since,
+        "before": before,
+        "spent_credits": spent,
+        "groups": list(grouped[offset : offset + limit]),
+        "total_groups": total,
+        "next_offset": offset + limit if offset + limit < total else None,
+        "limitations": [
+            "Posted charges owned by this connection's account only; not all project members' spending.",
+            "Unposted charges and provider estimates are excluded; no hard spending cap.",
+            "Only recorded training job attribution is resolved. Other services and historical missing job metadata remain unattributed; experiment filtering includes only linked training charges, not a complete experiment bill.",
+        ],
+    }

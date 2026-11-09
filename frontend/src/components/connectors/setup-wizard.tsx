@@ -164,13 +164,22 @@ function initialConfirmed(existing?: ConnectorCredential): ConfirmedSections {
   };
 }
 
-function initialState(
+export function initialState(
   projectId: string,
   existing?: ConnectorCredential,
   defaultName = ""
 ): WizardState {
   const cfg = existing?.activeConfig;
-  const range = lookbackFromExistingDays(cfg?.lookbackDays ?? 30);
+  const range =
+    cfg?.backfillFrom || cfg?.backfillTo
+      ? {
+          customTimeRange: {
+            gte: cfg.backfillFrom?.toISOString(),
+            lte: cfg.backfillTo?.toISOString(),
+          },
+          timeRange: "custom" as const,
+        }
+      : lookbackFromExistingDays(cfg ? cfg.lookbackDays : 30);
   return {
     apiKey: "",
     apiSecret: "",
@@ -204,6 +213,18 @@ function initialState(
     timeRange: range.timeRange,
     verified: Boolean(existing?.verifiedAt),
   };
+}
+
+export function mergeSuggestedAssignments(
+  assignments: Record<string, string>,
+  proposals: Record<string, ConnectorCapabilityProposal>
+): Record<string, string> {
+  const additions = Object.fromEntries(
+    Object.entries(proposals)
+      .filter(([key, proposal]) => !(key in assignments) && proposal.capabilityId)
+      .map(([key, proposal]) => [key, proposal.capabilityId!])
+  );
+  return Object.keys(additions).length ? { ...assignments, ...additions } : assignments;
 }
 
 function wizardReducer(state: WizardState, action: WizardAction): WizardState {
@@ -505,15 +526,8 @@ export function ConnectorSetupWizard({
   useEffect(() => {
     const proposed = candidatesQuery.data?.proposals;
     if (!proposed || state.confirmed.capabilities) return;
-    const next = { ...state.assignments };
-    let added = false;
-    for (const [key, proposal] of Object.entries(proposed)) {
-      if (!next[key] && proposal.capabilityId) {
-        next[key] = proposal.capabilityId;
-        added = true;
-      }
-    }
-    if (added) dispatch({ patch: { assignments: next }, type: "PATCH" });
+    const next = mergeSuggestedAssignments(state.assignments, proposed);
+    if (next !== state.assignments) dispatch({ patch: { assignments: next }, type: "PATCH" });
   }, [candidatesQuery.data, state.assignments, state.confirmed.capabilities]);
 
   // Live preview count once credentials verify.
@@ -666,7 +680,7 @@ export function ConnectorSetupWizard({
 
       await api.connectorCredentials.connectorCredentialsCapabilityMappingUpdate({
         connectorCapabilityMappingWriteRequest: {
-          assignments: state.assignments,
+          assignments: Object.fromEntries(Object.entries(state.assignments).filter(([, id]) => id)),
           autoCreate: false,
           key: state.capabilityKey || null,
           names: state.capabilityNames,
@@ -979,9 +993,9 @@ export function ConnectorSetupWizard({
           </div>
 
           {state.error && (
-            <div className="flex items-start gap-2 rounded-sm border border-destructive/40 bg-destructive/5 p-3">
-              <Icon.warning className="mt-0.5 size-4 shrink-0 text-destructive" />
-              <p className="text-sm text-destructive">{state.error}</p>
+            <div className="flex items-start gap-2 py-2">
+              <Icon.warning className="mt-0.5 size-4 shrink-0 text-warning" />
+              <p className="text-sm text-muted-foreground">{state.error}</p>
             </div>
           )}
         </DialogBody>
@@ -1688,9 +1702,9 @@ function CapabilitiesBody({
 
       {/* Without this the sample request's failure reads as "this app has no capabilities". */}
       {error && (
-        <div className="flex items-start gap-2 rounded-sm border border-destructive/40 bg-destructive/5 p-3">
-          <Icon.warning className="mt-0.5 size-4 shrink-0 text-destructive" />
-          <p className="text-sm text-destructive">{error}</p>
+        <div className="flex items-start gap-2 py-2">
+          <Icon.warning className="mt-0.5 size-4 shrink-0 text-warning" />
+          <p className="text-sm text-muted-foreground">{error}</p>
         </div>
       )}
 
@@ -1794,11 +1808,11 @@ function CapabilitiesBody({
                 <Select
                   onValueChange={(capabilityId) => {
                     const next = { ...assignments };
-                    if (capabilityId === "__none__") delete next[value];
+                    if (capabilityId === "__none__") next[value] = "";
                     else next[value] = capabilityId;
                     onChange({ assignments: next });
                   }}
-                  value={assignments[value] ?? "__none__"}
+                  value={assignments[value] || "__none__"}
                 >
                   <SelectTrigger className="w-[220px]">
                     <SelectValue placeholder="Unmapped" />

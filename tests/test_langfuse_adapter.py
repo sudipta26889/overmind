@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -5,8 +6,9 @@ import time_machine
 from factories import make_connector
 
 from overbae.services.connectors.langfuse.adapter import LangfuseAdapter
+from overbae.services.connectors.langfuse.client import LangFuseError
 
-pytestmark = pytest.mark.django_db
+pytestmark = [pytest.mark.django_db, pytest.mark.covers("vendor-connectors")]
 
 _START = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
 
@@ -71,7 +73,8 @@ def test_backfill_uses_the_configured_bounds(api):
 
 def test_count_and_discovery_prefer_explicit_bounds(api):
     api.steps.clear()
-    api.reply(json_body={"data": [], "meta": {"totalItems": 7}})
+    api.reply(json_body={"data": [{"isRootObservation": True, "count_count": 7}]})
+    api.reply(json_body={"data": []})
     start = datetime(2026, 8, 1, tzinfo=UTC)
     end = start + timedelta(days=3)
     adapter = _adapter()
@@ -79,7 +82,10 @@ def test_count_and_discovery_prefer_explicit_bounds(api):
     adapter.count(lookback_days=30, window_from=start, window_to=end)
     adapter.sample_units(lookback_days=30, window_from=start, window_to=end)
 
-    for call in api.calls:
+    query = json.loads(api.calls[0].params["query"])
+    assert query["fromTimestamp"].startswith("2026-08-01T00:00:00")
+    assert query["toTimestamp"].startswith("2026-08-04T00:00:00")
+    for call in api.calls[1:]:
         assert call.params["fromStartTime"].startswith("2026-08-01T00:00:00")
         assert call.params["toStartTime"].startswith("2026-08-04T00:00:00")
 
@@ -113,7 +119,111 @@ def test_live_pagination_pins_its_window_and_resumes(api, clock):
     assert second.next_state == {"mode": "live", "watermark": first.window_to.isoformat()}
     pages = [c.params for c in api.calls if "traceId" not in c.params]
     assert {(p["fromStartTime"], p["toStartTime"]) for p in pages} == {
-        ("2026-08-19T12:00:00Z", "2026-08-19T12:01:00Z")
+        ("2026-08-19T11:30:00Z", "2026-08-19T12:01:00Z")
     }
     assert pages[1]["cursor"] == "cursor-1"
     assert all(c.params["expandMetadata"] == "capability" for c in api.calls)
+
+
+def test_sampling_stops_before_reading_the_full_window(api):
+    root = {
+        "id": "root",
+        "traceId": "t1",
+        "type": "SPAN",
+        "isRootObservation": True,
+        "startTime": _START.isoformat(),
+    }
+    api.steps.clear()
+    api.reply(json_body={"data": [root], "meta": {"cursor": "more"}})
+    api.reply(json_body={"data": [root], "meta": {}})
+    adapter = _adapter()
+    units = adapter.sample_units(lookback_days=1, limit=1)
+    assert len(units) == 1
+    assert not any(call.params.get("cursor") for call in api.calls)
+
+
+def test_backfill_checkpoints_inside_a_dense_window(api, clock):
+    root = {
+        "id": "root",
+        "traceId": "t1",
+        "type": "SPAN",
+        "isRootObservation": True,
+        "startTime": _START.isoformat(),
+    }
+    api.steps.clear()
+    api.reply(json_body={"data": [{"isRootObservation": True, "count_count": 1}]})
+    api.reply(json_body={"data": [root], "meta": {"cursor": "more"}})
+    api.reply(json_body={"data": [root], "meta": {}})
+    adapter = _adapter(lookback_days=1)
+    page = adapter.fetch_page({})
+    assert not page.done
+    assert page.next_state["next_cursor"] == "more"
+    assert not any(call.params.get("cursor") for call in api.calls)
+    api.steps.clear()
+    api.reply(json_body={"data": [], "meta": {}})
+    clock.shift(timedelta(minutes=1))
+    final = adapter.fetch_page(page.next_state)
+    assert final.done
+    assert (final.window_from, final.window_to) == (page.window_from, page.window_to)
+    assert api.calls[-1].params["cursor"] == "more"
+
+
+def test_rate_limited_sampling_returns_without_background_retry_waits(api):
+    api.steps.clear()
+    api.reply(429, text="throttled", headers={"Retry-After": "60"})
+    with pytest.raises(LangFuseError):
+        _adapter().sample_units(lookback_days=1)
+    assert len(api.calls) == 1
+
+
+def test_backfill_watermark_stops_at_its_bound(api, clock):
+    late = (_START + timedelta(hours=2)).isoformat()
+    api.reply(
+        json_body={
+            "data": [{"id": "o1", "traceId": "t1", "startTime": late, "name": "n", "type": "SPAN"}],
+            "meta": {},
+        }
+    )
+    adapter = _adapter()
+    page = adapter.fetch_page({})
+    while not page.done:
+        page = adapter.fetch_page(page.next_state)
+    assert page.next_state["watermark"] == _START.isoformat()
+
+
+def test_backfill_watermark_compares_instants_across_formats(api, clock):
+    later = "2026-08-19T11:00:00.900500+00:00"
+    earlier = "2026-08-19T11:00:00.900Z"
+    observation = {"id": "o1", "traceId": "t1", "startTime": earlier, "name": "n", "type": "SPAN"}
+    api.reply(json_body={"data": [observation], "meta": {}})
+    page = _adapter().fetch_page({"mode": "backfill", "watermark": later})
+    assert page.next_state["watermark"] == later
+
+
+def test_a_server_without_v2_imports_through_v1_with_no_estimate(scripted, slept, clock):
+    api = scripted("https://cloud.langfuse.com")
+    missing = {"status": 404, "text": "not found"}
+    row = {"id": "o1", "traceId": "t1", "type": "SPAN", "startTime": "2026-08-19T11:00:00Z"}
+    api.reply(**missing)
+    api.reply(**missing)
+    api.reply(json_body={"data": [row], "meta": {"page": 1, "totalPages": 2}})
+    api.reply(json_body={"name": "n", "observations": [row]})
+    credential = make_connector("langfuse", source_project_id="src", api_secret="sk")
+    credential.api_version = "unknown"
+    adapter = LangfuseAdapter(credential)
+    assert adapter.count(lookback_days=1) is None
+    page = adapter.fetch_page({})
+    assert [unit.external_trace_id for unit in page.units] == ["t1"]
+    assert page.next_state["next_cursor"] == "2"
+    assert page.next_state["progress"]["total"] is None
+
+
+def test_preview_stops_when_a_page_adds_no_new_trace(scripted, slept):
+    api = scripted("https://cloud.langfuse.com")
+    row = {"id": "o1", "traceId": "t1", "type": "SPAN", "startTime": "2026-08-19T11:00:00Z"}
+    api.reply(json_body={"data": [row], "meta": {"cursor": "a"}})
+    api.reply(json_body={"data": [row], "meta": {}})
+    api.reply(json_body={"data": [row], "meta": {"cursor": "b"}})
+    api.reply(json_body={"data": [row], "meta": {}})
+    assert len(_adapter().sample_units(lookback_days=1, limit=10)) == 1
+    assert len(api.calls) == 4

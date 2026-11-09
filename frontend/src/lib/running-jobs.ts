@@ -11,11 +11,16 @@ export interface RunningJobItem {
   id: string;
   /** FT monitor group; equals `id` for lone jobs. */
   groupId?: string;
+  memberIds?: string[];
   title: string;
   status: string;
   error?: string;
   /** ISO timestamp; rows sort on it as a string. */
   startedAt: string;
+  datasetId?: string;
+  datasetName?: string;
+  capabilityId?: string;
+  capabilityName?: string;
 }
 
 const FT_ACTIVE = new Set(["queued", "preparing", "running", "deploying", "validating_files"]);
@@ -58,6 +63,9 @@ function foldOptimizerStatus(status: string): string {
 
 type OptimizerExperimentRow = {
   id: string;
+  capability?: string | null;
+  dataset?: string | null;
+  datasetName?: string;
   capabilityName?: string | null;
   status: string;
   failureReason?: string | null;
@@ -87,6 +95,8 @@ function toIso(value: Date | string | null | undefined): string {
 
 type FinetuningJobRow = {
   id: string;
+  capability?: string | null;
+  dataset?: string;
   groupId?: string | null;
   name?: string | null;
   baseModel?: string | null;
@@ -135,6 +145,9 @@ export function buildRunningJobs(
       id: string;
       name: string;
       capabilityName?: string | null;
+      capabilityId?: string | null;
+      dataset?: string | null;
+      datasetName?: string;
       error?: string | null;
       status: string;
       createdAt: Date | string;
@@ -176,9 +189,12 @@ export function buildRunningJobs(
           id: rep.id,
           key: `ft:${gid}`,
           kind: "finetuning",
+          memberIds: members.map((m) => m.id),
           startedAt: startedAt || toIso(rep.startedAt ?? rep.createdAt),
           status: activeOnly ? rep.status : foldFtGroupStatus(members),
           title: ftGroupTitle(members),
+          ...(rep.dataset ? { datasetId: rep.dataset } : {}),
+          ...(rep.capability ? { capabilityId: rep.capability } : {}),
         });
       }
     }
@@ -197,6 +213,10 @@ export function buildRunningJobs(
       startedAt: toIso(run.createdAt),
       status: run.status,
       title: run.name?.trim() || (capability ? `${capability} eval` : "Eval run"),
+      ...(run.dataset ? { datasetId: run.dataset, datasetName: run.datasetName } : {}),
+      ...(run.capabilityId
+        ? { capabilityId: run.capabilityId, capabilityName: run.capabilityName ?? undefined }
+        : {}),
     });
   }
 
@@ -210,6 +230,10 @@ export function buildRunningJobs(
       startedAt: toIso(exp.createdAt),
       status: foldOptimizerStatus(exp.status),
       title: optimizerTitle(exp),
+      ...(exp.dataset ? { datasetId: exp.dataset, datasetName: exp.datasetName } : {}),
+      ...(exp.capability
+        ? { capabilityId: exp.capability, capabilityName: exp.capabilityName ?? undefined }
+        : {}),
     });
   }
 
@@ -249,33 +273,38 @@ export function detectCompletedJobs(
       const members = (latest.finetuning ?? []).filter(
         (j) => ftGroupId(j) === gid || j.id === prev.id
       );
-      if (members.some((j) => !isTerminalFinetuningStatus(j.status))) continue;
-      const status = members.length > 0 ? foldFtGroupStatus(members) : "succeeded";
+      if (
+        !members.length ||
+        (prev.memberIds ?? [prev.id]).some((id) => !members.some((j) => j.id === id)) ||
+        members.some((j) => !isTerminalFinetuningStatus(j.status))
+      )
+        continue;
+      const status = foldFtGroupStatus(members);
       completed.push({
         ...prev,
         status,
-        title: members.length > 0 ? ftGroupTitle(members) : prev.title,
+        title: ftGroupTitle(members),
       });
       continue;
     }
 
     if (prev.kind === "optimizer") {
       const row = latest.optimizerExperiments?.find((e) => e.id === prev.id);
-      if (row && !isTerminalOptimizerStatus(row.status)) continue;
+      if (!row || !isTerminalOptimizerStatus(row.status)) continue;
       completed.push({
         ...prev,
-        status: row ? foldOptimizerStatus(row.status) : "completed",
-        title: row ? optimizerTitle(row) : prev.title,
+        status: foldOptimizerStatus(row.status),
+        title: optimizerTitle(row),
       });
       continue;
     }
 
     if (prev.kind === "eval") {
       const row = latest.evalRuns?.find((j) => j.id === prev.id);
-      if (row && !isTerminalEvalStatus(row.status)) continue;
+      if (!row || !isTerminalEvalStatus(row.status)) continue;
       completed.push({
         ...prev,
-        status: row?.status ?? "completed",
+        status: row.status,
         title: row?.name?.trim() || prev.title,
       });
     }
@@ -297,4 +326,19 @@ export function completionToastCopy(job: RunningJobItem): { message: string; des
     description: job.title,
     message: `${kind} ${ok}`,
   };
+}
+
+/** Tracks active jobs between polls. A group keeps every member it has shown,
+ *  so a member that leaves the first page still gates its completion. */
+export function rememberActive(
+  previous: Map<string, RunningJobItem>,
+  current: RunningJobItem[],
+  completed: RunningJobItem[]
+) {
+  for (const job of current) {
+    const seen = previous.get(job.key)?.memberIds ?? [];
+    const memberIds = job.memberIds && [...new Set([...seen, ...job.memberIds])];
+    previous.set(job.key, { ...job, memberIds });
+  }
+  for (const job of completed) previous.delete(job.key);
 }

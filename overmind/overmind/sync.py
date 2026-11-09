@@ -14,7 +14,6 @@ before pushing. Project-scoped keys still require an explicit ``project-id``.
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -34,14 +33,13 @@ from overmind.config import (
     ensure_project_name,
     load,
     protect_secret_file,
+    resolve_api_credentials,
 )
-from overmind.init_cmd import preflight_mcp_configs, refresh_mcp_configs, resolve_mcp_url
 
 SYNC_PATH = "/api/v1/sync"
 PROJECTS_PATH = "/api/projects/"
 API_KEYS_PATH = "/api/auth/api-keys/"
 API_KEY_CURRENT_PATH = "/api/auth/api-keys/current/"
-DEFAULT_BASE_URL = "https://api.overmindlab.ai"
 
 console = Console()
 
@@ -164,7 +162,7 @@ def ensure_mcp_project_key(
     config.api_key = new_key
     dump(config, path)
     if scope == "account":
-        console.print("Minted project-scoped API key for MCP.")
+        console.print("Saved a project-scoped API key for this repository.")
     return config, new_key
 
 
@@ -182,43 +180,11 @@ def ensure_project_id(config: Config, path: Path, api_key: str, base_url: str) -
     return config, True
 
 
-def resolve_api_key(cli_key: str, config: Config | None) -> str:
-    if cli_key:
-        return cli_key
-    if config and config.project_id and config.api_key:
-        return config.api_key
-    env_key = os.environ.get("OVERMIND_API_KEY", "")
-    if env_key:
-        return env_key
-    toml_key = (config.api_key if config else "") or ""
-    if toml_key.startswith("env:"):
-        toml_key = os.environ.get(toml_key[4:], "")
-    return toml_key
-
-
-def resolve_api_url(cli_url: str, config: Config | None) -> str:
-    if cli_url:
-        return cli_url.rstrip("/")
-    env = os.environ.get("OVERMIND_API_URL")
-    if env:
-        return env.rstrip("/")
-    if config and config.base_url:
-        return config.base_url.rstrip("/")
-    return DEFAULT_BASE_URL
-
-
 def _sync_connection(api_key: str, api_url: str, config: Config) -> tuple[str, str]:
-    key = resolve_api_key(api_key, config)
-    url = resolve_api_url(api_url, config)
-    bound_key = config.api_key
-    if bound_key.startswith("env:"):
-        bound_key = os.environ.get(bound_key[4:], "")
-    if bound_key and key == bound_key and url != config.base_url.rstrip("/"):
-        raise SyncError(
-            "Repository credentials belong to a different API. "
-            "Use the repository's saved endpoint or an explicit matching connection. No request was sent."
-        )
-    return key, url
+    try:
+        return resolve_api_credentials(api_key, api_url, config)
+    except ValueError as exc:
+        raise SyncError(str(exc)) from exc
 
 
 def run_up(path: Path, api_key: str, api_url: str) -> Config:
@@ -230,7 +196,6 @@ def run_up(path: Path, api_key: str, api_url: str) -> Config:
         raise SyncError("Missing API key. Pass --api-key or set OVERMIND_API_KEY.")
     try:
         protect_secret_file(credentials_path(path), repo_root=path.resolve().parent)
-        preflight_mcp_configs(path.resolve().parent)
     except (SecretFileError, OSError, ValueError) as exc:
         raise SyncError(str(exc)) from exc
     key_scope = _api_key_scope(key, url)
@@ -253,16 +218,6 @@ def run_up(path: Path, api_key: str, api_url: str) -> Config:
         config, key = ensure_mcp_project_key(config, path, key, url, key_scope=key_scope)
     except (SecretFileError, OSError, ValueError) as exc:
         raise SyncError(f"Local sync persistence failed; a project credential may have been saved: {exc}") from exc
-    mcp_url, _ = resolve_mcp_url("production", url)
-    try:
-        updated = refresh_mcp_configs(path.resolve().parent, mcp_url, key)
-    except (SecretFileError, OSError, ValueError) as exc:
-        raise SyncError(f"Project credential saved, but MCP config update failed: {exc}") from exc
-    if updated:
-        console.print(f"Updated MCP authentication: {', '.join(updated)}.")
-        console.print("Reload the coding agent once. No re-export or re-init is required.")
-    else:
-        console.print("No Overmind MCP config found. Run `overmind init --ide <client>` to add one.")
     return config
 
 

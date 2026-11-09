@@ -7,7 +7,9 @@ import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+from django.core.management import call_command
 from mcp.server.lowlevel import Server
+from mcp_fixtures import asgi_db
 from posthog import Posthog
 from posthog.mcp import instrument
 from starlette.testclient import TestClient
@@ -15,7 +17,7 @@ from starlette.testclient import TestClient
 from overbae.models import APIToken, Project, ProjectMembership, User
 from overbae.services.mcp import server
 
-pytestmark = pytest.mark.django_db(transaction=True)
+pytestmark = [pytest.mark.django_db, pytest.mark.covers("privacy")]
 
 MCP_URL = "/api/mcp/"
 INJECTED_ARGUMENTS = {"context", "conversation_id", "llm_model"}
@@ -87,6 +89,7 @@ def _rpc(client, headers, method, params=None, request_id=1):
     return response
 
 
+@asgi_db
 def test_every_tool_call_reaches_posthog_as_metadata_only(instrumented):
     user, project, headers = _member(project_key=False)
     expected = {}
@@ -142,6 +145,7 @@ def test_every_tool_call_reaches_posthog_as_metadata_only(instrumented):
         assert properties["$mcp_server_name"] == "overmind-platform"
         assert properties["$mcp_client_name"] == "analytics-e2e"
         assert event["distinct_id"] == user.clerk_user_id
+        assert properties["$set"] == {"email": user.email}
         captured.setdefault(properties["$mcp_tool_name"], []).append(
             (
                 properties["$mcp_is_error"],
@@ -160,6 +164,7 @@ def test_every_tool_call_reaches_posthog_as_metadata_only(instrumented):
     assert events["$mcp_resource_read"]["properties"]["project_id"] == str(project.id)
 
 
+@asgi_db
 def test_project_key_events_carry_the_key_project(instrumented):
     _, project, headers = _member(project_key=True)
 
@@ -170,6 +175,7 @@ def test_project_key_events_carry_the_key_project(instrumented):
     assert event["properties"]["project_id"] == str(project.id)
 
 
+@asgi_db
 def test_failed_ingest_does_not_fail_tool_calls(instrumented):
     instrumented.status = 500
     _, _, headers = _member(project_key=True)
@@ -181,3 +187,38 @@ def test_failed_ingest_does_not_fail_tool_calls(instrumented):
 
     assert result.get("isError") is not True
     assert result["structuredContent"]["total"] == 1
+
+
+def test_sync_posthog_users_backfills_non_guest_profiles(ingest, settings):
+    settings.POSTHOG_PROJECT_TOKEN = "phc_test"
+    settings.POSTHOG_HOST = f"http://127.0.0.1:{ingest.server_port}"
+
+    active = User.objects.create_user(
+        email="ada@example.com",
+        password="pw",
+        clerk_user_id="user_ada",
+        first_name="Ada",
+        last_name="Lovelace",
+    )
+    User.objects.create_user(
+        email="guest@guest.invalid",
+        password=None,
+        clerk_user_id="guest_123",
+        is_guest=True,
+    )
+
+    call_command("sync_posthog_users")
+
+    set_events = [
+        event
+        for event in ingest.events
+        if event["event"] == "$set" and event["distinct_id"] == active.clerk_user_id
+    ]
+    assert len(set_events) == 1
+    assert set_events[0]["$set"] == {
+        "clerkUserId": "user_ada",
+        "email": "ada@example.com",
+        "name": "Ada Lovelace",
+        "overmind_user_id": str(active.pk),
+    }
+    assert all(event["distinct_id"] != "guest_123" for event in ingest.events)

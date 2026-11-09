@@ -1,3 +1,4 @@
+from .activity import Activity, ActivityClient, ActivityRead
 from .billing import BillingService, BillingTelemetry, Subscription, SubscriptionStatus
 from .capabilities import Capability, IdentityAlias, Prompt
 from .connectors import ConnectorCredential, ConnectorSyncConfig, ConnectorSyncRun
@@ -10,6 +11,7 @@ from .dataset_pipeline import (
     DatasetPipelineRun,
     DatasetPipelineRunner,
 )
+from .dataset_preparation import DatasetPreparation
 from .dataset_transfer import DatasetTransfer
 from .datasets import (
     Cell,
@@ -45,7 +47,7 @@ from .iam import (
     UserManager,
     UserOnboarding,
 )
-from .inference import DeployedModel, InferenceCall, ModelActivation
+from .inference import DedicatedDeployment, DeployedModel, InferenceCall, ModelActivation
 from .innermind import (
     EvalGenerationScheduler,
     EvalMatrix,
@@ -61,6 +63,7 @@ from .innermind import (
     SignalSubscription,
 )
 from .mcp_oauth import MCPOAuthClient, MCPOAuthGrant, MCPOAuthToken
+from .mcp_operations import EvalMatrixRevision, MCPMutation
 from .operations import InferenceRequest, OperationalEvent, OperationalRun
 from .optimizer import (
     OptimizerCandidate,
@@ -73,6 +76,11 @@ from .training_monitoring import TrainingCheckpoint, TrainingValidationRun
 from .training_plan import TrainingPlan
 
 __all__ = [
+    "MCPMutation",
+    "EvalMatrixRevision",
+    "Activity",
+    "ActivityRead",
+    "ActivityClient",
     "DocumentExtractionPage",
     "TrainingPlan",
     "TrainingCheckpoint",
@@ -110,6 +118,7 @@ __all__ = [
     "ConnectorSyncRun",
     "Dataset",
     "DatasetPipeline",
+    "DatasetPreparation",
     "DatasetPipelineRun",
     "DatasetPipelineBinding",
     "DatasetPipelinePackage",
@@ -137,6 +146,7 @@ __all__ = [
     "DecisionPerformanceRun",
     "DecisionPerformanceRequest",
     "NativeEvaluationPlan",
+    "DedicatedDeployment",
     "DeployedModel",
     "InferenceCall",
     "ModelActivation",

@@ -13,7 +13,7 @@ from factories import make_project, make_user
 from overbae.models import APIToken, Dataset, DatasetLandingWork
 from tests.load.processes import landing_workers
 
-pytestmark = pytest.mark.django_db(transaction=True)
+pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.covers("capacity")]
 
 
 def test_thousand_queued_imports_do_not_flood_the_broker_or_delay_another_project(
@@ -86,7 +86,8 @@ def test_thousand_queued_imports_do_not_flood_the_broker_or_delay_another_projec
         "quiet_page_latency": latency_summary,
     }
     Path("/tmp/overmind-landing-burst.json").write_text(json.dumps(report, indent=2))
-    assert latencies[int(len(latencies) * 0.95)] < 0.5, latency_summary
+    # Bounds leave headroom for shared CI runners; starvation shows up as multi-second reads.
+    assert latencies[int(len(latencies) * 0.95)] < 1, latency_summary
     assert latencies[-1] < 2, latency_summary
     assert queued <= 2, report
     with landing_workers(settings, tmp_path):

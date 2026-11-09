@@ -1,8 +1,10 @@
+// covers: privacy
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const posthogInit = vi.fn();
 const posthogCapture = vi.fn();
 const posthogIdentify = vi.fn();
+const posthogReset = vi.fn();
 const posthogCaptureException = vi.fn();
 
 vi.mock("posthog-js", () => ({
@@ -11,6 +13,7 @@ vi.mock("posthog-js", () => ({
     captureException: posthogCaptureException,
     identify: posthogIdentify,
     init: posthogInit,
+    reset: posthogReset,
   },
 }));
 
@@ -19,6 +22,9 @@ describe("self-hosted PostHog strip", () => {
     vi.unstubAllEnvs();
     vi.resetModules();
     posthogInit.mockClear();
+    posthogCapture.mockClear();
+    posthogIdentify.mockClear();
+    posthogReset.mockClear();
   });
 
   it("skips analytics.ts init when VITE_SELF_HOSTED is true", async () => {
@@ -28,11 +34,34 @@ describe("self-hosted PostHog strip", () => {
     expect(posthogInit).not.toHaveBeenCalled();
   });
 
-  it("skips posthog-provider init when VITE_SELF_HOSTED is true", async () => {
-    vi.stubEnv("VITE_SELF_HOSTED", "true");
+  it("initializes once and preserves events captured while the SDK loads", async () => {
+    vi.stubEnv("VITE_SELF_HOSTED", "false");
     vi.stubEnv("VITE_PUBLIC_POSTHOG_KEY", "phc_test");
+    vi.stubEnv("VITE_PUBLIC_POSTHOG_HOST", "https://analytics.example");
     vi.stubEnv("MODE", "production");
-    await import("./integrations/posthog-provider");
-    expect(posthogInit).not.toHaveBeenCalled();
+    const { identifyUser, resetUser, trackEvent } = await import("./analytics");
+    trackEvent("setup_prompt_copied", { project_id: "project-1" });
+    identifyUser({
+      clerkUserId: "user_123",
+      email: "user@example.com",
+      name: "Ada Lovelace",
+      userId: "user_123",
+    });
+    resetUser();
+    await vi.dynamicImportSettled();
+    expect(posthogInit).toHaveBeenCalledOnce();
+    expect(posthogInit).toHaveBeenCalledWith(
+      "phc_test",
+      expect.objectContaining({
+        api_host: "https://analytics.example",
+      })
+    );
+    expect(posthogCapture).toHaveBeenCalledWith("setup_prompt_copied", { project_id: "project-1" });
+    expect(posthogIdentify).toHaveBeenCalledWith("user_123", {
+      clerkUserId: "user_123",
+      email: "user@example.com",
+      name: "Ada Lovelace",
+    });
+    expect(posthogReset).toHaveBeenCalledOnce();
   });
 });
