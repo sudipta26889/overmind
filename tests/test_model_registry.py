@@ -6,6 +6,7 @@ from overbae.core.model_registry import (
     OPENROUTER_MODEL_SLUGS,
     ROLE_CHAINS,
     TaskType,
+    _role_chain,
     default_backtest_models,
     default_judge_model,
     model_chain,
@@ -88,3 +89,10 @@ def test_resolve_openrouter_slug_qualifies_bare_vendor_names():
     assert resolve_openrouter_slug("gpt-4o-mini") == "openai/gpt-4o-mini"
     assert resolve_openrouter_slug("acme/custom") == "acme/custom"
     assert resolve_openrouter_slug("mystery") == "mystery"
+
+
+def test_gpt_6_luna_is_in_the_catalog_for_the_self_hosted_gateway(monkeypatch):
+    # The self-hosted LiteLLM (db.lan) serves the fast tier as openai/gpt-6-luna, not gpt-5.6-luna.
+    assert pricing_slug("gpt-6-luna") == "openai/gpt-6-luna"
+    monkeypatch.setenv("LLM_EXPLAIN_CHAIN", "gpt-6-luna")
+    assert _role_chain("LLM_EXPLAIN_CHAIN", ("gpt-5-mini",)) == ("gpt-6-luna",)
