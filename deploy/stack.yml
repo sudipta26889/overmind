@@ -1,5 +1,6 @@
 # Production stack: a Git-backed Portainer stack on the NAS Portainer (endpoint 11 = NUC).
-# CI builds the images after main passes and fires the stack webhook.
+# CI builds the images after main passes, copies this file to the symlink-free branch
+# portainer-stack (Portainer's Git source, as stack.yml), and fires the stack webhook.
 # docker-compose.yml stays for development on the Mac.
 #
 # Portainer Git stacks cannot read an env_file, so every key in .env is listed below as

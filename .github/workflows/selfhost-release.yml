@@ -23,7 +23,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
     steps:
       - uses: actions/checkout@v4
@@ -47,6 +47,24 @@ jobs:
             -t "$CONSOLE_IMAGE:latest" -t "$CONSOLE_IMAGE:$sha" frontend
           docker push --all-tags "$API_IMAGE"
           docker push --all-tags "$CONSOLE_IMAGE"
+
+      # Portainer refuses to clone a repository containing a symlink, and .claude/skills is
+      # one, so the stack deploys from a branch that holds only the stack file.
+      - name: Publish the stack file to the Portainer branch
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: github-actions[bot]@users.noreply.github.com
+        run: |
+          git fetch -q --depth=1 origin portainer-stack
+          tree="$(printf '100644 blob %s\tstack.yml\n' "$(git rev-parse HEAD:deploy/stack.yml)" | git mktree)"
+          if [ "$tree" = "$(git rev-parse FETCH_HEAD^{tree})" ]; then
+            echo "Stack file unchanged"
+            exit 0
+          fi
+          commit="$(git commit-tree "$tree" -p FETCH_HEAD -m "Stack file from $(git rev-parse --short=7 HEAD)")"
+          git push origin "$commit:refs/heads/portainer-stack"
 
   deploy:
     needs: build-and-push
