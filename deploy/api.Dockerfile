@@ -4,3 +4,6 @@
 ARG BASE=overmind-dev
 FROM ${BASE}
 COPY deploy/minio-aws-config /code/.aws-minio/config
+# /health reports this, so the release workflow can tell the new containers from the old.
+ARG RELEASE_SHA
+ENV RELEASE_SHA=$RELEASE_SHA

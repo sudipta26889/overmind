@@ -41,6 +41,7 @@ jobs:
           sha="$(git rev-parse --short=7 HEAD)"
           docker build -t overmind-base .
           docker build -f deploy/api.Dockerfile --build-arg BASE=overmind-base \
+            --build-arg RELEASE_SHA="$(git rev-parse HEAD)" \
             -t "$API_IMAGE:latest" -t "$API_IMAGE:$sha" .
           docker build -f deploy/console.Dockerfile \
             --build-arg VITE_API_BASE_URL=https://overmind-api.sudiptadhara.in \
@@ -92,12 +93,17 @@ jobs:
           [ "${status:0:1}" = "2" ]
           echo "deployed=true" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for the API to report healthy
+      # Portainer answers the webhook before it redeploys, so a healthy API may still be the
+      # old containers until it reports this release.
+      - name: Wait for the API to report this release healthy
         if: steps.hook.outputs.deployed == 'true'
+        env:
+          RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
           for _ in $(seq 1 120); do
-            curl -fsS --max-time 10 https://overmind-api.sudiptadhara.in/health && exit 0
+            curl -fsS --max-time 10 https://overmind-api.sudiptadhara.in/health |
+              jq -e --arg release "$RELEASE_SHA" '.release == $release' && exit 0
             sleep 10
           done
-          echo "::error::API did not report healthy within 20 minutes"
+          echo "::error::API did not report release $RELEASE_SHA healthy within 20 minutes"
           exit 1

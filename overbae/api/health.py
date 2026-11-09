@@ -1,3 +1,5 @@
+import os
+
 from django.db import connection
 from drf_spectacular.utils import extend_schema
 from rest_framework.decorators import api_view, permission_classes
@@ -11,4 +13,4 @@ from rest_framework.response import Response
 def health_check(request):
     with connection.cursor() as cursor:
         cursor.execute("SELECT 1")
-    return Response({"status": "healthy"})
+    return Response({"status": "healthy", "release": os.environ.get("RELEASE_SHA", "")})
