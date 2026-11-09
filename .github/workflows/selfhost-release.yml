@@ -1,0 +1,85 @@
+name: Self-host Release
+
+# After CI passes on main: images to GHCR, then a Portainer redeploy of deploy/stack.yml.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: selfhost-release
+  cancel-in-progress: false
+
+env:
+  API_IMAGE: ghcr.io/sudipta26889/overmind-api
+  CONSOLE_IMAGE: ghcr.io/sudipta26889/overmind-console
+
+jobs:
+  build-and-push:
+    if: >-
+      github.repository == 'sudipta26889/overmind' &&
+      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        run: |
+          sha="$(git rev-parse --short=7 HEAD)"
+          docker build -t overmind-base .
+          docker build -f deploy/api.Dockerfile --build-arg BASE=overmind-base \
+            -t "$API_IMAGE:latest" -t "$API_IMAGE:$sha" .
+          docker build -f deploy/console.Dockerfile \
+            --build-arg VITE_API_BASE_URL=https://overmind-api.sudiptadhara.in \
+            -t "$CONSOLE_IMAGE:latest" -t "$CONSOLE_IMAGE:$sha" frontend
+          docker push --all-tags "$API_IMAGE"
+          docker push --all-tags "$CONSOLE_IMAGE"
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Trigger Portainer stack redeploy
+        id: hook
+        env:
+          # A credential: anyone holding this URL can redeploy the stack.
+          PORTAINER_WEBHOOK_URL: ${{ secrets.PORTAINER_WEBHOOK_URL }}
+        run: |
+          if [ -z "$PORTAINER_WEBHOOK_URL" ]; then
+            echo "::warning::PORTAINER_WEBHOOK_URL is not set; images are built but not deployed"
+            exit 0
+          fi
+          # A webhook that lands during a redeploy gets 409, so wait it out.
+          for _ in $(seq 1 20); do
+            status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              --retry 3 --retry-delay 5 --max-time 120 "$PORTAINER_WEBHOOK_URL")
+            echo "Portainer responded HTTP $status"
+            [ "$status" = "409" ] || break
+            sleep 30
+          done
+          [ "${status:0:1}" = "2" ]
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the API to report healthy
+        if: steps.hook.outputs.deployed == 'true'
+        run: |
+          for _ in $(seq 1 120); do
+            curl -fsS --max-time 10 https://overmind-api.sudiptadhara.in/health && exit 0
+            sleep 10
+          done
+          echo "::error::API did not report healthy within 20 minutes"
+          exit 1
