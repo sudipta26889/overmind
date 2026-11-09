@@ -118,9 +118,9 @@ def _setup(env: dict[str, str]) -> subprocess.CompletedProcess:
 
 
 def test_the_self_hosted_environment_boots_and_answers_health():
-    response = _health(_environment())
+    response = _health(_environment(RELEASE_SHA="abc1234"))
     assert response.status_code == 200, response.text
-    assert response.json() == {"status": "healthy"}
+    assert response.json() == {"status": "healthy", "release": "abc1234"}
 
 
 def test_the_hosted_environment_boots():
