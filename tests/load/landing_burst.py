@@ -69,7 +69,7 @@ def test_thousand_queued_imports_do_not_flood_the_broker_or_delay_another_projec
     assert DatasetLandingWork.objects.filter(project=noisy).count() == 1000
     target = submit(quiet, 0)
     broker = redis.from_url(settings.CELERY_BROKER_URL)
-    queued = broker.llen("landing")
+    queued = broker.llen("overmind:landing")
     latency_summary = {
         "samples": len(reads),
         "p95_seconds": latencies[int(len(latencies) * 0.95)],

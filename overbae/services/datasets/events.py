@@ -34,15 +34,15 @@ def _client(pid, url):
 
 
 def channel(dataset_id: Any) -> str:
-    return f"dataset:{dataset_id}"
+    return f"overmind:dataset:{dataset_id}"
 
 
 def _replay_key(dataset_id: Any) -> str:
-    return f"dataset:events:{dataset_id}"
+    return f"overmind:dataset:events:{dataset_id}"
 
 
 def _seq_key(dataset_id: Any) -> str:
-    return f"dataset:events:seq:{dataset_id}"
+    return f"overmind:dataset:events:seq:{dataset_id}"
 
 
 def publish(dataset_id: Any, event: dict[str, Any], *, client: Any = None) -> None:

@@ -74,7 +74,9 @@ def test_project_limits_are_shared_without_serializing_other_projects(settings):
         assert not pipeline_runner.take_slot(first, "three")
         pipeline_runner.release_slot(first, "one")
         assert pipeline_runner.take_slot(first, "three")
-        client.zadd(f"workshop:project:{first}:slots", {"two": 0})
+        client.zadd(f"overmind:workshop:project:{first}:slots", {"two": 0})
         assert pipeline_runner.take_slot(first, "after-expired-worker")
     finally:
-        client.delete(f"workshop:project:{first}:slots", f"workshop:project:{second}:slots")
+        client.delete(
+            f"overmind:workshop:project:{first}:slots", f"overmind:workshop:project:{second}:slots"
+        )

@@ -197,6 +197,13 @@ jobs:
       - name: Install document OCR runtime
         run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-spa
 
+      - name: Hold Redis to the keys the production ACL admits
+        # PSUBSCRIBE needs an exact match in the ACL, and Celery's two patterns name the db.
+        run: >-
+          uv run python -c "import redis; redis.Redis().execute_command('ACL', 'SETUSER', 'default',
+          'resetkeys', '~overmind:*', 'resetchannels', '&overmind:*',
+          *[f'&overmind:/{db}.{name}' for db in range(16) for name in ('celery.pidbox', 'celeryev/worker.*')])"
+
       - name: Run tests
         # Match local `make test`: xdist is already in the test dep group.
         run: uv run pytest tests/ -m 'not load' -n auto --dist worksteal -q
@@ -266,6 +273,13 @@ jobs:
 
       - name: Install document OCR runtime
         run: sudo apt-get update && sudo apt-get install -y tesseract-ocr tesseract-ocr-eng tesseract-ocr-osd tesseract-ocr-fra tesseract-ocr-spa
+
+      - name: Hold Redis to the keys the production ACL admits
+        # PSUBSCRIBE needs an exact match in the ACL, and Celery's two patterns name the db.
+        run: >-
+          uv run python -c "import redis; redis.Redis().execute_command('ACL', 'SETUSER', 'default',
+          'resetkeys', '~overmind:*', 'resetchannels', '&overmind:*',
+          *[f'&overmind:/{db}.{name}' for db in range(16) for name in ('celery.pidbox', 'celeryev/worker.*')])"
 
       - name: Run journeys
         run: make test-journeys test_args="--junitxml=journeys.xml -o junit_duration_report=call"

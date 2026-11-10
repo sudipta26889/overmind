@@ -68,7 +68,7 @@ def take_slot(project_id, owner):
         _client(settings.CELERY_BROKER_URL).eval(
             _TAKE_SLOT,
             1,
-            f"workshop:project:{project_id}:slots",
+            f"overmind:workshop:project:{project_id}:slots",
             now,
             now + TASK_SECONDS + 60,
             owner,
@@ -80,7 +80,9 @@ def take_slot(project_id, owner):
 
 def release_slot(project_id, owner):
     if settings.CELERY_BROKER_URL != "memory://":
-        _client(settings.CELERY_BROKER_URL).zrem(f"workshop:project:{project_id}:slots", owner)
+        _client(settings.CELERY_BROKER_URL).zrem(
+            f"overmind:workshop:project:{project_id}:slots", owner
+        )
 
 
 def heartbeat():

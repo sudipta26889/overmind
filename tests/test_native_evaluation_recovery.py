@@ -31,6 +31,7 @@ def evaluation(settings, monkeypatch, request):
         "default": {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
             "LOCATION": "redis://localhost:6379/15",
+            "KEY_PREFIX": "overmind",
         }
     }
     project = Project.objects.create(name="Recovery", slug="automatic-recovery")
