@@ -5,6 +5,8 @@ import os
 from celery import Celery
 from celery.signals import setup_logging
 
+import overbae.worker_watchdog  # noqa: F401 - connects its worker signal
+
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "overbae.settings")
 
 app = Celery("overbae")
