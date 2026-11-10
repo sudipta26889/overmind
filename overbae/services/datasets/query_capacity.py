@@ -70,7 +70,10 @@ def admitted(project_id):
         return
     client = _client(settings.CELERY_BROKER_URL)
     # Both reservations must use one Redis shard and one atomic admission decision.
-    keys = ["dataset-query:{admission}:global", f"dataset-query:{{admission}}:project:{project_id}"]
+    keys = [
+        "overmind:dataset-query:{admission}:global",
+        f"overmind:dataset-query:{{admission}}:project:{project_id}",
+    ]
     owner = uuid.uuid4().hex
     seconds = math.ceil(max(30, settings.DATASET_QUERY_TIMEOUT_SECONDS + 10))
     try:

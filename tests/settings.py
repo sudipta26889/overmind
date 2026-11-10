@@ -80,6 +80,7 @@ CACHES = {
         {
             "BACKEND": "django.core.cache.backends.redis.RedisCache",
             "LOCATION": _journey_cache_url(JOURNEY_REDIS_URL),
+            "KEY_PREFIX": "overmind",
         }
         if JOURNEY_REDIS_URL
         else {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}

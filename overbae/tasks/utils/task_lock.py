@@ -55,7 +55,7 @@ def hold_one_slot(lock_name: str, slots: int, *, timeout: int):
     while True:
         for slot in range(slots):
             lock = client.lock(
-                f"celery:lock:{lock_name}:{slot}",
+                f"overmind:celery:lock:{lock_name}:{slot}",
                 timeout=timeout,
                 blocking_timeout=0,
                 thread_local=False,
@@ -99,7 +99,7 @@ def acquire_task_lock(lock_name: str, *, timeout: int, blocking: bool = False, r
     client = _get_redis_client()
     # Not thread-local: the renewing thread extends with the acquiring thread's token.
     lock = client.lock(
-        f"celery:lock:{lock_name}", timeout=timeout, blocking_timeout=0, thread_local=False
+        f"overmind:celery:lock:{lock_name}", timeout=timeout, blocking_timeout=0, thread_local=False
     )
     stop = threading.Event()
 

@@ -80,7 +80,11 @@ def connected(context):
 
 
 def channel(project_id=None, user_id=None):
-    return f"activity:project:{project_id}" if project_id else f"activity:user:{user_id}"
+    return (
+        f"overmind:activity:project:{project_id}"
+        if project_id
+        else f"overmind:activity:user:{user_id}"
+    )
 
 
 def changed(project_id=None, user_id=None):
