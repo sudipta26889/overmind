@@ -29,7 +29,7 @@ This file is the playbook every task needs; Claude Code, Codex and Cursor read i
 - Platform model IDs (judges, generation, Jev) live in `overbae/core/model_registry.py`; the training and serving catalog lives in `overbae/modal/models.json`. Jev decisions use `overbae/core/decisions.py`.
 - Tenancy is project-scoped with no org layer. A view that accepts guest writes opts in with `guest_allowed = True`, never with a permission class or middleware.
 - OTLP ingest never creates a capability, a scan never deletes one, and `DELETE` is a soft delete. On OTLP spans, wire identity is `overmind.capability.id` alone.
-- Every Redis key and pub/sub channel starts with `overmind:`. The self-hosted ACL refuses anything else, and CI's Redis holds to the same rule.
+- Every Redis key and pub/sub channel starts with `overmind:`. The self-hosted ACL refuses anything else, and CI's Redis holds to the same rule. `PSUBSCRIBE` patterns must match the ACL exactly, so a new pattern needs an ACL change.
 - Celery routing must agree across `CELERY_TASK_ROUTES`, `make worker`, docker-compose and `docker/worker-topology.json`. Only prefork pools enforce `time_limit`. `tests/test_celery_topology.py` checks compose and `make worker` against the routes.
 - Native coding agents own interpretation, code and semantic work. The platform runs deterministic, lineage-bound operations and never invokes a platform planning or generation agent.
 - Work-starting operations take a project-scoped request key: an identical retry returns the same record, and a changed payload conflicts. An unknown provider acknowledgement is reconciled from its saved call ID, never resubmitted.
