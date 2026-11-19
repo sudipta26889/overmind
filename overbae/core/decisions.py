@@ -130,13 +130,21 @@ return 0
 
 
 @lru_cache(maxsize=4)
-def _redis(url: str):
+def redis_client(url: str):
     return redis.Redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
 
 
-def reserve_capacity(account: str, tokens: int, deadline: float) -> None:
+def cache_redis():
+    """The cache's Redis, or None when the cache is not Redis (a unit-test process)."""
     location = settings.CACHES["default"].get("LOCATION")
     if not isinstance(location, str) or not location.startswith(("redis://", "rediss://")):
+        return None
+    return redis_client(location)
+
+
+def reserve_capacity(account: str, tokens: int, deadline: float) -> None:
+    client = cache_redis()
+    if client is None:
         raise DecisionError("capacity_unavailable")
     try:
         rpm = int(os.environ.get("JEV_REQUESTS_PER_MINUTE", "1200"))
@@ -152,9 +160,7 @@ def reserve_capacity(account: str, tokens: int, deadline: float) -> None:
                 raise DecisionError("capacity_timeout")
             wait = (
                 float(
-                    _redis(location).eval(
-                        _RESERVE, 2, f"{key}:requests", f"{key}:tokens", rpm, tps, tokens
-                    )
+                    client.eval(_RESERVE, 2, f"{key}:requests", f"{key}:tokens", rpm, tps, tokens)
                 )
                 / 1000
             )
@@ -181,8 +187,8 @@ def merge_stats(attempts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def served_in_family(served: str, model: str) -> bool:
-    """OpenRouter answers ``typesafe/jev-1.14-<date>``; a gateway in front of it may answer
-    ``jev-1.14.0``. Either is the requested version; another version never is."""
+    """The gateway answers ``local/decision``, or a dated ``decision-<date>`` or ``decision.<n>``.
+    Any of them is the requested version; another model never is."""
     family = model.split("/", 1)[-1]
     served = served.split("/", 1)[-1]
     return served == family or served.startswith((family + "-", family + "."))

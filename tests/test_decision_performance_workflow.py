@@ -242,7 +242,7 @@ def test_early_performance_pins_first_snapshot_and_rejects_version_drift():
             "questions_per_request": 1,
         },
     )
-    changed = {**payload(), "model": "typesafe/jev-1.13-other"}
+    changed = {**payload(), "model": "local/decision-other"}
     with patch(
         "overbae.core.decisions.request_once", side_effect=[(payload(), {}), (changed, {})]
     ) as request:

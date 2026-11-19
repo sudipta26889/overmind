@@ -209,7 +209,7 @@ def test_experiment_records_training_overlap_with_calibration_without_quality_bl
                     "key": "external",
                     "name": "External",
                     "kind": "external",
-                    "model": "typesafe/jev-1.13",
+                    "model": "local/decision",
                 }
             ],
             baseline="external",

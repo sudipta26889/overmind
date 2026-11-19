@@ -278,7 +278,7 @@ def test_mcp_comparison_draft_requires_explicit_launch_and_resumes_after_reconne
                         "key": "external",
                         "name": "External",
                         "kind": "external",
-                        "model": "typesafe/jev-1.13",
+                        "model": "local/decision",
                     }
                 ],
                 "baseline": "external",

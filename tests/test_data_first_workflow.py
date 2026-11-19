@@ -152,8 +152,8 @@ def test_standalone_comparison_runs_three_participants_without_training_or_calib
                 "key": key,
                 "name": key,
                 "kind": "external",
-                "model": "typesafe/jev-1.13",
-                "served_model": "typesafe/jev-1.13-20260917",
+                "model": "local/decision",
+                "served_model": "local/decision-20260917",
             }
             for key in ("base", "candidate", "comparator")
         ],
@@ -243,8 +243,8 @@ def test_calibration_and_final_cannot_share_group_identity(settings):
                     "key": "base",
                     "name": "base",
                     "kind": "external",
-                    "model": "typesafe/jev-1.13",
-                    "served_model": "typesafe/jev-1.13-20260917",
+                    "model": "local/decision",
+                    "served_model": "local/decision-20260917",
                 }
             ],
             baseline="base",

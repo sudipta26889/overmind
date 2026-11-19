@@ -12,12 +12,14 @@ from django.core.cache import cache
 
 from overbae.core.llms import effective_max_tokens
 from overbae.core.model_registry import (
+    Role,
     TaskType,
     inference_models,
     judge_picker_models,
     openrouter_configured,
     pricing_slug,
     resolve_model,
+    role_enabled,
 )
 from overbae.innermind.evals import EXPLAIN_MAX_TOKENS, EXPLAIN_PROMPT_TOKENS
 from overbae.models import EvalMatrix, EvalRun, ModelRef
@@ -259,7 +261,7 @@ def check_context(
     judge_model: str = "",
 ) -> list[dict]:
     """One check per generation model, plus the explanation judge when the matrix has
-    llm rows. The judge reads the row and an answer of reference size."""
+    llm rows and the explain role is on. The judge reads the row and an answer of reference size."""
     if cell is None:
         return []
     project_id = dataset.project_id
@@ -269,7 +271,7 @@ def check_context(
         for target in targets
         if (found := generation_target(target, project_id=project_id, capability=capability))
     ]
-    if has_llm_rows:
+    if has_llm_rows and role_enabled(Role.EXPLAIN):
         checked.append(judge_target(judge_model, project_id=project_id))
     if not checked:
         return []

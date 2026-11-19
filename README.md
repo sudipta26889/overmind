@@ -75,16 +75,20 @@ The API refuses to start until every required key is set, and the error names ea
 
 | Required                                                        | Used for                                                                                                    |
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `OPENROUTER_API_KEY`                                            | Judges, evals, trace scoring, optimiser scoring, frontier inference                                         |
+| `OPENROUTER_API_KEY`                                            | Judges, evals, trace scoring and optimiser scoring, through the model gateway                               |
+| `OPENROUTER_BASE_URL`                                           | The OpenAI-compatible gateway that serves every model call                                                  |
+| `JEV_MODEL`                                                     | The decision model the gateway routes, e.g. `local/decision`                                                |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                          | Modal training and serving workers (set `MODAL_ENVIRONMENT` explicitly)                                     |
 | `INFERENCE_API_URL`, `INFERENCE_API_KEY`                        | Serving trained models — the endpoint printed by `modal deploy` and its shared secret                       |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET_NAME` | The fine-tuning checkpoint archive                                                                          |
 | `HF_TOKEN`                                                      | Gated Hugging Face base models; also set it in the Modal secret                                             |
 | `SANDBOX_URL`, `SANDBOX_TOKEN`                                  | The isolated Workshop sandbox; `.env.example` and compose set local values — change the token in production |
 
-| Optional            | Effect                                                                  |
-| ------------------- | ----------------------------------------------------------------------- |
-| `STRIPE_SECRET_KEY` | Paid plans and the credit cap; without it, usage is metered with no cap |
+| Optional                            | Effect                                                                            |
+| ----------------------------------- | --------------------------------------------------------------------------------- |
+| `STRIPE_SECRET_KEY`                 | Paid plans and the credit cap; without it, usage is metered with no cap           |
+| `LLM_FAST_CHAIN`, `LLM_AGENT_CHAIN` | Catalog names that serve judges and agent runs; an empty chain turns the role off |
+| `LLM_EXPLAIN_CHAIN`                 | Catalog names that write explanations of low scores; empty writes none            |
 
 Fine-tuning and serving also need the Modal workers deployed (`modal deploy overbae/modal/modal_vllm_worker.py`, `register_model.py` and `modal_sft_worker.py`; native decision models also use `modal_decision_evaluation.py` and `modal_decision_serving.py`) and a Modal secret named `overmind-inference` with the AWS keys, `INFERENCE_API_KEY` and `HF_TOKEN`.
 

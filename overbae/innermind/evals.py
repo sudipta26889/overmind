@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 
 from overbae.core.decisions import ChoiceQuestion, DecisionError, decide
 from overbae.core.llms import call_llm
-from overbae.core.model_registry import TaskType, model_chain, resolve_model
+from overbae.core.model_registry import Role, TaskType, model_chain, resolve_model, role_enabled
 from overbae.innermind import deterministic, evidence
 from overbae.innermind.metrics import REASON_BELOW, Metric
 from overbae.models import EvalMatrix, Span
@@ -171,6 +171,8 @@ class JevEvaluator(Evaluator):
         return Metric(expectation, score=score, verdict=answer.choice)
 
     async def explain(self, state: dict, metric: Metric) -> str:
+        if not role_enabled(Role.EXPLAIN):
+            return ""
         prompt = (
             f"An evaluator scored this {metric.score:.2f} out of 1 against its expectation.\n"
             "In one or two sentences, state the specific reason the output falls short. "

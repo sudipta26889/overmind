@@ -2,13 +2,16 @@ import pytest
 from pydantic import BaseModel
 
 from overbae.core.llms import (
-    EmbeddingUnavailableError,
     ModelSpec,
     call_llm,
     call_llm_tools,
-    get_embedding,
 )
-from overbae.core.model_registry import CATALOG, MODELS_BY_NAME, reasoning_of
+from overbae.core.model_registry import (
+    CATALOG,
+    MODELS_BY_NAME,
+    OPENROUTER_BASE_URL,
+    reasoning_of,
+)
 
 pytestmark = pytest.mark.covers("llm-gateway")
 
@@ -37,7 +40,7 @@ def test_call_llm_uses_the_default_model_and_reports_usage(fake_llm):
     assert content == "ok"
     assert stats["prompt_tokens"] > 0
     assert stats["response_cost"] == 0.001
-    assert fake_llm.requests[-1].model.startswith("openai/")
+    assert fake_llm.requests[-1].model == "recursivesi/flint"
 
 
 @pytest.mark.parametrize("cost", [None, 0.0, 0.001])
@@ -94,38 +97,39 @@ def test_catalog_models_route_through_openrouter(fake_llm, only_openrouter, argu
     assert "cache_control" not in request.body
 
 
-@pytest.mark.parametrize(
-    ("spec", "env", "url"),
-    [
-        (
-            ModelSpec(provider="together", model_id="ft-model"),
-            "TOGETHER_API_KEY",
-            "https://api.together.xyz/v1/chat/completions",
-        ),
-        (
-            ModelSpec(
-                provider="custom",
-                model_id="ft-model",
-                base_url="https://models.example.test/v1",
-                api_key_env="CUSTOM_MODEL_KEY",
-            ),
-            "CUSTOM_MODEL_KEY",
-            "https://models.example.test/v1/chat/completions",
-        ),
-    ],
-    ids=["together", "custom"],
-)
-def test_openai_compatible_specs_call_their_own_endpoint(fake_llm, monkeypatch, spec, env, url):
-    monkeypatch.setenv(env, "provider-key")
+def test_a_custom_spec_on_the_gateway_calls_its_endpoint(fake_llm, monkeypatch):
+    monkeypatch.setenv("CUSTOM_MODEL_KEY", "provider-key")
+    spec = ModelSpec(
+        provider="custom",
+        model_id="ft-model",
+        base_url=f"{OPENROUTER_BASE_URL}/",
+        api_key_env="CUSTOM_MODEL_KEY",
+    )
     call_llm("hello", model_spec=spec)
     request = fake_llm.requests[-1]
-    assert request.url == url
+    assert request.url == f"{OPENROUTER_BASE_URL}/chat/completions"
     assert request.model == "ft-model"
 
 
-def test_get_embedding_fails_fast_without_openai_key(only_openrouter):
-    with pytest.raises(EmbeddingUnavailableError):
-        get_embedding("hello")
+@pytest.mark.parametrize(
+    "spec",
+    [
+        ModelSpec(provider="together", model_id="ft-model"),
+        ModelSpec(
+            provider="custom",
+            model_id="ft-model",
+            base_url="https://models.example.test/v1",
+            api_key_env="CUSTOM_MODEL_KEY",
+        ),
+    ],
+    ids=["together", "custom-off-gateway"],
+)
+def test_a_model_the_gateway_does_not_serve_sends_nothing(fake_llm, monkeypatch, spec):
+    monkeypatch.setenv("CUSTOM_MODEL_KEY", "provider-key")
+    monkeypatch.setenv("TOGETHER_API_KEY", "provider-key")
+    with pytest.raises(RuntimeError):
+        call_llm("hello", model_spec=spec)
+    assert fake_llm.requests == []
 
 
 @pytest.mark.parametrize(("status", "message"), [(429, "rate limited"), (500, "server exploded")])

@@ -608,9 +608,6 @@ CELERY_BEAT_SCHEDULE = {
     },
 }
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 
 # Feedback-channel incoming webhook; blank disables the notification.
@@ -766,6 +763,8 @@ _REQUIRED_KEYS = {
     "SANDBOX_URL": "the isolated Workshop sandbox",
     "SANDBOX_TOKEN": "the isolated Workshop sandbox",
     "OPENROUTER_API_KEY": "judges, evals, trace scoring and the Data Workshop",
+    "OPENROUTER_BASE_URL": "the model gateway that serves every model call",
+    "JEV_MODEL": "the decision model the gateway routes",
     "MODAL_TOKEN_ID": "Modal training and serving workers",
     "MODAL_TOKEN_SECRET": "Modal training and serving workers",
     "INFERENCE_API_URL": "the Modal serving endpoint",

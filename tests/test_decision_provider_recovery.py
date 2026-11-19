@@ -31,8 +31,8 @@ def fixture():
         "key": "external",
         "name": "External",
         "kind": "external",
-        "model": "typesafe/jev-1.13",
-        "served_model": "typesafe/jev-1.13-20260917",
+        "model": "local/decision",
+        "served_model": "local/decision-20260917",
     }
     with patch(
         "overbae.services.native_evaluation.runtime",
@@ -52,7 +52,7 @@ def fixture():
 def payload():
     return {
         "id": "provider-record",
-        "model": "typesafe/jev-1.13-20260917",
+        "model": "local/decision-20260917",
         "provider": "TypeSafe",
         "usage": {"cost": 0.002, "input_tokens": 20, "output_tokens": 10},
         "answers": {

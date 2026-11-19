@@ -63,8 +63,8 @@ def evaluation(settings, monkeypatch, request):
                 "key": "external",
                 "name": "External",
                 "kind": "external",
-                "model": "typesafe/jev-1.13",
-                "served_model": "typesafe/jev-1.13-20260917",
+                "model": "local/decision",
+                "served_model": "local/decision-20260917",
             }
         ],
         baseline="external",
@@ -82,7 +82,7 @@ def answer():
     return {
         "id": "response",
         "provider": "TypeSafe",
-        "model": "typesafe/jev-1.13-20260917",
+        "model": "local/decision-20260917",
         "usage": {"cost": 0.002},
         "answers": {
             "decision": {"type": "choice", "choice": "0", "probabilities": {"0": 0.9, "1": 0.1}}

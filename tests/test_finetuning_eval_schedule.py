@@ -559,7 +559,7 @@ def test_api_persists_all_four_choices_and_incumbent_snapshot(job):
 
 
 def test_selected_judge_is_persisted_and_frozen_without_editing_the_set(job):
-    selected = "gpt-5.6-luna"
+    selected = "flint"
     serializer = serializer_for(job, eval_judge_model=selected)
     assert serializer.is_valid(), serializer.errors
     assert serializer.save().eval_judge_model == selected

@@ -13,7 +13,7 @@ pytestmark = pytest.mark.covers("llm-gateway")
 
 
 @pytest.fixture
-def heartbeat_provider():
+def heartbeat_provider(settings):
     disconnected = threading.Event()
     requests = []
 
@@ -69,6 +69,7 @@ def heartbeat_provider():
     thread.start()
     try:
         url = f"http://127.0.0.1:{server.server_port}/v1"
+        settings.INFERENCE_API_URL = url
         call_llm(
             "warmup",
             model_spec=ModelSpec(
