@@ -4,36 +4,21 @@ import math
 from datetime import timedelta
 from unittest.mock import patch
 
-import httpx
 import pytest
 from conftest import frozen_dataset
 from django.utils import timezone
 
-from modal_shared.decision_inference import input_digest
-from overbae.models import DecisionProviderRequest, Project
+from overbae.models import Project
 from overbae.services import (
-    decision_providers,
-    model_workflows,
     native_evaluation,
-    native_evaluation_monitor,
 )
-from overbae.tasks.native_evaluation import advance_plan, reconcile
+from overbae.tasks.native_evaluation import advance_plan
 
 pytestmark = [pytest.mark.django_db, pytest.mark.covers("recovery")]
 
 
 @pytest.fixture
-def evaluation(settings, monkeypatch, request):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "recovery-test-key")
-    monkeypatch.setenv("JEV_REQUESTS_PER_MINUTE", "10000000")
-    monkeypatch.setenv("JEV_TOKENS_PER_SECOND", "10000000")
-    settings.CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": "redis://localhost:6379/15",
-            "KEY_PREFIX": "overmind",
-        }
-    }
+def evaluation():
     project = Project.objects.create(name="Recovery", slug="automatic-recovery")
     cell = frozen_dataset(
         project,
@@ -49,7 +34,7 @@ def evaluation(settings, monkeypatch, request):
                 },
                 "expected_output": {"probabilities": [1, 0]},
             }
-            for i in range(getattr(request, "param", 2))
+            for i in range(2)
         ],
         contract="eval",
     ).active_cell
@@ -59,15 +44,9 @@ def evaluation(settings, monkeypatch, request):
         request_key="recover",
         final_cell=cell,
         participants=[
-            {
-                "key": "external",
-                "name": "External",
-                "kind": "external",
-                "model": "local/decision",
-                "served_model": "local/decision-20260917",
-            }
+            {"key": "base", "name": "Base", "kind": "foundation", "model": "Qwen/Qwen3.5-4B"}
         ],
-        baseline="external",
+        baseline="base",
         bootstrap_samples=2,
         inference={"concurrency": 1},
     )
@@ -78,189 +57,10 @@ def evaluation(settings, monkeypatch, request):
     return plan
 
 
-def answer():
-    return {
-        "id": "response",
-        "provider": "TypeSafe",
-        "model": "local/decision-20260917",
-        "usage": {"cost": 0.002},
-        "answers": {
-            "decision": {"type": "choice", "choice": "0", "probabilities": {"0": 0.9, "1": 0.1}}
-        },
-    }
-
-
-def retry_due(plan, stage="final_external"):
+def retry_due(plan, stage):
     plan.refresh_from_db()
     plan.calls[stage]["retry_at"] = (timezone.now() - timedelta(seconds=1)).isoformat()
     plan.save()
-
-
-def test_explicit_rate_limit_retries_only_rejected_prediction_and_finishes(evaluation, scripted):
-    plan = evaluation
-    provider = scripted("https://openrouter.ai/api/v1/systemone")
-    provider.reply(429).reply(json_body=answer())
-    native_evaluation.advance(plan.pk, stage="final_external")
-    plan.refresh_from_db()
-    assert plan.state == "running"
-    assert plan.calls["final_external"]["state"] == "retrying"
-    assert plan.requests.filter(state="completed").count() == 1
-    assert not model_workflows.guidance("native_evaluation", plan)["input_required"]
-    native_evaluation.advance(plan.pk, stage="final_external")
-    assert len(provider.calls) == 2  # Backoff does not occupy a worker or replay work.
-    retry_due(plan)
-    with patch.object(advance_plan, "delay") as dispatch:
-        reconcile()
-    assert str(plan.pk) in [call.args[0] for call in dispatch.call_args_list]
-    native_evaluation.advance(plan.pk, stage="final_external")
-    native_evaluation.advance(plan.pk, stage="score")
-    plan.refresh_from_db()
-    assert plan.state == "completed", plan.error
-    assert len(provider.calls) == 3
-    assert plan.requests.filter(state="completed").count() == 2
-    assert sorted(len(r.attempts) for r in plan.requests.all()) == [1, 2]
-    assert plan.results["costs"]["external"]["unknown_api_attempts"] == 0
-    assert plan.results["costs"]["external"]["recorded_evaluation_api_usd"] == pytest.approx(0.004)
-
-
-def test_exhausted_recovery_completes_with_missing_coverage(evaluation, scripted):
-    plan = evaluation
-    provider = scripted("https://openrouter.ai/api/v1/systemone").reply(429)
-    for _ in range(3):
-        native_evaluation.advance(plan.pk, stage="final_external")
-        retry_due(plan)
-    plan.refresh_from_db()
-    native_evaluation.advance(plan.pk, stage="score")
-    plan.refresh_from_db()
-    assert plan.state == "completed", plan.error
-    completion = plan.results["completion"]
-    assert completion["status"] == "completed_with_issues"
-    assert completion["coverage"]["final"]["external"] == {
-        "expected": 2,
-        "scored": 0,
-        "missing_predictions": 2,
-        "invalid_predictions": 0,
-        "incompatible_inputs": 0,
-    }
-    assert completion["issues"]
-    assert not plan.results["comparisons"]["external"]["raw"]["macro_across_benchmarks"]
-    assert all(len(r.attempts) == 3 for r in plan.requests.all())
-    native_evaluation.advance(plan.pk)
-    assert len(provider.calls) == 6
-
-
-def test_permanent_provider_failure_does_not_retry(evaluation, scripted):
-    provider = scripted("https://openrouter.ai/api/v1/systemone").reply(401)
-    native_evaluation.advance(evaluation.pk, stage="final_external")
-    evaluation.refresh_from_db()
-    native_evaluation.advance(evaluation.pk, stage="score")
-    evaluation.refresh_from_db()
-    assert evaluation.state == "completed"
-    assert evaluation.results["completion"]["status"] == "completed_with_issues"
-    native_evaluation.advance(evaluation.pk, stage="final_external")
-    assert len(provider.calls) == 2
-
-
-@pytest.mark.parametrize("baseline_success", [False, True])
-def test_partial_baseline_keeps_other_scores_and_only_pairs_available_rows(
-    evaluation, scripted, baseline_success
-):
-    plan = evaluation
-    plan.config["participants"].append(
-        {**plan.config["participants"][0], "key": "other", "name": "Other"}
-    )
-    plan.save()
-    provider = scripted("https://openrouter.ai/api/v1/systemone")
-    provider.reply(429)
-    if baseline_success:
-        provider.reply(json_body=answer())
-    else:
-        provider.reply(429)
-    native_evaluation.advance(plan.pk, stage="final_external")
-    provider.reply(429).reply(429)
-    for _ in range(2):
-        retry_due(plan)
-        native_evaluation.advance(plan.pk, stage="final_external")
-    provider.reply(json_body=answer())
-    native_evaluation.advance(plan.pk, stage="final_other")
-    native_evaluation.advance(plan.pk, stage="score")
-    plan.refresh_from_db()
-    assert plan.state == "completed", plan.error
-    completion = plan.results["completion"]
-    assert completion["coverage"]["final"]["external"]["scored"] == int(baseline_success)
-    assert completion["coverage"]["final"]["other"]["scored"] == 2
-    compared = plan.results["comparisons"]["other"]["raw"]
-    assert sum(b["paired_decisions"] for b in compared["benchmarks"].values()) == int(
-        baseline_success
-    )
-    assert len(provider.calls) == 8 - 2 * int(baseline_success)
-
-
-def test_saved_timeout_receipt_resumes_other_inputs_without_replaying_unknown(evaluation, scripted):
-    plan = evaluation
-    source = native_evaluation.seal_suite(plan, "final")
-    request = next(native_evaluation.records(source))
-    DecisionProviderRequest.objects.create(
-        plan=plan,
-        participant="external",
-        role="final",
-        input_sha256=request["input_sha256"],
-        state="submission_unknown",
-        error="submission_unknown",
-        attempts=[
-            {
-                "intent_at": timezone.now().isoformat(),
-                "error": "submission_unknown",
-                "usage": {"response_cost": None},
-            }
-        ],
-    )
-    plan.state = "submission_unknown"
-    plan.calls["final_external"] = {"state": "submission_unknown"}
-    plan.save()
-    provider = scripted("https://openrouter.ai/api/v1/systemone").reply(json_body=answer())
-    native_evaluation.resume(plan)
-    native_evaluation.advance(plan.pk, stage="final_external")
-    plan.refresh_from_db()
-    assert plan.calls["final_external"]["state"] == "completed"
-    assert plan.requests.filter(state="submission_unknown").count() == 1
-    assert len(provider.calls) == 1
-    assert (
-        plan.requests.get(input_sha256=input_digest(request["decision"])).attempts[0]["usage"][
-            "response_cost"
-        ]
-        is None
-    )
-
-
-@pytest.mark.parametrize("state", ["paused", "submission_unknown"])
-def test_orphaned_external_intent_resumes_other_inputs_without_replay(evaluation, scripted, state):
-    plan = evaluation
-    row = next(
-        native_evaluation.records(native_evaluation.directory(plan, "final") / "inputs.jsonl")
-    )
-    record = DecisionProviderRequest.objects.create(
-        plan=plan,
-        participant="external",
-        role="final",
-        input_sha256=row["input_sha256"],
-        state="submitting",
-        attempts=[{"usage": {"response_cost": None}}],
-    )
-    plan.state = state
-    plan.calls["final_external"] = {"state": "submission_unknown"}
-    plan.save()
-    provider = scripted("https://openrouter.ai/api/v1/systemone").reply(json_body=answer())
-    native_evaluation.resume(plan, stage="final_external")
-    native_evaluation.advance(plan.pk, stage="final_external")
-    native_evaluation.advance(plan.pk, stage="score")
-    plan.refresh_from_db()
-    record.refresh_from_db()
-    assert plan.state == "completed", plan.error
-    assert record.state == "submission_unknown"
-    assert len(record.attempts) == 1
-    assert len(provider.calls) == 1
-    assert plan.results["completion"]["coverage"]["final"]["external"]["missing_predictions"] == 1
 
 
 def test_native_collection_recovers_same_call_without_new_submission(evaluation, fake_modal):
@@ -353,46 +153,6 @@ def test_exhausted_native_collection_scores_only_verified_progress(
     assert fake_modal.spawns() == []
 
 
-def test_incomplete_calibration_does_not_block_final_raw_scores(evaluation, scripted):
-    plan = evaluation
-    plan.calibration_cell = plan.final_cell
-    plan.config["suites"]["calibration"] = plan.config["suites"]["final"]
-    plan.save()
-    provider = scripted("https://openrouter.ai/api/v1/systemone").reply(401).reply(401)
-    native_evaluation.advance(plan.pk, stage="calibration_external")
-    native_evaluation.advance(plan.pk, stage="fit_calibration")
-    provider.reply(json_body=answer())
-    native_evaluation.advance(plan.pk, stage="final_external")
-    native_evaluation.advance(plan.pk, stage="score")
-    plan.refresh_from_db()
-    assert plan.state == "completed", plan.error
-    assert plan.calibration["arms"] == {}
-    assert "external" in plan.calibration["unavailable"]
-    assert set(plan.results["comparisons"]["external"]) == {"raw"}
-    assert plan.results["completion"]["coverage"]["final"]["external"]["scored"] == 2
-
-
-@pytest.mark.parametrize("evaluation", [130], indirect=True)
-def test_failed_input_does_not_skip_later_chunks(evaluation, scripted):
-    def respond(call):
-        if call.json["state"] == "Evidence 0":
-            return httpx.ReadTimeout("offline")
-        return 200, {"content-type": "application/json"}, json.dumps(answer()).encode()
-
-    provider = scripted("https://openrouter.ai/api/v1/systemone").then(respond)
-    for _ in range(3):
-        native_evaluation.advance(evaluation.pk, stage="final_external")
-        retry_due(evaluation)
-    native_evaluation.advance(evaluation.pk, stage="final_external")
-    native_evaluation.advance(evaluation.pk, stage="score")
-    evaluation.refresh_from_db()
-    assert evaluation.state == "completed", evaluation.error
-    counts = evaluation.results["completion"]["coverage"]["final"]["external"]
-    assert counts["scored"] == 129
-    assert counts["missing_predictions"] == 1
-    assert len(provider.calls) == 130
-
-
 def test_exhausted_native_preparation_does_not_submit_dependent_work(evaluation, fake_modal):
     plan = evaluation
     plan.config["participants"] = [
@@ -411,41 +171,6 @@ def test_exhausted_native_preparation_does_not_submit_dependent_work(evaluation,
     assert plan.state == "completed", plan.error
     assert plan.results["completion"]["coverage"]["final"]["base"]["scored"] == 0
     assert fake_modal.spawns() == []
-
-
-def test_partial_export_keeps_external_responses_not_yet_in_monitor(evaluation, scripted):
-    scripted("https://openrouter.ai/api/v1/systemone").reply(json_body=answer())
-    decision_providers.external_step(evaluation, "final", evaluation.config["participants"][0])
-    receipt = native_evaluation_monitor.retain_partial(evaluation, "final_external")
-    assert receipt["partial"]
-    path = native_evaluation.directory(evaluation, "final") / "external.jsonl"
-    assert len(list(native_evaluation.records(path))) == 2
-
-
-def test_paused_retry_does_not_restart(evaluation, scripted):
-    provider = scripted("https://openrouter.ai/api/v1/systemone").reply(429)
-    native_evaluation.advance(evaluation.pk, stage="final_external")
-    retry_due(evaluation)
-    native_evaluation.pause(evaluation)
-    native_evaluation.advance(evaluation.pk, stage="final_external")
-    assert len(provider.calls) == 2
-
-
-def test_retry_does_not_block_an_independent_participant(evaluation, scripted):
-    plan = evaluation
-    plan.config["participants"].append(
-        {**plan.config["participants"][0], "key": "other", "name": "Other"}
-    )
-    plan.save()
-    provider = scripted("https://openrouter.ai/api/v1/systemone")
-    provider.reply(429).reply(429).reply(json_body=answer())
-    native_evaluation.advance(plan.pk, stage="final_external")
-    native_evaluation.advance(plan.pk, stage="final_other")
-    plan.refresh_from_db()
-    assert plan.state == "running"
-    assert plan.calls["final_external"]["state"] == "retrying"
-    assert plan.calls["final_other"]["state"] == "completed"
-    assert len(provider.calls) == 4
 
 
 def test_invalid_local_input_stays_failed(evaluation):

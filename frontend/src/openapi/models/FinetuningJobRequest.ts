@@ -80,7 +80,7 @@ export interface FinetuningJobRequest {
      * @type {string}
      * @memberof FinetuningJobRequest
      */
-    evalJudgeModel?: FinetuningJobRequestEvalJudgeModelEnum;
+    evalJudgeModel?: string;
     /**
      *
      * @type {Array<string>}
@@ -197,21 +197,6 @@ export interface FinetuningJobRequest {
     maxRetries?: number;
 }
 
-
-/**
- * @export
- */
-export const FinetuningJobRequestEvalJudgeModelEnum = {
-    gpt_5_6_luna: 'gpt-5.6-luna',
-    gpt_5_6_terra: 'gpt-5.6-terra',
-    claude_sonnet_5: 'claude-sonnet-5',
-    claude_haiku_4_5: 'claude-haiku-4-5',
-    gemini_3_1_pro_preview: 'gemini-3.1-pro-preview',
-    gemini_3_8_flash: 'gemini-3.8-flash',
-    deepseek_v3_2: 'deepseek-v3.2',
-    empty: ''
-} as const;
-export type FinetuningJobRequestEvalJudgeModelEnum = typeof FinetuningJobRequestEvalJudgeModelEnum[keyof typeof FinetuningJobRequestEvalJudgeModelEnum];
 
 /**
  * @export

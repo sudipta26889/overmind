@@ -9,8 +9,9 @@ from typing import Any
 
 from asgiref.sync import sync_to_async
 
-from overbae.core.decisions import DecisionError
+from overbae.core.model_registry import Role
 from overbae.innermind import generation
+from overbae.innermind.evals import JudgeUnavailableError
 from overbae.innermind.span_processor import EVAL_SCORE_BATCH, SpanProcessor
 from overbae.models import EvalMatrix, EvalRun, EvalRunRow, EvalScore, Span
 from overbae.services.datasets import rows as row_store
@@ -29,6 +30,8 @@ def as_attribute(value: Any) -> str:
 
 class DatasetRowProcessor(SpanProcessor):
     span_name = "dataset_row"
+    # A person started this run, so its judge is the remote one, not the live local judge.
+    judge_role = Role.FAST
 
     def __init__(self, run: EvalRun):
         super().__init__(run.project_id, run.judge_model)
@@ -92,10 +95,10 @@ async def score_rows(run: EvalRun) -> int:
                 async with slots:
                     await processor.evaluate(span, matrix, fallback_intent=fallback)
                 break
-            except DecisionError as exc:
+            except JudgeUnavailableError as exc:
                 if attempt + 1 == ROW_ATTEMPTS:
                     await EvalRunRow.objects.filter(pk=run_row.pk).aupdate(
-                        error=f"scoring failed: Jev {exc.reason}"
+                        error=f"scoring failed: judge unavailable ({exc})"
                     )
                     return None
                 await asyncio.sleep(RETRY_SECONDS * 2**attempt)

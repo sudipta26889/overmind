@@ -6,6 +6,7 @@ import time
 import uuid
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
@@ -29,13 +30,12 @@ from tenacity import (
 from modal_shared.context_budget import INCOMPLETE_FINISH_REASONS
 from modal_shared.modelfam import serve_image_key
 from modal_shared.shared import routing_headers as _modal_routing_headers
-from overbae.core.decisions import cache_redis
 from overbae.core.model_registry import (
     OPENROUTER_BASE_URL,
     PROVIDERS,
     Provider,
     TaskType,
-    is_decision_model,
+    is_single_stream,
     normalize_model_name,
     openrouter_slug,
     reasoning_of,
@@ -95,7 +95,7 @@ class IncompleteCompletionError(RuntimeError):
 _SDK_RETRIES = 0
 
 
-def _provider_client(provider: str | Provider) -> AsyncOpenAI:
+def _provider_client(provider: str | Provider, timeout: float = _REQUEST_TIMEOUT) -> AsyncOpenAI:
     provider = PROVIDERS[provider] if isinstance(provider, str) else provider
     api_key = provider.key()
     if not api_key:
@@ -104,7 +104,7 @@ def _provider_client(provider: str | Provider) -> AsyncOpenAI:
         api_key=api_key,
         base_url=provider.base_url,
         default_headers=provider.headers or None,
-        timeout=_REQUEST_TIMEOUT,
+        timeout=timeout,
         max_retries=_SDK_RETRIES,
     )
 
@@ -274,40 +274,56 @@ class _WaitHonouringRetryAfter:
 _LLM_WAIT = _WaitHonouringRetryAfter(wait_exponential_jitter(initial=1, max=60, jitter=5))
 
 
+@lru_cache(maxsize=4)
+def _redis_client(url: str):
+    return redis.Redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+
+
+def cache_redis():
+    """The cache's Redis, or None when the cache is not Redis (a unit-test process)."""
+    location = settings.CACHES["default"].get("LOCATION")
+    if not isinstance(location, str) or not location.startswith(("redis://", "rediss://")):
+        return None
+    return _redis_client(location)
+
+
 class LLMBusyError(RuntimeError):
     """Flint serves one stream for the whole fleet and another caller held it past this deadline."""
 
 
-FLINT_SLUG = "recursivesi/flint"
-_FLINT_LOCK = "overmind:llm:flint:lock"
-_FLINT_LOCK_MS = 300_000
+# A single-stream model answers slowly, so its request gets this long, and the lock that
+# serializes callers outlives it.
+SINGLE_STREAM_TIMEOUT = 300.0
+_SINGLE_STREAM_LOCK = "overmind:llm:single-stream:{}"
+_LOCK_MS = int((SINGLE_STREAM_TIMEOUT + 30) * 1000)
 _RELEASE = (
     "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0"
 )
 
 
 @contextmanager
-def _one_stream(slug: str, wait_seconds: float):
-    """Serializes calls to Flint across processes. Without a Redis cache (a unit-test process)
-    there is nothing to share, so the call runs unlocked."""
-    client = cache_redis() if slug == FLINT_SLUG else None
+def _one_stream(model_name: str, wait_seconds: float):
+    """Serializes calls to a single-stream model across processes. Without a Redis cache
+    (a unit-test process) there is nothing to share, so the call runs unlocked."""
+    client = cache_redis() if is_single_stream(model_name) else None
     if client is None:
         yield
         return
+    key = _SINGLE_STREAM_LOCK.format(model_name)
     token = uuid.uuid4().hex
     give_up = time.monotonic() + max(wait_seconds, 0)
     try:
-        while not client.set(_FLINT_LOCK, token, nx=True, px=_FLINT_LOCK_MS):
+        while not client.set(key, token, nx=True, px=_LOCK_MS):
             if time.monotonic() >= give_up:
-                raise LLMBusyError("Flint is serving another request")
+                raise LLMBusyError(f"{model_name} is serving another request")
             time.sleep(0.25)
     except redis.RedisError as exc:
-        raise LLMBusyError("Flint's lock is unavailable") from exc
+        raise LLMBusyError(f"The lock for {model_name} is unavailable") from exc
     try:
         yield
     finally:
         with suppress(redis.RedisError):
-            client.eval(_RELEASE, 1, _FLINT_LOCK, token)
+            client.eval(_RELEASE, 1, key, token)
 
 
 class CompletionDeadlineExceededError(TimeoutError):
@@ -545,16 +561,8 @@ def call_llm(
     fallback_models: list[str] | None = None,
     retry_deadline: float = RETRY_DEADLINE_BACKGROUND,
     max_attempts: int | None = None,
+    lock_wait: float | None = None,
 ) -> tuple[str, dict]:
-    if any(
-        is_decision_model(name)
-        for name in [
-            model or "",
-            model_spec.model_id if model_spec else "",
-            *(fallback_models or []),
-        ]
-    ):
-        raise ValueError("Decision models require typed questions through the decision transport.")
     if request_kwargs is None:
         request_kwargs = {}
 
@@ -615,7 +623,10 @@ def call_llm(
 
         selected_model_name = normalize_model_name(model) if model else _get_default_model()
         selected_model = openrouter_slug(selected_model_name)
-        client = _openrouter_client()
+        client = _provider_client(
+            "openrouter",
+            SINGLE_STREAM_TIMEOUT if is_single_stream(selected_model_name) else _REQUEST_TIMEOUT,
+        )
 
         completion_kwargs: dict = {
             "model": selected_model,
@@ -651,7 +662,10 @@ def call_llm(
         if chain:
             completion_kwargs["extra_body"]["models"] = chain
 
-        with _one_stream(selected_model, retry_deadline):
+        with _one_stream(
+            selected_model_name,
+            retry_deadline if lock_wait is None else min(retry_deadline, lock_wait),
+        ):
             response = _do_openai_completion(
                 client, completion_kwargs, request_kwargs, retry_deadline, max_attempts
             )
@@ -719,10 +733,17 @@ def call_llm_tools(
     completion_kwargs, selected = _tool_completion_kwargs(
         messages, tools, model, max_tokens, fallback_models
     )
+    model_name = normalize_model_name(model) if model else _get_default_model()
     try:
-        with _one_stream(selected, retry_deadline):
+        with _one_stream(model_name, retry_deadline):
             response = _do_openai_completion(
-                _provider_client("openrouter"), completion_kwargs, {}, retry_deadline
+                _provider_client(
+                    "openrouter",
+                    SINGLE_STREAM_TIMEOUT if is_single_stream(model_name) else _REQUEST_TIMEOUT,
+                ),
+                completion_kwargs,
+                {},
+                retry_deadline,
             )
     except (SoftTimeLimitExceeded, LLMBusyError):
         raise

@@ -144,7 +144,6 @@ def test_health_fails_when_the_database_is_unreachable():
         ("INFERENCE_API_KEY", "INFERENCE_API_KEY"),
         ("OPENROUTER_API_KEY", "OPENROUTER_API_KEY"),
         ("OPENROUTER_BASE_URL", "OPENROUTER_BASE_URL"),
-        ("JEV_MODEL", "JEV_MODEL"),
     ],
 )
 def test_a_missing_required_variable_stops_startup_and_is_named(blank, named):

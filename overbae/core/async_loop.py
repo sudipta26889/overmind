@@ -60,4 +60,11 @@ async def _guarded[T](coro: Coroutine[object, object, T]) -> T:
 
 def run[T](coro: Coroutine[object, object, T]) -> T:
     """Runs ``coro`` on the worker's shared loop and blocks for its result."""
-    return asyncio.run_coroutine_threadsafe(_guarded(coro), _ensure_loop()).result()
+    future = asyncio.run_coroutine_threadsafe(_guarded(coro), _ensure_loop())
+    try:
+        return future.result()
+    except BaseException:
+        # A worker's soft time limit lands here, not in the coroutine. Cancelling it lets the
+        # work release what it claimed instead of running on, unwatched, in the loop.
+        future.cancel()
+        raise

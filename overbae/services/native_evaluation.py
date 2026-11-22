@@ -24,7 +24,6 @@ from modal_shared.training_release import evaluation_identity
 from overbae.core.errors import InputValidationError
 from overbae.models import (
     Dataset,
-    DecisionProviderRequest,
     FinetuningJob,
     NativeEvaluationPlan,
     Project,
@@ -34,13 +33,7 @@ from overbae.services.compute_costs import estimate_usage
 from overbae.services.datasets import paths, rows, use
 from overbae.services.decision_benchmark_scoring import compare_suite, records
 from overbae.services.decision_calibration import fit_decision_calibration
-from overbae.services.decision_providers import (
-    RetryableEvaluationError,
-    SubmissionUnknownError,
-    external_step,
-    qualify_participants,
-    recover_request,
-)
+from overbae.services.decision_providers import qualify_participants
 from overbae.services.evaluation_inputs import artifact_lock
 from overbae.services.training_release import current
 
@@ -160,11 +153,7 @@ def create_plan(
     if baseline not in {p["key"] for p in selected}:
         raise InputValidationError("Choose one of the participants as the baseline")
     config = {
-        "runtime": existing.config["runtime"]
-        if existing
-        else runtime()
-        if any(p["kind"] != "external" for p in selected)
-        else {"adapter": "systemone", **evaluation_identity(Path(__file__).resolve().parents[2])},
+        "runtime": existing.config["runtime"] if existing else runtime(),
         "suites": {
             role: {
                 "cell": str(cell.pk),
@@ -282,7 +271,7 @@ def participants(plan):
 def preparation_groups(plan):
     groups = {}
     for participant in participants(plan):
-        if participant["kind"] == "external" or participant["key"] in plan.config.get("reuse", {}):
+        if participant["key"] in plan.config.get("reuse", {}):
             continue
         identity = participant.get("job") or participant["key"]
         if identity not in groups:
@@ -607,10 +596,7 @@ def collect(plan, stage, receipt):
     partial.replace(target)
     if preparing:
         for arm in participants(plan):
-            if (
-                arm["kind"] != "external"
-                and preparation_groups(plan)[arm.get("job") or arm["key"]][0] == group
-            ):
+            if preparation_groups(plan)[arm.get("job") or arm["key"]][0] == group:
                 (directory(plan, role) / f"{arm['key']}.failures.jsonl").write_bytes(
                     target.read_bytes()
                 )
@@ -713,9 +699,7 @@ def cost_record(plan):
             else "not_applicable",
             "recorded_evaluation_api_usd": sum(usage.get("response_cost") or 0 for usage in usages),
             "unknown_api_attempts": sum(usage.get("response_cost") is None for usage in usages),
-            "native_compute": estimate_usage(compute)
-            if participant["kind"] != "external"
-            else None,
+            "native_compute": estimate_usage(compute),
             "unreported_components": [
                 "storage",
                 "network",
@@ -886,9 +870,6 @@ def resume(plan, *, stage=None, call_id=None):
     if (
         plan.state == "paused"
         and stage not in {"verify_inputs", "fit_calibration", "score"}
-        and not (
-            stage in stage_sequence(plan) and provider_stage(plan, stage)[1]["kind"] == "external"
-        )
         and (not call_id or call_id != plan.calls.get(stage, {}).get("id"))
     ):
         raise InputValidationError("Supply the recorded provider call ID to recover collection")
@@ -901,34 +882,18 @@ def resume(plan, *, stage=None, call_id=None):
         raise InputValidationError("Select the unfinished evaluation stage")
     call = dict(plan.calls.get(pending, {}))
     local = pending in {"verify_inputs", "fit_calibration", "score"}
-    external = not local and provider_stage(plan, pending)[1]["kind"] == "external"
     if call_id:
-        if (
-            local
-            or external
-            or not call_id.startswith("fc-")
-            or (call.get("id") and call["id"] != call_id)
-        ):
+        if local or not call_id.startswith("fc-") or (call.get("id") and call["id"] != call_id):
             raise InputValidationError("Supply the existing native provider call ID")
         call.update(id=call_id, state="running")
-    elif not local and not external and not call.get("id"):
+    elif not local and not call.get("id"):
         raise InputValidationError(
             "An unresolved native submission requires its existing provider call ID"
         )
-    if external:
-        role, participant, _, _ = provider_stage(plan, pending)
-        requests = DecisionProviderRequest.objects.filter(
-            plan=plan, participant=participant["key"], role=role
-        )
-        for request in requests.select_for_update().filter(
-            state__in=["submitting", "submission_unknown"]
-        ):
-            recover_request(request)
-        requests.filter(state="failed", response__isnull=False).update(state="received", error="")
     call.pop("observe_started_at", None)
     call.pop("lease", None)
     call.pop("lease_started_at", None)
-    if local or external:
+    if local:
         plan.calls = {k: v for k, v in plan.calls.items() if k != pending}
     else:
         call["state"] = "running"
@@ -1153,7 +1118,6 @@ def record_failure(call, exc, *, can_retry):
     transient = isinstance(
         exc,
         (
-            RetryableEvaluationError,
             ConnectionError,
             TimeoutError,
             httpx.TransportError,
@@ -1185,9 +1149,7 @@ def record_failure(call, exc, *, can_retry):
             return
     call.pop("retry_at", None)
     call.update(
-        state="submission_unknown"
-        if isinstance(exc, SubmissionUnknownError) or not can_retry
-        else "failed",
+        state="submission_unknown" if not can_retry else "failed",
         error="Automatic recovery exhausted."
         if transient and can_retry
         else "The stage could not be verified. Inspect retained provider receipts and diagnostics.",
@@ -1247,7 +1209,6 @@ def advance(plan_id, *, stage=None):
             return
         local = stage in {"verify_inputs", "fit_calibration", "score"}
         reused = not local and provider_stage(plan, stage)[1]["key"] in plan.config.get("reuse", {})
-        external = not local and provider_stage(plan, stage)[1]["kind"] == "external"
         preparation_unavailable = False
         if not local:
             role, _, preparing, group = provider_stage(plan, stage)
@@ -1260,7 +1221,7 @@ def advance(plan_id, *, stage=None):
         if call.get("lease") or call.get("state") == "submitting":
             if since and (timezone.now() - datetime.fromisoformat(since)).total_seconds() < 1260:
                 return
-            if not local and not external and not reused and not call.get("id"):
+            if not local and not reused and not call.get("id"):
                 plan.calls = {**plan.calls, stage: {**call, "state": "submission_unknown"}}
                 settle(plan)
                 plan.save()
@@ -1297,9 +1258,6 @@ def advance(plan_id, *, stage=None):
         elif reused:
             role, participant, _, _ = provider_stage(plan, stage)
             receipt = collect_reused(plan, role, participant)
-        elif external:
-            role, participant, _, _ = provider_stage(plan, stage)
-            receipt = external_step(plan, role, participant)
         elif preparation_unavailable:
             receipt = retain_partial(plan, stage)
             receipt["issues"] = [{"error": "Required input preparation could not be collected."}]
@@ -1311,21 +1269,19 @@ def advance(plan_id, *, stage=None):
             collect(plan, stage, receipt)
             call.pop("progress_error", None)
         call.update(
-            state="completed"
-            if receipt is not None and (not external or reused or receipt["completed"])
-            else "running",
+            state="completed" if receipt is not None else "running",
             receipt=receipt["report"] if stage == "score" and receipt is not None else receipt,
         )
         call.pop("error", None)
         call.pop("consecutive_failures", None)
     except TimeoutError as exc:
-        if local or external or reused or starting or receipt is not None:
-            record_failure(call, exc, can_retry=local or external or reused or bool(call.get("id")))
+        if local or reused or starting or receipt is not None:
+            record_failure(call, exc, can_retry=local or reused or bool(call.get("id")))
         else:
             call["state"] = "running"
             call.pop("error", None)
             call.pop("consecutive_failures", None)
-        if not starting and not local and not external and not reused:
+        if not starting and not local and not reused:
             try:
                 collect_progress(plan, stage, call)
             except Exception:
@@ -1335,9 +1291,9 @@ def advance(plan_id, *, stage=None):
                 )
     except Exception as exc:
         logger.exception("Native evaluation stage failed: %s %s", plan_id, stage)
-        record_failure(call, exc, can_retry=local or external or reused or bool(call.get("id")))
+        record_failure(call, exc, can_retry=local or reused or bool(call.get("id")))
     if call["state"] == "failed" and not local:
-        if not external and not reused and call.get("id"):
+        if not reused and call.get("id"):
             try:
                 collect_progress(plan, stage, call)
             except Exception:

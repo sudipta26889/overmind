@@ -125,7 +125,7 @@ def ingest_file(db, plan, arm, path, receipt_id, checksum):
 
 def collect_progress(plan, stage, call):
     role, participant, preparing, group = provider_stage(plan, stage)
-    if preparing or participant["kind"] == "external" or not call.get("id"):
+    if preparing or not call.get("id"):
         return
     arm = participant["key"]
     if re.fullmatch(r"fc-[A-Za-z0-9_-]+", call["id"]) is None:
@@ -189,14 +189,6 @@ def retain_partial(plan, stage):
     target = source / f"{arm}.jsonl"
     with artifact_lock(source / "monitor"), closing(connect(source / "monitor.sqlite")) as db, db:
         initialise(db, source)
-        if participant["kind"] == "external":
-            for record in plan.requests.filter(
-                role=role, participant=arm, state="completed"
-            ).iterator():
-                for row in db.execute(
-                    "SELECT key FROM samples WHERE hash=?", (record.input_sha256,)
-                ).fetchall():
-                    ingest(db, plan, arm, {**record.prediction, "key": row["key"]})
         with target.with_suffix(".partial").open("w") as output:
             for row in db.execute(
                 "SELECT raw FROM predictions WHERE arm=? AND raw IS NOT NULL ORDER BY key", (arm,)
@@ -247,19 +239,11 @@ def refresh(plan):
                         )
                         if receipt.get("partial"):
                             checksum = receipt["predictions_sha256"]
-                        if participant["kind"] != "external" and not checksum:
+                        if not checksum:
                             raise ValueError("Prediction receipt is unavailable")
                         ingest_file(
                             db, plan, arm, path, arm + ":complete", checksum or digest_file(path)
                         )
-                elif participant["kind"] == "external":
-                    for record in plan.requests.filter(
-                        role=role, participant=arm, prediction__isnull=False
-                    ).iterator():
-                        for row in db.execute(
-                            "SELECT key FROM samples WHERE hash=?", (record.input_sha256,)
-                        ).fetchall():
-                            ingest(db, plan, arm, {**record.prediction, "key": row["key"]})
                 failure = path.with_suffix(".failures.jsonl")
                 if failure.exists():
                     for item in records(failure):

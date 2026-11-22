@@ -5,14 +5,18 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, F
+from django.db.models import Count, F, OuterRef, Subquery
 from django.utils import timezone
 
-from overbae.models import LiveScoringProject, LiveScoringScheduler, LiveScoringWork
+from overbae.innermind import judge_health
+from overbae.innermind.evals import judge_is_single_stream
+from overbae.models import LiveScoringProject, LiveScoringScheduler, LiveScoringWork, Span
 
 ACTIVE = ("queued", "running")
 QUEUED_LEASE = timedelta(minutes=10)
-RUNNING_LEASE = timedelta(minutes=6)
+# Longer than ``execute_live_scoring``'s hard time limit, so a lease never expires under a task
+# that is still running.
+RUNNING_LEASE = timedelta(minutes=12)
 
 
 def enqueue(project_id, kind: str, keys: list[str]) -> None:
@@ -43,7 +47,13 @@ def dispatch(publish) -> dict:
     expired = work.filter(state__in=ACTIVE, expires_at__lte=now).update(
         state="done", finished_at=now, error="worker admission expired"
     )
+    # While the judge is down or slow, no judge work starts; the work waits, uncounted.
+    if judge_health.backed_off():
+        return {"admitted": 0, "expired": expired, "backed_off": True}
     cap = max(1, int(getattr(settings, "LIVE_SCORING_MAX_IN_FLIGHT", 16)))
+    if judge_is_single_stream():
+        # One consumer for a one-stream judge: more would only sit polling its lock.
+        cap = 1
     per_project = max(1, int(getattr(settings, "LIVE_SCORING_MAX_PER_PROJECT", 2)))
     admitted = 0
     while work.filter(state__in=ACTIVE).count() < cap:
@@ -69,11 +79,17 @@ def dispatch(publish) -> dict:
             kinds = kinds[offset:] + kinds[:offset]
         item = None
         for kind in kinds:
-            item = (
-                work.filter(project_id=project.project_id, state="waiting", kind=kind)
-                .order_by("id")
-                .first()
-            )
+            waiting = work.filter(project_id=project.project_id, state="waiting", kind=kind)
+            if kind == "span":
+                # The freshest span first, so a backlog never starves it.
+                waiting = waiting.annotate(
+                    received=Subquery(
+                        Span.objects.filter(span_id=OuterRef("key")).values("received_at")[:1]
+                    )
+                ).order_by(F("received").desc(nulls_last=True), "-id")
+            else:
+                waiting = waiting.order_by("id")
+            item = waiting.first()
             if item is not None:
                 break
         if item is None:

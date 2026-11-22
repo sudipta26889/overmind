@@ -4,16 +4,25 @@ import asyncio
 import hashlib
 import logging
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
+from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from overbae.core.model_registry import Role
 from overbae.innermind import evidence
-from overbae.innermind.evals import evaluator_factory, expectation_rows, matches
+from overbae.innermind.evals import (
+    JudgeUnavailableError,
+    evaluator_factory,
+    expectation_rows,
+    judge_is_single_stream,
+    matches,
+)
 from overbae.innermind.metrics import Metric, answers_for_capability, mean_of
 from overbae.models import EvalMatrix, EvalScore, Span
 
@@ -22,11 +31,12 @@ logger = logging.getLogger(__name__)
 EVAL_SCORE_BATCH = 500
 TRACE_SPAN_CAP = 2_000
 MAX_CONCURRENT_SPANS = 64
-# A claim older than this belongs to a worker that died; the sweep takes it over.
-CLAIM_TTL = timedelta(minutes=10)
-# Judging passes per span, counted before the judges are called so a killed or hung pass
-# counts too. A failing row on the last pass, or every row still missing once the passes are
-# spent, is recorded as an error metric and the span is scored.
+# A claim older than this belongs to a worker that died; the sweep takes it over. It outlives
+# a live-scoring task's hard time limit, so a task that is still running is never taken over.
+CLAIM_TTL = timedelta(minutes=15)
+# Judging passes per span whose answer could not be used. A busy, slow or down judge is not
+# a pass: the span is released and offered again. A failing row on the last pass is recorded
+# as an error metric and the span is scored.
 MAX_ATTEMPTS = 3
 # The ingest task owns fresh spans; the sweep only re-drives older ones.
 SWEEP_GRACE = timedelta(seconds=90)
@@ -34,6 +44,8 @@ SWEEP_GRACE = timedelta(seconds=90)
 
 class SpanProcessor:
     """Scores one span against the matching matrix rows and its own expectations."""
+
+    judge_role = Role.JUDGE
 
     def __init__(self, project_id: str, explain_model: str = ""):
         self.project_id = str(project_id)
@@ -74,15 +86,16 @@ class SpanProcessor:
         fallback_intent: str = "",
         judge: bool = True,
         last_attempt: bool = False,
+        checkpoint: Callable[[Span, dict], Awaitable[None]] | None = None,
     ) -> Span:
         """Writes "score" only once the result is final; a span without it is retried.
 
         The span is judged with what has arrived: an ancestor or the root that lands later
         never changes its score. A row's metric is kept in ``attrs["partial"]`` the moment
         it is computed, so a retry judges only the rows that failed. A failing row raises
-        its error unless this is the ``last_attempt``; then it, like every missing row when
-        ``judge`` is off, is recorded as an error metric and the span is scored with the
-        rest."""
+        its error unless this is the ``last_attempt``; then it is recorded as an error metric
+        and the span is scored with the rest, as is every missing row when ``judge`` is off. An
+        unavailable judge always raises."""
         trace = trace or {span.span_id: span}
         attrs = span.eval_attributes
 
@@ -97,35 +110,42 @@ class SpanProcessor:
             if judge
             else []
         )
-        outcomes = await asyncio.gather(
-            *(
-                evaluator_factory.get_evaluator(row, self.project_id, self.explain_model).score(
-                    row, span, nodes
-                )
-                for row in distinct
-            ),
-            return_exceptions=True,
-        )
-        by_source = {}
+
+        async def judged(row: EvalMatrix) -> Metric:
+            metric = await evaluator_factory.get_evaluator(
+                row, self.project_id, self.explain_model, self.judge_role
+            ).score(row, span, nodes)
+            # Kept the moment it exists, so a pass that ends early loses none of its work.
+            for twin in rows:
+                if (twin.type, twin.source) == (row.type, row.source):
+                    done.setdefault(twin.name, metric.as_dict(twin.type))
+            if checkpoint is not None:
+                await checkpoint(span, done)
+            return metric
+
+        try:
+            outcomes = await asyncio.gather(*map(judged, distinct), return_exceptions=True)
+        except asyncio.CancelledError:
+            span.eval_attributes = {**span.eval_attributes, "partial": done}
+            raise
         failed: list[Exception] = []
-        for row, outcome in zip(distinct, outcomes, strict=True):
+        for outcome in outcomes:
+            if isinstance(outcome, SoftTimeLimitExceeded):
+                span.eval_attributes = {**span.eval_attributes, "partial": done}
+                raise outcome
             if isinstance(outcome, Exception):
                 failed.append(outcome)
             elif isinstance(outcome, BaseException):
                 raise outcome
-            else:
-                by_source[(row.type, row.source)] = outcome
-        for row in rows:
-            if row.name not in done and (row.type, row.source) in by_source:
-                done[row.name] = by_source[(row.type, row.source)].as_dict(row.type)
 
-        if failed and not last_attempt:
+        down = next((exc for exc in failed if isinstance(exc, JudgeUnavailableError)), None)
+        if failed and (down or not last_attempt):
             span.eval_attributes = {
                 **span.eval_attributes,
                 "partial": done,
                 "error": f"{type(failed[0]).__name__}: {failed[0]}",
             }
-            raise failed[0]
+            raise down or failed[0]
         for row in rows:
             done.setdefault(
                 row.name,
@@ -197,19 +217,6 @@ def claim(span_ids: list[str]) -> list[str]:
     return claimed
 
 
-def unscored_spans(limit: int) -> list[tuple[str, str]]:
-    """``(trace_id, span_id)`` of unscored spans past the grace period, newest first, so
-    old spans cannot starve fresh ones."""
-    now = timezone.now()
-    return list(
-        Span.objects.exclude(eval_attributes__has_key="score")
-        .filter(received_at__lt=now - SWEEP_GRACE)
-        .filter(Q(eval_claimed_at__isnull=True) | Q(eval_claimed_at__lt=now - CLAIM_TTL))
-        .order_by("-received_at")
-        .values_list("trace_id", "span_id")[:limit]
-    )
-
-
 async def enabled_matrix(project_id) -> list[EvalMatrix]:
     return [row async for row in EvalMatrix.objects.filter(project_id=project_id, enabled=True)]
 
@@ -270,13 +277,12 @@ def mark_unsampled(span: Span) -> None:
     )
 
 
-@sync_to_async
-def record_attempt(span: Span) -> bool:
-    """Stores a pass's attempt count before its judges run; False once the span is scored."""
-    return bool(
+async def save_partial(span: Span, done: dict) -> None:
+    """Stores the rows judged so far. The span stays claimed and unscored."""
+    await (
         Span.objects.filter(span_id=span.span_id)
         .exclude(eval_attributes__has_key="score")
-        .update(eval_attributes=span.eval_attributes)
+        .aupdate(eval_attributes={**span.eval_attributes, "partial": dict(done)})
     )
 
 
@@ -311,7 +317,9 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
         spans,
         neighbours=any(row.type == EvalMatrix.Type.DETERMINISTIC for row in matrix),
     )
-    slots = asyncio.Semaphore(MAX_CONCURRENT_SPANS)
+    # A single-stream judge answers one call at a time: more waiting spans would only hold
+    # claims and poll the lock.
+    slots = asyncio.Semaphore(1 if judge_is_single_stream() else MAX_CONCURRENT_SPANS)
 
     async def score(span: Span) -> Span | None:
         trace = traces[span.trace_id]
@@ -326,11 +334,6 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
                 return None
             attempts = span.eval_attributes.get("attempts", 0)
             spent = attempts >= MAX_ATTEMPTS
-            if not spent:
-                attempts += 1
-                span.eval_attributes = {**span.eval_attributes, "attempts": attempts}
-                if not await record_attempt(span):
-                    return None
             try:
                 await processor.evaluate(
                     span,
@@ -338,12 +341,21 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
                     trace,
                     fallback_intent=fallback,
                     judge=not spent,
-                    last_attempt=attempts >= MAX_ATTEMPTS,
+                    last_attempt=attempts + 1 >= MAX_ATTEMPTS,
+                    checkpoint=save_partial,
                 )
+            except JudgeUnavailableError as exc:
+                # Released below without an attempt; the sweep offers the span again.
+                logger.info("Judge unavailable for span %s: %s", span.span_id, exc)
+            except (SoftTimeLimitExceeded, asyncio.CancelledError):
+                # The task is out of time: keep the judged rows, release the claim, and stop.
+                await persist(span)
+                raise
             except Exception as exc:  # noqa: BLE001 — still no "score", so the sweep retries it
                 logger.warning("Scoring span %s failed: %s", span.span_id, exc)
                 span.eval_attributes = {
                     **span.eval_attributes,
+                    "attempts": attempts + 1,
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             return span if await persist(span) else None

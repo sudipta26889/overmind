@@ -235,8 +235,9 @@ class EvaluationScopeSerializer(serializers.Serializer):
     eval_set = serializers.PrimaryKeyRelatedField(
         queryset=EvalSet.objects.all(), required=False, allow_null=True
     )
-    judge_model = serializers.ChoiceField(
-        choices=["", *judge_picker_models()],
+    judge_model = serializers.CharField(
+        allow_blank=True,
+        max_length=255,
         required=False,
         default="",
         help_text="Explanation judge for this run. Blank uses the configured default.",
@@ -245,6 +246,11 @@ class EvaluationScopeSerializer(serializers.Serializer):
 
     def validate_project(self, value):
         return require_membership(self, value)
+
+    def validate_judge_model(self, value):
+        if value and value not in judge_picker_models():
+            raise serializers.ValidationError(f'"{value}" is not a valid choice.')
+        return value
 
     def validate(self, attrs):
         project = attrs["project"]

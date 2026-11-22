@@ -206,13 +206,13 @@ def test_experiment_records_training_overlap_with_calibration_without_quality_bl
             request_key="sealed",
             participants=[
                 {
-                    "key": "external",
-                    "name": "External",
-                    "kind": "external",
-                    "model": "local/decision",
+                    "key": "base",
+                    "name": "Base",
+                    "kind": "foundation",
+                    "model": "Qwen/Qwen3.5-4B",
                 }
             ],
-            baseline="external",
+            baseline="base",
             final_cell=final.active_cell,
             calibration_cell=calibration.active_cell,
         )

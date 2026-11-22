@@ -1,5 +1,3 @@
-import json
-import math
 import sqlite3
 from unittest.mock import patch
 
@@ -136,96 +134,6 @@ def test_data_first_partition_api_preserves_duplicates_lineage_and_explicit_hold
         lifecycle.set_intent(final.dataset, "train")
 
 
-def test_standalone_comparison_runs_three_participants_without_training_or_calibration(settings):
-
-    settings.STRIPE_SECRET_KEY = ""
-    project, client, dataset = workspace()
-    dataset.intent = "eval"
-    dataset.save()
-    body = {
-        "project": str(project.pk),
-        "name": "Screen foundations",
-        "request_key": "compare-fixture",
-        "final_cell": str(dataset.active_cell.pk),
-        "participants": [
-            {
-                "key": key,
-                "name": key,
-                "kind": "external",
-                "model": "local/decision",
-                "served_model": "local/decision-20260917",
-            }
-            for key in ("base", "candidate", "comparator")
-        ],
-        "baseline": "base",
-        "bootstrap_samples": 10,
-        "seed": 37,
-    }
-    with (
-        patch.object(
-            native_evaluation, "runtime", return_value={"app": "offline", "environment": "test"}
-        ),
-        patch("overbae.tasks.native_evaluation.advance_plan.delay"),
-    ):
-        response = client.post(reverse("native-evaluation-list"), body, format="json")
-        assert response.status_code == 201, response.content
-        repeated = client.post(reverse("native-evaluation-list"), body, format="json")
-        assert repeated.json()["id"] == response.json()["id"]
-    with patch("overbae.tasks.native_evaluation.advance_plan.delay"):
-        launched = client.post(
-            reverse("native-evaluation-launch-evaluation", args=[response.json()["id"]]),
-            {},
-            format="json",
-        )
-        assert launched.status_code == 202
-    plan = NativeEvaluationPlan.objects.get(pk=response.json()["id"])
-    assert plan.job_id is None and plan.calibration_cell_id is None
-    submitted = []
-
-    def external_step(plan, role, participant):
-        assert role == "final" and plan.calibration == {}
-        source = native_evaluation.seal_suite(plan, role)
-        key = participant["key"]
-        probability = 0.8 if key == "candidate" else 0.6
-        destination = source.parent / f"{key}.jsonl"
-        with destination.open("w") as output:
-            for line in source.open():
-                record = json.loads(line)
-                assert set(record["decision"]) == {"state", "question", "kind", "options"}
-                output.write(
-                    json.dumps(
-                        {
-                            "key": record["key"],
-                            "input_sha256": record["input_sha256"],
-                            "kind": "choice",
-                            "model_identity": participant["served_model"],
-                            "probabilities": [probability, 1 - probability],
-                            "log_probabilities": [math.log(probability), math.log(1 - probability)],
-                        }
-                    )
-                    + "\n"
-                )
-        submitted.append(key)
-        return {"completed": True, "decisions": 80, "recorded_cost_usd": 0.1}
-
-    with patch("overbae.services.native_evaluation.external_step", side_effect=external_step):
-        for _ in range(12):
-            native_evaluation.advance(plan.pk)
-    plan.refresh_from_db()
-    assert plan.state == "completed", plan.error
-    assert sorted(submitted) == ["base", "candidate", "comparator"]
-    report = plan.results["comparisons"]["candidate"]["raw"]["benchmarks"]["fixture"]
-    assert report["expected"] == report["paired_decisions"] == 80
-    assert report["metrics"]["cross_entropy"]["candidate_minus_baseline"] < 0
-    assert "accuracy" not in report["metrics"]
-    assert plan.results["calibration"] is None
-    assert not native_evaluation.directory(plan, "calibration").exists()
-    ProjectMembership.objects.filter(project=project).delete()
-    assert (
-        client.get(reverse("native-evaluation-detail", kwargs={"pk": plan.pk})).status_code == 404
-    )
-
-
 def test_calibration_and_final_cannot_share_group_identity(settings):
 
     project, _, dataset = workspace()
@@ -242,9 +150,8 @@ def test_calibration_and_final_cannot_share_group_identity(settings):
                 {
                     "key": "base",
                     "name": "base",
-                    "kind": "external",
-                    "model": "local/decision",
-                    "served_model": "local/decision-20260917",
+                    "kind": "foundation",
+                    "model": "Qwen/Qwen3.5-4B",
                 }
             ],
             baseline="base",
@@ -349,11 +256,7 @@ def test_changing_an_existing_mean_records_semantic_impact_and_preserves_source(
 def test_demo_model_workflows_remain_terminal_and_reset_without_provider_work():
 
     project, _, _ = workspace()
-    with patch(
-        "overbae.core.decisions.request_once",
-        side_effect=AssertionError("demo must not call providers"),
-    ):
-        seed_model_workflows(project)
+    seed_model_workflows(project)
     assert set(
         DataPartitionPlan.objects.filter(project=project).values_list("state", flat=True)
     ) == {"completed"}

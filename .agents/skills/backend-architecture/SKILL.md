@@ -25,7 +25,7 @@ Single Django app `overbae`, project-scoped tenancy.
 - **Unknown provider outcomes are reconciled, never resubmitted.** Intent is journaled before a provider call; a lost acknowledgement becomes `submission_unknown` and is resolved from the saved call ID.
 - **Measured, not invented.** Missing usage, progress, scores or telemetry stay unknown or null. Never fill a percentage, a zero score, an ETA or a cost from elapsed time or a guess.
 - **Status writes use `.filter().update()`.** No Django signals fire; reload the row and wire side effects at the call site.
-- **Model IDs**: platform models (judges, generation, Jev) live in `core/model_registry.py`; the training and serving catalog lives in `modal/models.json`, read through `modal/model_registry.py`. Jev decisions go through `core/decisions.py`.
+- **Model IDs**: platform models live in `core/model_registry.py` (roles come only from `LLM_*_CHAIN` env; live scoring is `Role.JUDGE`); the training and serving catalog lives in `modal/models.json`, read through `modal/model_registry.py`.
 - **Modal code ships separately.** Changes under `overbae/modal/`, `modal_shared/` or `services/sft_assets/` reach running jobs only after `modal deploy`; training and serving pin immutable releases.
 
 ## Reference files
@@ -35,7 +35,7 @@ Read the one that matches the task:
 | File                                                                   | Covers                                                                              |
 | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | [references/celery.md](references/celery.md)                           | Workers, queues, routing, admission, deployment order                               |
-| [references/tracing-and-scoring.md](references/tracing-and-scoring.md) | Span model, OTLP ingest, span cost, live scoring, signals, Jev                      |
+| [references/tracing-and-scoring.md](references/tracing-and-scoring.md) | Span model, OTLP ingest, span cost, live scoring, signals, the judge                |
 | [references/evaluation.md](references/evaluation.md)                   | Evaluation runs, comparison, judges, context estimates, benchmark selection         |
 | [references/capabilities.md](references/capabilities.md)               | The agent graph, scans, toml sync, Default eval set, provenance                     |
 | [references/auth-and-billing.md](references/auth-and-billing.md)       | Clerk and local auth, guests, API keys, billing, Overwatch internal endpoints       |

@@ -13,7 +13,7 @@ An `EvalRun` scores one target (`mode` `recorded`, `generate` or `provided`) ove
 
 ## Judges and context estimates
 
-- `EvalRun.judge_model` freezes the explanation judge; blank uses the `EVAL_EXPLANATION` registry default. It never changes Jev. Existing runs reject judge changes. Training's `eval_judge_model` overrides it for that job's runs, and baseline sharing requires the same judge selection.
+- `EvalRun.judge_model` freezes the explanation judge; blank uses the `EVAL_EXPLANATION` registry default. It never changes the live judge. Existing runs reject judge changes. Training's `eval_judge_model` overrides it for that job's runs, and baseline sharing requires the same judge selection.
 - `innermind/context.py` supplies advisory context estimates for generate targets and the judge, including reserved output (REST `POST /api/eval-runs/context-check/`, run detail, MCP readiness). Warnings never change `ready`, gate launch or remove a candidate. Unknown limits stay unverified; unknown prices are null.
 - The Console creates standalone runs (`CreateRunDialog`, with judge model and context preview), relaunches and deletes runs, and creates and deletes matrix rows. Training setup carries its own judge selector and advisory warnings: selectors are tinted only for estimated overflows, undersized options stay selectable, and Start opens a short risk summary with Start anyway. Unverified and pending checks stay neutral. Nothing blocks launch or changes a model automatically.
 

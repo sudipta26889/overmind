@@ -34,7 +34,7 @@ describe("inference snippets", () => {
     expect(snip).toContain('model="ft-abc"');
   });
 
-  it("points a decision model at the TypeSafe systemone SDK", () => {
+  it("posts a decision model request to the systemone endpoint", () => {
     const snip = buildDecisionSnippets(
       "ft-abc",
       {
@@ -47,11 +47,10 @@ describe("inference snippets", () => {
     );
     expect(snip.curl).toContain("https://api.example.com/api/v1/systemone");
     expect(snip.curl).toContain('"model": "ft-abc"');
-    expect(snip.python).toContain('base_url="https://api.example.com/api"');
-    expect(snip.python).toContain("from typesafe_sdk import Choice, TypeSafeClient");
-    expect(snip.python).toContain('model="ft-abc"');
-    expect(snip.python).not.toContain("inference-requests");
-    expect(snip.python).toContain('"no": None');
+    expect(snip.python).toContain('"https://api.example.com/api/v1/systemone"');
+    expect(snip.python).toContain("import requests");
+    expect(snip.python).toContain('"model": "ft-abc"');
+    expect(snip.python).not.toContain("typesafe");
   });
 
   it("copies choice descriptions from the question into criteria", () => {

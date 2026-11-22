@@ -12,12 +12,14 @@ from datetime import UTC, datetime, timedelta
 from statistics import mean, median
 from typing import ClassVar
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.db.models import Func, IntegerField, Sum, TextField, Window
 from django.db.models.functions import Cast, Coalesce
 from django.utils import timezone
 
+from overbae.core.model_registry import Role, role_enabled
 from overbae.innermind import evidence
-from overbae.innermind.evals import JevEvaluator
+from overbae.innermind.evals import Judge, JudgeUnavailableError
 from overbae.innermind.metrics import (
     FAIL_BELOW,
     REASON_BELOW,
@@ -302,12 +304,15 @@ class RunawayTraceSignal(Signal):
 
 
 class PlanDriftSignal(Signal):
-    """Each scored step is judged once and its verdict stored as ``eval_attributes.drift``;
-    a judge that keeps failing stops after ``MAX_ATTEMPTS``."""
+    """Each scored step is judged once and its verdict stored as ``eval_attributes.drift``, as
+    soon as it completes; a run judges at most ``STEPS_PER_RUN`` steps and the next run takes the
+    rest. A judge that keeps returning no verdict stops after ``MAX_ATTEMPTS``."""
+
+    STEPS_PER_RUN = 5
 
     name = "plan_drift"
     default_enabled = False
-    description = "Jev judges steps as not working toward the intent."
+    description = "The judge flags steps that do not work toward the intent."
     expectation = "The step works toward the intent."
 
     async def check(self, spans):
@@ -322,11 +327,8 @@ class PlanDriftSignal(Signal):
             if "drift" not in span.eval_attributes
             and span.eval_attributes.get("drift_attempts", 0) < MAX_ATTEMPTS
         ]
-        outcomes = await asyncio.gather(*map(self.judge, unjudged), return_exceptions=True)
-        for span, outcome in zip(unjudged, outcomes, strict=True):
-            if isinstance(outcome, BaseException) and not isinstance(outcome, Exception):
-                raise outcome
-            await self.record(span, outcome)
+        if role_enabled(Role.JUDGE):
+            await asyncio.gather(*map(self.judge_and_record, unjudged[: self.STEPS_PER_RUN]))
         drifting = [
             span.name
             for span in steps
@@ -336,8 +338,17 @@ class PlanDriftSignal(Signal):
             return "steps drifting from the intent: " + ", ".join(drifting)
         return None
 
+    async def judge_and_record(self, span: Span) -> None:
+        try:
+            outcome = await self.judge(span)
+        except SoftTimeLimitExceeded:
+            raise
+        except Exception as exc:  # noqa: BLE001 — recorded, so the next run retries or gives up
+            outcome = exc
+        await self.record(span, outcome)
+
     async def judge(self, span: Span) -> float | None:
-        judge = JevEvaluator(self.project_id)
+        judge = Judge(self.project_id)
         state = judge.evidence(span, self.expectation)
         if "output" not in state:
             return None
@@ -347,7 +358,9 @@ class PlanDriftSignal(Signal):
         attrs = span.eval_attributes
         if isinstance(outcome, Exception):
             logger.warning("Plan drift judge failed on span %s: %s", span.span_id, outcome)
-            judged = {**attrs, "drift_attempts": attrs.get("drift_attempts", 0) + 1}
+            # A busy, slow or down judge is not an attempt; the span is judged again later.
+            counted = 0 if isinstance(outcome, JudgeUnavailableError) else 1
+            judged = {**attrs, "drift_attempts": attrs.get("drift_attempts", 0) + counted}
         else:
             judged = {**attrs, "drift": outcome}
         # Matching the stored attributes keeps a concurrent re-ingest's reset.

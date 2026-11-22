@@ -77,7 +77,6 @@ The API refuses to start until every required key is set, and the error names ea
 | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `OPENROUTER_API_KEY`                                            | Judges, evals, trace scoring and optimiser scoring, through the model gateway                               |
 | `OPENROUTER_BASE_URL`                                           | The OpenAI-compatible gateway that serves every model call                                                  |
-| `JEV_MODEL`                                                     | The decision model the gateway routes, e.g. `local/decision`                                                |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET`                          | Modal training and serving workers (set `MODAL_ENVIRONMENT` explicitly)                                     |
 | `INFERENCE_API_URL`, `INFERENCE_API_KEY`                        | Serving trained models — the endpoint printed by `modal deploy` and its shared secret                       |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_BUCKET_NAME` | The fine-tuning checkpoint archive                                                                          |

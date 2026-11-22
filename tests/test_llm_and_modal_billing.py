@@ -116,7 +116,7 @@ def test_composite_decision_billing_preserves_known_cost_when_one_attempt_is_unk
         {
             "response_cost": None,
             "attempts": [
-                {"response_cost": None, "served_model": "local/decision"},
+                {"response_cost": None, "served_model": "local/judge"},
                 {"response_cost": 0.02, "served_model": "openai/gpt-5.6-terra"},
             ],
         },

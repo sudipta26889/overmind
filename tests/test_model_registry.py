@@ -1,7 +1,3 @@
-import os
-import subprocess
-import sys
-
 import pytest
 
 from overbae.core.model_registry import (
@@ -12,11 +8,10 @@ from overbae.core.model_registry import (
     RoleOffError,
     TaskType,
     _role_chain,
-    decision_model,
     default_backtest_models,
     default_judge_model,
     inference_models,
-    is_decision_model,
+    is_single_stream,
     judge_picker_models,
     model_chain,
     model_defaults,
@@ -100,39 +95,22 @@ def test_defaults_are_empty_when_every_chain_is_empty(monkeypatch):
     assert model_defaults() == {"judge_model": "", "judge_models": [], "backtest_models": []}
 
 
-def test_the_decision_model_is_named_by_the_environment(monkeypatch):
-    assert decision_model().slug == "local/decision"
-    assert is_decision_model("local/decision")
-    assert not is_decision_model("recursivesi/flint")
-    monkeypatch.setenv("JEV_MODEL", "")
-    with pytest.raises(ValueError, match="JEV_MODEL is required"):
-        decision_model()
-    monkeypatch.setenv("JEV_MODEL", "typesafe/jev-1.14")
-    with pytest.raises(ValueError, match="not one of"):
-        decision_model()
+def test_live_judging_has_its_own_role_and_a_single_stream_model():
+    assert resolve_model(TaskType.SPAN_JUDGING) == "local-judge"
+    assert is_single_stream("local-judge") and is_single_stream("flint")
+    assert not is_single_stream("gpt-6-luna")
+    assert "local-judge" not in judge_picker_models()
 
 
 def test_flint_stays_out_of_the_inference_library():
     assert "flint" not in {m.name for m in inference_models()}
 
 
-def test_the_app_starts_with_every_chain_empty():
-    environment = {
-        **{key: value for key, value in os.environ.items() if not key.startswith("LLM_")},
-        "LLM_FAST_CHAIN": "",
-        "LLM_AGENT_CHAIN": "",
-        "LLM_EXPLAIN_CHAIN": "",
-    }
-    code = (
-        "import django; django.setup(); import overbae.api.serializers; "
-        "from overbae.core.model_registry import model_defaults; "
-        "print(model_defaults())"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", code], env=environment, capture_output=True, text=True, timeout=120
-    )
-    assert result.returncode == 0, result.stderr
-    assert "'judge_models': []" in result.stdout
+def test_the_app_serves_defaults_with_every_chain_empty(monkeypatch):
+    for role in Role:
+        monkeypatch.setitem(ROLE_CHAINS, role, ())
+    assert judge_picker_models() == []
+    assert model_defaults()["judge_models"] == []
 
 
 def test_catalog_names_are_unique_and_slugs_are_vendor_qualified():

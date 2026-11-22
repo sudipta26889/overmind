@@ -180,20 +180,11 @@ class FakeLLM:
             for slug in slugs
         ]
 
-    decisions: list[dict[str, Any]] = field(default_factory=list)
-    decide: Callable[[str, dict[str, Any], dict[str, Any]], str] | None = None
-    decision_cost: float = 0.0
-    decision_confidence: float = 0.9
+    # Maps the judged state to "yes", "partial" or "no"; unset answers "yes".
+    verdict: Callable[[dict[str, Any]], str] | None = None
 
-    def _decide(self, key: str, question: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
-        options = list(question.get("criteria") or {})
-        choice = self.decide(key, question, state) if self.decide else options[0]
-        return {
-            "type": "choice",
-            "choice": choice,
-            "probabilities": {option: 1.0 if option == choice else 0.0 for option in options},
-            "confidence": self.decision_confidence,
-        }
+    def judgments(self) -> list[LLMRequest]:
+        return [r for r in self.requests if r.schema_name == "Verdict"]
 
     def fail(
         self,
@@ -219,6 +210,10 @@ class FakeLLM:
                 if isinstance(value, str):
                     return {"role": "assistant", "content": value}
                 return {"role": "assistant", **value}
+        if request.schema_name == "Verdict":
+            state = _json_body(request.messages[-1].get("content"))
+            choice = self.verdict(state) if self.verdict else "yes"
+            return {"role": "assistant", "content": json.dumps({"verdict": choice})}
         self.unscripted.append(request)
         if request.schema is not None:
             return {"role": "assistant", "content": json.dumps(instance(request.schema))}
@@ -338,21 +333,6 @@ class FakeLLM:
             completion = self.completion(request)
             completion.pop("_tokens", None)
             return 200, {"content-type": "application/json"}, json.dumps(completion).encode()
-        if method == "POST" and url.rstrip("/").endswith("/systemone"):
-            body = json.loads(raw or b"{}")
-            with self._lock:
-                self.decisions.append(body)
-            answers = {
-                key: self._decide(key, question, body.get("state") or {})
-                for key, question in (body.get("questions") or {}).items()
-            }
-            payload = {
-                "id": f"fake-decision-{len(self.decisions)}",
-                "model": body.get("model"),
-                "answers": answers,
-                "usage": {"input_tokens": 10, "output_tokens": 1, "cost": self.decision_cost},
-            }
-            return 200, {"content-type": "application/json"}, json.dumps(payload).encode()
         if method == "GET" and url.rstrip("/").endswith("/models"):
             with self._lock:
                 self.catalog_reads.append({k.lower(): v for k, v in (headers or {}).items()})

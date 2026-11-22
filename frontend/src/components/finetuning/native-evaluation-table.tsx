@@ -95,7 +95,7 @@ function evaluationState({ plan, participant, job }: EvaluationRow) {
   const preparations = new Map<string, string>();
   for (const p of (plan.config?.participants ?? []) as Participant[]) {
     const identity = p.job ?? p.key;
-    if (p.kind !== "external" && !plan.config?.reuse?.[p.key] && !preparations.has(identity)) {
+    if (!plan.config?.reuse?.[p.key] && !preparations.has(identity)) {
       preparations.set(identity, preparations.size === 0 ? "prepare" : `prepare_${p.key}`);
     }
   }

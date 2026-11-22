@@ -100,10 +100,9 @@ class NativeEvaluationSerializer(serializers.ModelSerializer):
 class DecisionParticipantSerializer(serializers.Serializer):
     key = serializers.RegexField(r"^[a-z][a-z0-9-]{0,47}$")
     name = serializers.CharField(max_length=255)
-    kind = serializers.ChoiceField(choices=["foundation", "trained", "external"])
+    kind = serializers.ChoiceField(choices=["foundation", "trained"])
     job = serializers.UUIDField(required=False)
     model = serializers.CharField(max_length=255, required=False)
-    served_model = serializers.CharField(max_length=255, required=False, allow_blank=True)
 
 
 class DecisionComparisonRequestSerializer(serializers.Serializer):
@@ -137,7 +136,7 @@ class EvaluationReportSerializer(serializers.Serializer):
 class DecisionModelOptionSerializer(serializers.Serializer):
     id = serializers.CharField()
     name = serializers.CharField()
-    kind = serializers.ChoiceField(choices=["foundation", "trained", "external"])
+    kind = serializers.ChoiceField(choices=["foundation", "trained"])
     qualification = serializers.CharField()
 
 

@@ -4,16 +4,17 @@ import asyncio
 import json
 import logging
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 
+from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 from overbae.innermind import evidence
-from overbae.innermind.evals import JEV_STATE_LIMIT, JevEvaluator
+from overbae.innermind.evals import JUDGE_STATE_LIMIT, Judge, JudgeUnavailableError
 from overbae.innermind.metrics import (
     FAIL_BELOW,
-    REASON_BELOW,
     Metric,
     answers_for_capability,
     is_failing,
@@ -22,7 +23,7 @@ from overbae.innermind.metrics import (
     roots_of,
     score_of,
 )
-from overbae.innermind.span_processor import MAX_ATTEMPTS, in_scoring_sample
+from overbae.innermind.span_processor import CLAIM_TTL, MAX_ATTEMPTS, in_scoring_sample
 from overbae.models import EvalScore, Span
 
 logger = logging.getLogger(__name__)
@@ -143,14 +144,10 @@ class PathJudgeEvaluator(TrajectoryEvaluator):
                 "output": evidence.read_output(root),
             }
             # Keep the first and last steps; the middle of a long run is the least telling.
-            if len(json.dumps(state).encode()) <= JEV_STATE_LIMIT or len(steps) <= 2:
+            if len(json.dumps(state).encode()) <= JUDGE_STATE_LIMIT or len(steps) <= 2:
                 break
             del steps[len(steps) // 2]
-        judge = JevEvaluator(root.project_id)
-        metric = await judge.judge(state, self.expectation)
-        if metric.score is not None and metric.score < REASON_BELOW:
-            metric.reason = await judge.explain(state, metric)
-        return metric
+        return await Judge(root.project_id).judge(state, self.expectation)
 
 
 class ReferenceEvaluator(TrajectoryEvaluator):
@@ -176,23 +173,40 @@ class TrajectoryProcessor:
     def get_evaluators(self) -> list[TrajectoryEvaluator]:
         raise NotImplementedError
 
-    async def evaluate(self, spans: list[Span], *, judge: bool = True, last_attempt: bool) -> Span:
+    async def evaluate(
+        self,
+        spans: list[Span],
+        *,
+        judge: bool = True,
+        last_attempt: bool,
+        partial: dict | None = None,
+        checkpoint: Callable[[str, dict], Awaitable[None]] | None = None,
+    ) -> Span:
         """Stores the trajectory on the root span without saving it. A failing evaluator
         raises unless this is the ``last_attempt``; then it, like every judged evaluator
-        when ``judge`` is off, is recorded as an error metric."""
+        when ``judge`` is off, is recorded as an error metric. A judged metric is handed to
+        ``checkpoint`` as it completes, and one already in ``partial`` is not judged again."""
         root = roots_of(spans)[0]
         evaluators = self.get_evaluators()
         stopped = Metric("", error=f"scoring failed after {MAX_ATTEMPTS} attempts")
+        partial = partial or {}
 
         async def score(evaluator: TrajectoryEvaluator) -> Metric | None:
             if evaluator.calls_judge and not judge:
                 return replace(stopped, expectation=evaluator.expectation)
+            if evaluator.name in partial:
+                return Metric(**partial[evaluator.name])
             try:
-                return await evaluator.score(spans)
+                metric = await evaluator.score(spans)
+            except JudgeUnavailableError:
+                raise
             except Exception:
                 if not last_attempt:
                     raise
                 return replace(stopped, expectation=evaluator.expectation)
+            if evaluator.calls_judge and metric is not None and checkpoint is not None:
+                await checkpoint(evaluator.name, asdict(metric))
+            return metric
 
         metrics = await asyncio.gather(*map(score, evaluators))
         by_name = {
@@ -267,8 +281,10 @@ def is_ready(spans: list[Span]) -> bool:
 
 
 async def score_trace(project_id, trace_id: str) -> bool:
-    """Counts the attempt on the root before judging, so a killed pass counts too; once
-    ``MAX_ATTEMPTS`` are spent the trajectory is stored without calling the judge."""
+    """A pass claims the root optimistically, so two passes never judge one trace. An attempt
+    is a pass whose judge answered unusably; a busy, slow or down judge, or a pass that runs out
+    of time, releases the claim and counts nothing. Judged metrics are kept as they complete.
+    Once ``MAX_ATTEMPTS`` are spent the trajectory is stored without calling the judge."""
     spans = [
         span
         async for span in Span.objects.filter(project_id=project_id, trace_id=trace_id).order_by(
@@ -282,18 +298,51 @@ async def score_trace(project_id, trace_id: str) -> bool:
         unsampled = {"score": None, "metrics": {}, "unsampled": True}
         await store(root, {**root.eval_attributes, "trajectory": unsampled})
         return False
-    attempts = root.eval_attributes.get("trajectory_attempts", 0)
+    attrs = dict(root.eval_attributes)
+    claimed_at = attrs.get("trajectory_claimed_at")
+    if claimed_at and timezone.now() - datetime.fromisoformat(claimed_at) < CLAIM_TTL:
+        return False
+    attempts = attrs.get("trajectory_attempts", 0)
     spent = attempts >= MAX_ATTEMPTS
-    if not spent:
-        attempts += 1
-        if not await store(root, {**root.eval_attributes, "trajectory_attempts": attempts}):
-            return False
-    judged = dict(root.eval_attributes)
-    await trajectory_factory.get_processor(spans).evaluate(
-        spans, judge=not spent, last_attempt=attempts >= MAX_ATTEMPTS
-    )
+    state = {**attrs, "trajectory_claimed_at": timezone.now().isoformat()}
+    if not await store(root, state, current=attrs):
+        return False
+    partial = dict(attrs.get("trajectory_partial") or {})
+
+    async def put(new: dict) -> None:
+        nonlocal state
+        if await store(root, new, current=state):
+            state = new
+
+    async def checkpoint(name: str, metric: dict) -> None:
+        partial[name] = metric
+        await put({**state, "trajectory_partial": partial})
+
+    def released(**extra) -> dict:
+        kept = {k: v for k, v in state.items() if k != "trajectory_claimed_at"}
+        return {**kept, **extra}
+
+    try:
+        await trajectory_factory.get_processor(spans).evaluate(
+            spans,
+            judge=not spent,
+            last_attempt=attempts + 1 >= MAX_ATTEMPTS,
+            partial=partial,
+            checkpoint=checkpoint,
+        )
+    except (JudgeUnavailableError, SoftTimeLimitExceeded, asyncio.CancelledError):
+        await put(released())
+        raise
+    except Exception:
+        await put(released(trajectory_attempts=attempts + 1))
+        raise
     trajectory = root.eval_attributes["trajectory"]
-    if not await store(root, root.eval_attributes, current=judged):
+    final = {
+        k: v
+        for k, v in root.eval_attributes.items()
+        if k not in ("trajectory_claimed_at", "trajectory_partial")
+    }
+    if not await store(root, final, current=state):
         return False
     await EvalScore.objects.acreate(
         project_id=root.project_id,
@@ -310,6 +359,8 @@ async def score_traces(project_id, trace_ids: list[str]) -> int:
     for trace_id in trace_ids:
         try:
             scored += await score_trace(project_id, trace_id)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:  # noqa: BLE001 — the sweep retries an unscored trajectory
             logger.warning("Scoring trajectory %s failed: %s", trace_id, exc)
     return scored
@@ -323,6 +374,6 @@ def unscored_trajectory_ids() -> list[str]:
             received_at__gte=timezone.now() - SWEEP_WINDOW,
         )
         .exclude(eval_attributes__has_key="trajectory")
-        .order_by("received_at")
+        .order_by("-received_at")
         .values_list("trace_id", flat=True)[:SWEEP_LIMIT]
     )

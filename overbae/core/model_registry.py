@@ -25,7 +25,6 @@ class Tier(StrEnum):
     FLAGSHIP = "flagship"
     LEGACY = "legacy"
     OPEN = "open"
-    DECISION = "decision"
 
 
 @dataclass(frozen=True)
@@ -52,10 +51,8 @@ class Model:
     description: str = ""
     reasoning: Reasoning = NO_REASONING
     library: bool = False
-    # Used only by decision models; sized from measurements against the gateway.
-    decision_max_bytes: int = 0
-    decision_timeout_s: float = 0.0
-    min_confidence: float = 0.0
+    # The gateway serves one request at a time for the whole fleet; calls take a shared lock.
+    single_stream: bool = False
 
     @property
     def supports_reasoning(self) -> bool:
@@ -64,14 +61,12 @@ class Model:
 
 CATALOG: tuple[Model, ...] = (
     Model(
-        "local-decision",
+        "local-judge",
         Vendor.LOCAL,
-        "local/decision",
-        Tier.DECISION,
-        "Typed decisions over supplied evidence on the local gateway; not a chat or training model.",
-        decision_max_bytes=9_000,
-        decision_timeout_s=60.0,
-        min_confidence=0.7,
+        "local/judge",
+        Tier.FAST,
+        "The local chat judge for live trace scoring; slow, one request at a time.",
+        single_stream=True,
     ),
     Model(
         "flint",
@@ -79,7 +74,7 @@ CATALOG: tuple[Model, ...] = (
         "recursivesi/flint",
         Tier.FAST,
         "The local chat model behind the gateway; one stream serves the whole fleet.",
-        library=False,
+        single_stream=True,
     ),
     Model(
         "gpt-5.6-sol",
@@ -358,6 +353,7 @@ def is_inference_model(model_id: str) -> bool:
 
 
 class Role(StrEnum):
+    JUDGE = "judge"
     FAST = "fast"
     AGENT = "agent"
     EXPLAIN = "explain"
@@ -373,6 +369,7 @@ def _role_chain(env: str) -> tuple[str, ...]:
 
 
 ROLE_CHAINS: dict[Role, tuple[str, ...]] = {
+    Role.JUDGE: _role_chain("LLM_JUDGE_CHAIN"),
     Role.FAST: _role_chain("LLM_FAST_CHAIN"),
     Role.AGENT: _role_chain("LLM_AGENT_CHAIN"),
     Role.EXPLAIN: _role_chain("LLM_EXPLAIN_CHAIN"),
@@ -388,6 +385,7 @@ def role_enabled(role: Role) -> bool:
 
 
 class TaskType(StrEnum):
+    SPAN_JUDGING = "span_judging"
     JUDGE_SCORING = "judge_scoring"
     CRITERIA_GENERATION = "criteria_generation"
     EVAL_RECOMMENDATION = "eval_recommendation"
@@ -396,6 +394,7 @@ class TaskType(StrEnum):
 
 
 TASK_ROLES: dict[TaskType, Role] = {
+    TaskType.SPAN_JUDGING: Role.JUDGE,
     TaskType.JUDGE_SCORING: Role.FAST,
     TaskType.CRITERIA_GENERATION: Role.FAST,
     TaskType.EVAL_RECOMMENDATION: Role.FAST,
@@ -430,27 +429,6 @@ def default_judge_model() -> str:
     return chain[0] if chain else ""
 
 
-def decision_models() -> tuple[Model, ...]:
-    return tuple(model for model in CATALOG if model.tier is Tier.DECISION)
-
-
-def decision_model() -> Model:
-    """``JEV_MODEL`` names the decision model the gateway routes; it has no default."""
-    slug = os.environ.get("JEV_MODEL", "").strip()
-    if not slug:
-        raise ValueError("JEV_MODEL is required")
-    for model in decision_models():
-        if model.slug == slug:
-            return model
-    raise ValueError(
-        f"JEV_MODEL={slug} is not one of {', '.join(m.slug for m in decision_models())}"
-    )
-
-
-def is_decision_model(name: str) -> bool:
-    return name == "local-decision" or name.startswith((f"{Vendor.LOCAL}/", f"~{Vendor.LOCAL}/"))
-
-
 def judge_picker_models() -> list[str]:
     return list(dict.fromkeys([*ROLE_CHAINS[Role.FAST], *ROLE_CHAINS[Role.EXPLAIN]]))
 
@@ -461,6 +439,11 @@ def model_defaults() -> dict[str, object]:
         "judge_models": judge_picker_models(),
         "backtest_models": default_backtest_models(),
     }
+
+
+def is_single_stream(model_name: str) -> bool:
+    m = model(model_name)
+    return bool(m and m.single_stream)
 
 
 def default_backtest_models() -> list[str]:

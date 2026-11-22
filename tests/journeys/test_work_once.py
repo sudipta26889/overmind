@@ -40,10 +40,10 @@ def test_scored_spans_trajectories_and_drift_verdicts_are_never_judged_again(
     # The judges meet an expectation only on the good reply, so the tool step drifts.
     assert trace_spans(rest, project_id, trace)[tool_id]["eval_attributes"]["drift"] == 0.0
 
-    judged = len(fake_llm.decisions)
+    judged = len(fake_llm.judgments())
     clock.shift(SWEEP_WAIT)
     beat(RUN_SIGNALS, SWEEP_SPANS, SWEEP_TRAJECTORIES)
-    assert len(fake_llm.decisions) == judged
+    assert len(fake_llm.judgments()) == judged
 
     trace.add_tool(True)
     trace.send(live_api.url, key)
@@ -57,10 +57,10 @@ def test_scored_spans_trajectories_and_drift_verdicts_are_never_judged_again(
     ]
     assert len(trajectories) == 1
 
-    judged = len(fake_llm.decisions)
+    judged = len(fake_llm.judgments())
     clock.shift(SWEEP_WAIT)
     beat(RUN_SIGNALS, SWEEP_SPANS, SWEEP_TRAJECTORIES)
-    assert len(fake_llm.decisions) == judged
+    assert len(fake_llm.judgments()) == judged
 
 
 def test_cli_batch_lands_once_and_mcp_retains_all_sources(

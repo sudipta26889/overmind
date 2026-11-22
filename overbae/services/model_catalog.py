@@ -13,7 +13,6 @@ from django.core.cache import cache
 
 from overbae.core.model_registry import (
     OPENROUTER_MODEL_SLUGS,
-    is_decision_model,
     normalize_model_name,
     openrouter_configured,
     pricing_slug,
@@ -64,8 +63,6 @@ def _is_text_generation(entry: dict) -> bool:
 
 def _trim_entry(entry: dict) -> dict | None:
     slug = entry.get("id") or ""
-    if is_decision_model(slug):
-        return None
     if not slug or "/" not in slug:
         return None
     if not _is_text_generation(entry):

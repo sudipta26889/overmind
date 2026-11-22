@@ -438,7 +438,7 @@ def register_model_workflow_tools(catalog):
         (
             "list_decision_models",
             "Decision model catalog",
-            "List foundation, trained and external decision participants. Catalog eligibility is not measured hardware or quality qualification.",
+            "List foundation and trained decision participants. Catalog eligibility is not measured hardware or quality qualification.",
             DecisionCatalogInput,
             DecisionCatalogOutput,
             decision_catalog,
@@ -493,7 +493,7 @@ def register_model_workflow_tools(catalog):
         (
             "create_native_evaluation",
             "Compare decision models",
-            "Save an immutable comparison draft without submitting provider work. Use launch_native_evaluation to run: frozen input-only suites, foundations, trained artifacts or external probability models, optional calibration, paired scoring and durable receipts.",
+            "Save an immutable comparison draft without submitting provider work. Use launch_native_evaluation to run: frozen input-only suites, foundations or trained artifacts, optional calibration, paired scoring and durable receipts.",
             CreateComparisonInput,
             WorkflowOutput,
             create_comparison,

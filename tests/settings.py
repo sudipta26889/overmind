@@ -19,7 +19,7 @@ os.environ.setdefault("MODAL_TOKEN_ID", "testing")
 os.environ.setdefault("MODAL_TOKEN_SECRET", "testing")
 os.environ.setdefault("OPENROUTER_API_KEY", "testing")
 os.environ.setdefault("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-os.environ.setdefault("JEV_MODEL", "local/decision")
+os.environ.setdefault("LLM_JUDGE_CHAIN", "local-judge")
 os.environ.setdefault("LLM_FAST_CHAIN", "flint")
 os.environ.setdefault("LLM_AGENT_CHAIN", "flint")
 os.environ.setdefault("LLM_EXPLAIN_CHAIN", "")
@@ -57,6 +57,9 @@ SLACK_BOT_TOKEN = ""
 SLACK_SIGNING_SECRET = ""
 OVERWATCH_AGENT_ENABLED = False
 OVERWATCH_SLACK_ALLOWED_USER_IDS = ""
+
+# A local .env may sample live scoring; tests judge every trace.
+TRACE_SCORING_SAMPLE_RATE = 1
 
 # Remaining-credit billing on unless a test clears the key.
 STRIPE_SECRET_KEY = "sk_test_billing"

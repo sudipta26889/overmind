@@ -156,7 +156,7 @@ class SystemOneView(APIView):
                 {"error": {"message": exc.detail, "type": "invalid_request"}},
                 status=400,
             )
-        if deployment is None and not systemone.catalog_model(model):
+        if deployment is None:
             return Response(
                 {
                     "error": {
@@ -168,12 +168,9 @@ class SystemOneView(APIView):
             )
         require_credits(request.user)
         try:
-            if deployment is not None:
-                status_code, payload = systemone.call_deployment(
-                    deployment, request.user, request.auth, names, decisions
-                )
-            else:
-                status_code, payload = systemone.call_openrouter(request.user, body)
+            status_code, payload = systemone.call_deployment(
+                deployment, request.user, request.auth, names, decisions
+            )
         except InputValidationError as exc:
             return Response(
                 {"error": {"message": exc.detail, "type": "invalid_request"}},

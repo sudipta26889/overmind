@@ -140,7 +140,7 @@ PROMPTS = (
             "and holdouts containing field, values and role. Inspect get_job(kind=data_partition) for actual "
             "coverage and assignments. Prepare each member for its intended consumer through the Workshop. "
             "Save the exact prepared_cell and partition in the plan. Audit target contradictions, unavailable/post-outcome inputs, connected group leakage and slice coverage. Measure a simple baseline and a fitting sanity check on train/development only; retain methods, cells, metrics and limitations as attributed evidence. Create stage=full directly from the prepared plan when full training is requested; no pilot job or measured pilot selection is required. Only create stage=pilot when the user wants a bounded quality experiment, with max_steps up to 2048 and explicit development-loss selection. If the user chooses a pilot-derived recipe, retain its measured development-check ID, rationale and permitted budget_fields. Never reuse an unrelated pilot to satisfy a prerequisite. Never use final/calibration scores to choose a recipe. "
-            "Use list_decision_models to discover eligible foundations, trained artifacts and external models. "
+            "Use list_decision_models to discover eligible foundations and trained artifacts. "
             "Eligibility does not establish measured hardware fit. Use create_native_evaluation with frozen "
             "final_cell, optional calibration_cell, named participants and baseline key. Creation saves a draft without inference. prepare_native_evaluation verifies inputs; launch_native_evaluation starts the authorized saved scope. "
             "Temperature fitting requires probability targets; omit it for a mean-only suite. Inspect all "
@@ -150,7 +150,7 @@ PROMPTS = (
             'learning_rate, lora_r and seed; lora_r must be 8, 16, 32, 64, 128, 256, 320, or 512. lora_alpha is twice lora_r. LoRA uses training_type={{"type":"Lora"}}. checkpoint_policy has fractions ending at 1 and selection last '
             "or development_loss; final scores never select checkpoints. Inspect requested/effective settings "
             "and authorization after prepare_training_experiment returns a configuration-bound forecast. Pass its quote_id to launch_training_experiment where saved constraints require it. Novel recipes can use create_training_profile for explicitly authorized bounded measurement. Reuse completed compatible predictions only through reuse_evaluation_predictions or an explicit experiment reuse_existing_predictions choice. Poll existing jobs without duplicate starts. "
-            "Transient evaluation interruptions recover automatically; poll get_job while running. Use resume_native_evaluation only for stopped work. Saved call IDs and completed responses are reused; missing external predictions have bounded retries with uncertain prior costs retained. "
+            "Transient evaluation interruptions recover automatically; poll get_job while running. Use resume_native_evaluation only for stopped work. Saved call IDs and completed responses are reused. "
             "pause_native_evaluation stops new claims, not in-flight provider work. After model/runtime qualification, measure_decision_performance can run an authorized bounded workload before final quality scoring with "
             "sample_size, repetitions, concurrency, questions_per_request, seed and amortization_decisions. "
             "Report raw/calibrated metrics, in-sample calibration, paired uncertainty, missing/incompatible "

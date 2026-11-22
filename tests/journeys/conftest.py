@@ -161,10 +161,8 @@ GOOD_REPLY = "Order 42 was delivered. Your refund is on its way."
 
 @pytest.fixture
 def judges(fake_llm):
-    """Jev meets an expectation only when the judged output is the good reply."""
-    fake_llm.decide = lambda key, question, state: (
-        "yes" if GOOD_REPLY in str(state.get("output") or "") else "no"
-    )
+    """The judge meets an expectation only when the judged output is the good reply."""
+    fake_llm.verdict = lambda state: "yes" if GOOD_REPLY in str(state.get("output") or "") else "no"
 
 
 @pytest.fixture
