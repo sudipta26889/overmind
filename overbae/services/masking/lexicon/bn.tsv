@@ -1,0 +1,344 @@
+# Bengali lexicon. term<TAB>TYPE<TAB>roman variants separated by |
+ডায়াবেটিস	CONDITION	dayabetis
+উচ্চ রক্তচাপ	CONDITION	uccho roktochap|high pressure|hai pressure
+নিম্ন রক্তচাপ	CONDITION	low pressure|nimno roktochap
+হাঁপানি	CONDITION	hapani
+অ্যাজমা	CONDITION
+যক্ষ্মা	CONDITION	jokkha|joxma
+নিউমোনিয়া	CONDITION
+ক্যান্সার	CONDITION	canser
+টিউমার	CONDITION
+লিউকেমিয়া	CONDITION
+কেমোথেরাপি	CONDITION	kemo
+ডায়ালিসিস	CONDITION
+কিডনির পাথর	CONDITION	kidneyr pathor
+কিডনি ফেলিওর	CONDITION	kidney failure
+জন্ডিস	CONDITION	jondis
+হেপাটাইটিস	CONDITION
+থাইরয়েড	CONDITION
+পিসিওএস	CONDITION
+গর্ভাবস্থা	CONDITION	gorbhoboshtha
+অন্তঃসত্ত্বা	CONDITION	ontoshotta
+গর্ভবতী	CONDITION	gorbhoboti
+গর্ভপাত	CONDITION	gorbhopat
+বন্ধ্যাত্ব	CONDITION	bondhyatto
+রক্তশূন্যতা	CONDITION	roktoshunnota
+থ্যালাসেমিয়া	CONDITION
+আর্থ্রাইটিস	CONDITION
+মাইগ্রেন	CONDITION
+মৃগী	CONDITION	mrigi
+স্ট্রোক	CONDITION
+হার্ট অ্যাটাক	CONDITION	heart attack|hart attack
+হৃদরোগ	CONDITION	hridrog
+কোলেস্টেরল	CONDITION
+ডেঙ্গু	CONDITION	dengu
+ম্যালেরিয়া	CONDITION
+টাইফয়েড	CONDITION
+কোভিড	CONDITION
+এইচআইভি	CONDITION
+এইডস	CONDITION
+বিষণ্ণতা	CONDITION	bishannota
+ডিপ্রেশন	CONDITION
+উদ্বেগ	CONDITION	udbeg
+অনিদ্রা	CONDITION	onidra|ghum na hawa
+অ্যালার্জি	CONDITION
+চুলকানি	CONDITION	chulkani
+একজিমা	CONDITION
+সোরিয়াসিস	CONDITION
+স্থূলতা	CONDITION	sthulota
+গ্যাস্ট্রিক	CONDITION	gastric
+আলসার	CONDITION
+অর্শ	CONDITION	orsho
+হার্নিয়া	CONDITION
+সাইনাস	CONDITION
+জ্বর	CONDITION	jor|jwor
+কাশি	CONDITION	kashi
+বমি	CONDITION	bomi
+ডায়রিয়া	CONDITION
+পাতলা পায়খানা	CONDITION	patla paikhana
+ছানি	CONDITION	chhani
+গ্লুকোমা	CONDITION
+মাথাব্যথা	CONDITION	mathabyatha|matha betha
+পেটব্যথা	CONDITION	petbyatha|pet betha
+বুকে ব্যথা	CONDITION	buke byatha
+মেটফর্মিন	MEDICATION
+ইনসুলিন	MEDICATION
+প্যারাসিটামল	MEDICATION
+নাপা	MEDICATION	napa
+অ্যামোক্সিসিলিন	MEDICATION
+অ্যাজিথ্রোমাইসিন	MEDICATION
+সেটিরিজিন	MEDICATION
+প্যান্টোপ্রাজল	MEDICATION
+ওমিপ্রাজল	MEDICATION
+এসোমিপ্রাজল	MEDICATION
+এন্টাসিড	MEDICATION	antacid
+অ্যাসপিরিন	MEDICATION
+ডাইক্লোফেনাক	MEDICATION
+আইবুপ্রোফেন	MEDICATION
+ক্যালসিয়াম	MEDICATION
+ভিটামিন ডি	MEDICATION
+আয়রন ট্যাবলেট	MEDICATION	iron tablet
+স্টেরয়েড	MEDICATION
+অ্যান্টিবায়োটিক	MEDICATION
+ঘুমের ওষুধ	MEDICATION	ghumer oshudh
+ব্যথার ওষুধ	MEDICATION	byathar oshudh
+অ্যাটোরভাস্টাটিন	MEDICATION
+অ্যামলোডিপিন	MEDICATION
+লিভোথাইরক্সিন	MEDICATION
+রক্ত পরীক্ষা	TEST	rokto porikkha|blood test
+সুগার টেস্ট	TEST	sugar test
+এইচবিএ১সি	TEST
+থাইরয়েড টেস্ট	TEST
+লিপিড প্রোফাইল	TEST
+সিবিসি	TEST
+ইসিজি	TEST
+ইকো	TEST
+এমআরআই	TEST
+সিটি স্ক্যান	TEST
+এক্স-রে	TEST	x ray
+আল্ট্রাসাউন্ড	TEST
+আল্ট্রাসনোগ্রাফি	TEST	usg|ultrasonogram
+বায়োপসি	TEST
+এন্ডোস্কপি	TEST
+ম্যামোগ্রাফি	TEST
+প্রস্রাব পরীক্ষা	TEST	prosrab porikkha
+অ্যাঞ্জিওগ্রাফি	TEST
+আরটি-পিসিআর	TEST
+কোভিড টেস্ট	TEST
+ভিটামিন বি১২	TEST
+ক্রিয়েটিনিন	TEST
+প্রেগন্যান্সি টেস্ট	TEST	pregnancy test
+এইচডিএফসি ব্যাংক	FINANCE_ORG
+আইসিআইসিআই ব্যাংক	FINANCE_ORG
+স্টেট ব্যাংক অব ইন্ডিয়া	FINANCE_ORG
+এসবিআই	FINANCE_ORG
+অ্যাক্সিস ব্যাংক	FINANCE_ORG
+কোটাক মাহিন্দ্রা	FINANCE_ORG
+পাঞ্জাব ন্যাশনাল ব্যাংক	FINANCE_ORG
+ব্যাংক অব বরোদা	FINANCE_ORG
+ক্যানারা ব্যাংক	FINANCE_ORG
+ইউনিয়ন ব্যাংক	FINANCE_ORG
+ইন্ডাসইন্ড ব্যাংক	FINANCE_ORG
+ইয়েস ব্যাংক	FINANCE_ORG
+বাজাজ ফাইন্যান্স	FINANCE_ORG
+মুথুট ফাইন্যান্স	FINANCE_ORG
+টাটা ক্যাপিটাল	FINANCE_ORG
+এলআইসি	FINANCE_ORG
+স্টার হেলথ	FINANCE_ORG
+জেরোধা	FINANCE_ORG
+পেটিএম	FINANCE_ORG
+ফোনপে	FINANCE_ORG
+গুগল পে	FINANCE_ORG
+মিউচুয়াল ফান্ড	FINANCE_ORG
+সমবায় ব্যাংক	FINANCE_ORG	somobay bank
+মহাজন	FINANCE_ORG	mohajon
+বিকাশ	FINANCE_ORG	bkash
+নগদ	FINANCE_ORG	nagad
+ডাচ-বাংলা ব্যাংক	FINANCE_ORG	dutch bangla bank
+ব্র্যাক ব্যাংক	FINANCE_ORG	brac bank
+সোনালী ব্যাংক	FINANCE_ORG	sonali bank
+ইসলামী ব্যাংক	FINANCE_ORG	islami bank
+গ্রামীণ ব্যাংক	FINANCE_ORG	grameen bank
+মা	RELATION	maa|mum
+আম্মা	RELATION	amma
+বাবা	RELATION	baba
+আব্বা	RELATION	abba
+দাদা	RELATION	dada
+দিদি	RELATION	didi
+ঠাকুমা	RELATION	thakuma
+দাদু	RELATION	dadu
+দিদিমা	RELATION	didima
+দাদি	RELATION	dadi
+নানি	RELATION	nani
+নানা	RELATION	nana
+কাকা	RELATION	kaka
+কাকিমা	RELATION	kakima
+জেঠু	RELATION	jethu
+জেঠিমা	RELATION	jethima
+মামা	RELATION	mama
+মামি	RELATION	mami
+মাসি	RELATION	mashi
+পিসি	RELATION	pishi
+পিসেমশাই	RELATION	pishemoshai
+মেসো	RELATION	meso
+ভাই	RELATION	bhai
+বোন	RELATION	bon
+বউ	RELATION	bou
+বউদি	RELATION	boudi
+স্ত্রী	RELATION	stri
+স্বামী	RELATION	shami|swami
+ছেলে	RELATION	chele
+বৌমা	RELATION	bouma
+জামাই	RELATION	jamai
+শাশুড়ি	RELATION	shashuri
+শ্বশুর	RELATION	shoshur
+দেবর	RELATION	debor
+ননদ	RELATION	nonod
+শালা	RELATION	shala
+শালী	RELATION	shali
+ভাইপো	RELATION	bhaipo
+ভাগ্নে	RELATION	bhagne
+নাতি	RELATION	nati
+নাতনি	RELATION	natni
+# Widened coverage.
+ফেরিটিন	TEST	ferritin
+ইসিজি	TEST	ecg
+এমআরআই	TEST	mri
+সিটি স্ক্যান	TEST
+এক্স-রে	TEST	x ray
+আল্ট্রাসনোগ্রাফি	TEST	usg|ultrasonography
+সোনোগ্রাফি	TEST
+ইকো	TEST
+অ্যাঞ্জিওগ্রাফি	TEST
+এন্ডোস্কোপি	TEST
+বায়োপসি	TEST
+লিপিড প্রোফাইল	TEST
+থাইরয়েড প্রোফাইল	TEST
+টিএসএইচ	TEST
+সিবিসি	TEST
+রক্ত পরীক্ষা	TEST	rakto porikkha
+প্রস্রাব পরীক্ষা	TEST
+ক্রিয়েটিনিন	TEST
+ইউরিক অ্যাসিড	TEST
+বিলিরুবিন	TEST
+হিমোগ্লোবিন	TEST
+এইচবিএ১সি	TEST
+সুগার টেস্ট	TEST
+ভিটামিন ডি	TEST
+ভিটামিন বি১২	TEST
+ডেঙ্গু টেস্ট	TEST
+আরটি-পিসিআর	TEST
+এলএফটি	TEST
+কেএফটি	TEST
+ফাইব্রোমায়ালজিয়া	CONDITION
+ভার্টিগো	CONDITION
+মাথা ঘোরা	CONDITION	matha ghora
+গাউট	CONDITION
+সায়াটিকা	CONDITION
+স্পন্ডিলাইটিস	CONDITION
+লুপাস	CONDITION
+অম্বল	CONDITION	ombol
+অ্যাসিডিটি	CONDITION	acidity
+কোষ্ঠকাঠিন্য	CONDITION
+পিত্তথলির পাথর	CONDITION
+প্রোস্টেট	CONDITION
+মেনোপজ	CONDITION
+ফাইব্রয়েড	CONDITION
+স্তন ক্যান্সার	CONDITION
+ফুসফুসের ক্যান্সার	CONDITION
+মুখের ক্যান্সার	CONDITION
+ব্লাড ক্যান্সার	CONDITION
+হার্ট ব্লকেজ	CONDITION
+বাইপাস সার্জারি	CONDITION
+অ্যাঞ্জিওপ্লাস্টি	CONDITION
+পেসমেকার	CONDITION
+বুক ধড়ফড়	CONDITION
+ভেরিকোজ ভেইন	CONDITION
+টনসিলাইটিস	CONDITION
+কানের সংক্রমণ	CONDITION
+চোখ ওঠা	CONDITION
+জলবসন্ত	CONDITION
+হাম	CONDITION
+মাম্পস	CONDITION
+কলেরা	CONDITION
+চিকুনগুনিয়া	CONDITION
+সোয়াইন ফ্লু	CONDITION
+ইনফ্লুয়েঞ্জা	CONDITION
+গলা ব্যথা	CONDITION
+শ্বেতী	CONDITION
+দাদ	CONDITION
+প্যানিক অ্যাটাক	CONDITION
+মদের নেশা	CONDITION
+টেমসুলোসিন	MEDICATION	tamsulosin
+কলচিসিন	MEDICATION
+অ্যালোপিউরিনল	MEDICATION
+গ্লিমেপিরাইড	MEDICATION
+অ্যামলোডিপিন	MEDICATION	amlodipine
+টেলমিসারটান	MEDICATION
+লোসারটান	MEDICATION
+অ্যাটোরভাস্ট্যাটিন	MEDICATION
+রোসুভাস্ট্যাটিন	MEDICATION
+ক্লোপিডোগ্রেল	MEDICATION
+ওয়ারফারিন	MEDICATION
+ফুরোসেমাইড	MEDICATION
+লেভোথাইরক্সিন	MEDICATION
+থাইরোনর্ম	MEDICATION
+সেটিরিজিন	MEDICATION
+লেভোসেটিরিজিন	MEDICATION
+মন্টেলুকাস্ট	MEDICATION
+র‍্যাবিপ্রাজল	MEDICATION
+ডমপেরিডোন	MEDICATION
+অনডানসেট্রন	MEDICATION
+সিপ্রোফ্লক্সাসিন	MEDICATION
+সেফিক্সিম	MEDICATION
+অগমেন্টিন	MEDICATION
+মেট্রোনিডাজল	MEDICATION
+ফ্লুকোনাজল	MEDICATION
+আইভারমেকটিন	MEDICATION
+ডাইক্লোফেনাক	MEDICATION
+আইবুপ্রোফেন	MEDICATION
+কম্বিফ্লাম	MEDICATION
+মেফটাল	MEDICATION
+ট্রামাডল	MEDICATION
+গ্যাবাপেন্টিন	MEDICATION
+প্রিগাবালিন	MEDICATION
+সার্ট্রালিন	MEDICATION
+এসসিটালোপ্রাম	MEDICATION
+অ্যালপ্রাজোলাম	MEDICATION
+ক্লোনাজেপাম	MEDICATION
+অলানজাপিন	MEDICATION
+প্রেডনিসোলোন	MEDICATION
+ডেক্সামেথাসোন	MEDICATION
+ফোলিক অ্যাসিড	MEDICATION
+আয়রন ট্যাবলেট	MEDICATION
+ক্যালসিয়াম ট্যাবলেট	MEDICATION
+মাল্টিভিটামিন	MEDICATION
+শেলক্যাল	MEDICATION
+জিঙ্কোভিট	MEDICATION
+নিউরোবিয়ন	MEDICATION
+জেলুসিল	MEDICATION
+ডাইজিন	MEDICATION
+সিনারেস্ট	MEDICATION
+বেনাড্রিল	MEDICATION
+মা	RELATION	ma|maa
+মাতা	RELATION
+আম্মা	RELATION	amma
+আম্মু	RELATION
+বাবা	RELATION	baba
+বাপি	RELATION
+আব্বা	RELATION	abba
+স্বামী	RELATION	shami
+স্ত্রী	RELATION
+বউ	RELATION	bou
+বউদি	RELATION	boudi
+বৌদি	RELATION
+ছেলে	RELATION	chele
+মেয়ে	RELATION	meye
+ভাই	RELATION	bhai
+দাদা	RELATION	dada
+দিদি	RELATION	didi
+বোন	RELATION	bon
+ঠাকুমা	RELATION	thakuma
+ঠাকুরদা	RELATION
+দাদু	RELATION	dadu
+দিদা	RELATION
+দিদিমা	RELATION
+নানা	RELATION
+নানি	RELATION
+কাকা	RELATION	kaka
+কাকিমা	RELATION	kakima
+জেঠু	RELATION	jethu
+জেঠিমা	RELATION
+মামা	RELATION	mama
+মামি	RELATION
+মাসি	RELATION	mashi
+পিসি	RELATION	pishi
+পিসেমশাই	RELATION
+শ্বশুর	RELATION
+শাশুড়ি	RELATION
+শালা	RELATION
+শালি	RELATION
+ভাইপো	RELATION
+ভাইঝি	RELATION
+নাতি	RELATION
+নাতনি	RELATION

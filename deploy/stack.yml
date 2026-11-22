@@ -34,7 +34,7 @@ x-env: &env
   INFERENCE_API_URL: ${INFERENCE_API_URL:-}
   # Model roles come from the release, not the stack Env, whose old values name cloud chains.
   LLM_AGENT_CHAIN: flint
-  # The remote judge for projects certified to hold no personal data; first entry only.
+  # The remote judge for projects an admin approved for remote judging; first entry only.
   LLM_CLOUD_JUDGE_CHAIN: gpt-6-luna
   JUDGE_DAILY_LIMIT: "3000"
   # Spend bound: remote judge and explanation calls per UTC day.
@@ -134,6 +134,24 @@ services:
     command: celery -A overbae worker -l info --pool=prefork --concurrency=4 --prefetch-multiplier=1 --disable-prefetch --hostname=io_traces@%h -Q io_traces
     mem_limit: 4g
     memswap_limit: 5g
+    init: true
+
+  # The only service that holds the remote judge's key and the masking model; the model is
+  # loaded before the worker forks and the key file is mounted read-only.
+  celery-masking-worker:
+    <<: *worker
+    image: ghcr.io/sudipta26889/overmind-masking:latest
+    command: celery -A overbae worker -l info --pool=prefork --concurrency=1 --prefetch-multiplier=1 --disable-prefetch --hostname=masking@%h -Q masking
+    environment:
+      <<: *env
+      MASKING_ENABLED: "1"
+      MASKING_MODEL_DIR: /models/chitragupta
+      LLM_CLOUD_API_KEY_FILE: /run/secrets/overmind/cloud-judge.key
+    volumes:
+      - app_data:/data
+      - ${CLOUD_JUDGE_KEY_DIR:-/opt/overmind/secrets}:/run/secrets/overmind:ro
+    mem_limit: 4g
+    memswap_limit: 4g
     init: true
 
   celery-batch-worker:

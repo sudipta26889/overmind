@@ -524,3 +524,22 @@ class LiveScoringWork(models.Model):
             models.Index(fields=["finished_at"], name="live_scoring_finished"),
             models.Index(fields=["project", "state", "kind", "id"], name="live_scoring_kind_wait"),
         ]
+
+
+class LexiconGapReport(models.Model):
+    """One weekly pass of ``lexicon_gaps``: counts of terms the masking lexicon lacks.
+
+    It holds terms and counts only, never trace text, span ids or names. An admin reads it
+    and adds terms to the lexicon files in a pull request."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    sampled = models.PositiveIntegerField(default=0)
+    calls = models.PositiveIntegerField(default=0)
+    # [{"term", "type", "lang", "count"}], most frequent first.
+    terms = models.JSONField(default=list, blank=True)
+    # Why the pass stopped early or did not run: "", "backed_off", "cap", "off".
+    skipped = models.CharField(max_length=40, blank=True, default="")
+
+    class Meta:
+        ordering = ["-created_at"]

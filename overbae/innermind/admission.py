@@ -9,7 +9,7 @@ from django.db.models import Count, F, OuterRef, Subquery
 from django.utils import timezone
 
 from overbae.innermind import judge_health
-from overbae.innermind.evals import route_for
+from overbae.innermind.evals import MARKER, route_for
 from overbae.models import LiveScoringProject, LiveScoringScheduler, LiveScoringWork, Span
 
 ACTIVE = ("queued", "running")
@@ -31,11 +31,25 @@ def enqueue(project_id, kind: str, keys: list[str]) -> None:
     ).update(state="waiting", task_id="", expires_at=None)
 
 
-def judge_ready(project_id, active: dict) -> bool:
-    """Whether this project's judge can take work. The local judge pauses while it is backed
+def item_route(item):
+    """Where this item will be judged: its project's route, unless the item is marked."""
+    marked = False
+    if item.kind == "span":
+        marked = Span.objects.filter(span_id=item.key, eval_attributes__has_key=MARKER).exists()
+    elif item.kind == "trajectory":
+        marked = Span.objects.filter(
+            project_id=item.project_id,
+            trace_id=item.key,
+            parent_span_id__isnull=True,
+            eval_attributes__has_key=MARKER,
+        ).exists()
+    return route_for(item.project_id, marked=marked)
+
+
+def judge_ready(route, active: dict) -> bool:
+    """Whether this route's judge can take work. The local judge pauses while it is backed
     off and, being a single stream, serves one project at a time; a remote judge pauses only for
     its own faults, and never waits behind the local one."""
-    route = route_for(project_id)
     if not route.local:
         return not judge_health.backed_off(cloud=True)
     if judge_health.backed_off():
@@ -46,7 +60,7 @@ def judge_ready(project_id, active: dict) -> bool:
 
 
 @transaction.atomic
-def dispatch(publish) -> dict:
+def dispatch(publish, publish_masked=None) -> dict:
     LiveScoringScheduler.objects.get_or_create(pk=1)
     scheduler = (
         LiveScoringScheduler.objects.select_for_update(skip_locked=True).filter(pk=1).first()
@@ -88,9 +102,6 @@ def dispatch(publish) -> dict:
         )
         if project is None:
             break
-        if not judge_ready(project.project_id, active):
-            held.append(project.project_id)
-            continue
         kinds = ["span", "trajectory", "signals"]
         if project.last_kind in kinds:
             offset = kinds.index(project.last_kind) + 1
@@ -112,6 +123,10 @@ def dispatch(publish) -> dict:
                 break
         if item is None:
             break
+        route = item_route(item)
+        if not judge_ready(route, active):
+            held.append(project.project_id)
+            continue
         token = str(uuid.uuid4())
         work.filter(pk=item.pk).update(
             state="queued", task_id=token, queued_at=now, expires_at=now + QUEUED_LEASE
@@ -119,7 +134,7 @@ def dispatch(publish) -> dict:
         project.last_admitted_at = timezone.now()
         project.last_kind = item.kind
         project.save(update_fields=["last_admitted_at", "last_kind"])
-        publish(item.pk, token)
+        (publish if route.local or publish_masked is None else publish_masked)(item.pk, token)
         admitted += 1
     return {"admitted": admitted, "expired": expired}
 

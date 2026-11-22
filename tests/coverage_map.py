@@ -56,11 +56,51 @@ COVERAGE_MAP: dict[str, Entry] = {
         "No other account and no anonymous caller reads or writes a project's rows: "
         "REST, MCP, Console and ingest.",
     ),
-    "personal-data-routing": Entry(
+    "cloud-judging-routing": Entry(
         S1,
         INVARIANT,
-        "A project holding personal data is judged only on the local model; a remote judge sees "
-        "only projects an admin certified, re-checks the flag before every call, and is bounded.",
+        "A project without admin approval is judged only on the local model; a remote judge sees "
+        "only approved projects, re-checks the flag before every call, and is bounded.",
+    ),
+    "masking-detectors": Entry(
+        S1,
+        LOGIC,
+        "The masker replaces every identifier, amount, date, measured value and health or "
+        "finance term it can find, consistently within a call, and fails closed.",
+    ),
+    "masking-restore": Entry(
+        S2,
+        LOGIC,
+        "A remote explanation is restored from the in-process surrogate map and nowhere else.",
+    ),
+    "masking-fail-closed": Entry(
+        S1,
+        INVARIANT,
+        "A missing model, a timeout, an oversized input or a residual hit sends no remote "
+        "request and releases the item to the local judge.",
+    ),
+    "masking-egress": Entry(
+        S1,
+        INVARIANT,
+        "Only a masked payload reaches the remote judge, on the remote key, with no planted "
+        "value in any request.",
+    ),
+    "masking-route": Entry(
+        S1,
+        INVARIANT,
+        "A project reaches the remote judge only when approved, and a marked item stays local.",
+    ),
+    "masking-residual-fallback": Entry(
+        S1,
+        INVARIANT,
+        "A masking failure or a gateway guardrail refusal marks the item, is counted by reason, "
+        "and is re-offered to the local judge.",
+    ),
+    "lexicon-gaps": Entry(
+        S3,
+        INVARIANT,
+        "The lexicon gap pass reads spans on the local judge only, keeps only unmatched, "
+        "non-personal terms, honours the judge's cap and back-off, and stores counts, not text.",
     ),
     "authentication": Entry(
         S1,

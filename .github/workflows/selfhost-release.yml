@@ -15,6 +15,7 @@ concurrency:
 env:
   API_IMAGE: ghcr.io/sudipta26889/overmind-api
   CONSOLE_IMAGE: ghcr.io/sudipta26889/overmind-console
+  MASKING_IMAGE: ghcr.io/sudipta26889/overmind-masking
 
 jobs:
   build-and-push:
@@ -43,11 +44,14 @@ jobs:
           docker build -f deploy/api.Dockerfile --build-arg BASE=overmind-base \
             --build-arg RELEASE_SHA="$(git rev-parse HEAD)" \
             -t "$API_IMAGE:latest" -t "$API_IMAGE:$sha" .
+          docker build -f deploy/masking-worker.Dockerfile --build-arg BASE="$API_IMAGE:$sha" \
+            -t "$MASKING_IMAGE:latest" -t "$MASKING_IMAGE:$sha" .
           docker build -f deploy/console.Dockerfile \
             --build-arg VITE_API_BASE_URL=https://overmind-api.sudiptadhara.in \
             -t "$CONSOLE_IMAGE:latest" -t "$CONSOLE_IMAGE:$sha" frontend
           docker push --all-tags "$API_IMAGE"
           docker push --all-tags "$CONSOLE_IMAGE"
+          docker push --all-tags "$MASKING_IMAGE"
 
       # Portainer refuses to clone a repository containing a symlink, and .claude/skills is
       # one, so the stack deploys from a branch that holds only the stack file.

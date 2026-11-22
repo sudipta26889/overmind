@@ -19,9 +19,11 @@ from django.utils import timezone
 
 from overbae.innermind import evidence
 from overbae.innermind.evals import (
+    MARKER,
     Judge,
     JudgeRoute,
     JudgeUnavailableError,
+    MaskedFallbackError,
     judge_route,
     local_route,
 )
@@ -355,7 +357,8 @@ class PlanDriftSignal(Signal):
         await self.record(span, outcome)
 
     async def judge(self, span: Span) -> float | None:
-        judge = Judge(self.project_id, route=self.route)
+        route = local_route() if MARKER in span.eval_attributes else self.route
+        judge = Judge(self.project_id, route=route)
         state = judge.evidence(span, self.expectation)
         if "output" not in state:
             return None
@@ -363,7 +366,10 @@ class PlanDriftSignal(Signal):
 
     async def record(self, span: Span, outcome: float | None | Exception) -> None:
         attrs = span.eval_attributes
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, MaskedFallbackError):
+            # Masking could not handle this step: it is judged locally from now on, uncounted.
+            judged = {**attrs, MARKER: outcome.reason}
+        elif isinstance(outcome, Exception):
             logger.warning("Plan drift judge failed on span %s: %s", span.span_id, outcome)
             # A busy, slow or down judge is not an attempt; the span is judged again later.
             counted = 0 if isinstance(outcome, JudgeUnavailableError) else 1

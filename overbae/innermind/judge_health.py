@@ -82,6 +82,17 @@ def _spend(prefix: str, limit: int, *, cloud: bool) -> bool:
     return False
 
 
+def calls_today() -> int:
+    """Local judge requests counted so far today (UTC); 0 without a cache Redis."""
+    client = cache_redis()
+    if client is None:
+        return 0
+    try:
+        return int(client.get(f"overmind:judge:calls:{now().date().isoformat()}") or 0)
+    except (redis.RedisError, ValueError):
+        return 0
+
+
 def spend_call() -> bool:
     """Counts one local judge request against today's limit. False once the limit is passed, and
     judging then backs off until the next UTC midnight. Without a cache Redis, uncapped."""

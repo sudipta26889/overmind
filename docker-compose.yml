@@ -170,6 +170,22 @@ services:
       redis:
         condition: service_healthy
 
+  # Remote judging for approved projects: masks, calls the remote judge and restores the
+  # explanation in one process. Off unless started with --profile masking.
+  celery-masking-worker:
+    <<: *build-common
+    profiles: ["masking"]
+    command: watchmedo auto-restart --directory=/code/overbae --pattern='*.py' --recursive --signal SIGTERM -- celery -A overbae worker -l info --pool=prefork --concurrency=1 --prefetch-multiplier=1 --disable-prefetch --hostname=masking@%h -Q masking
+    restart: unless-stopped
+    mem_limit: 4g
+    environment:
+      <<: *env-common
+    depends_on:
+      api:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   celery-batch-worker:
     <<: *build-common
     command: watchmedo auto-restart --directory=/code/overbae --pattern='*.py' --recursive --signal SIGTERM -- celery -A overbae worker -l info --pool=prefork --concurrency=6 --prefetch-multiplier=1 --disable-prefetch -Q batch

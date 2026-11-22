@@ -5,6 +5,7 @@ import sys
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
@@ -452,6 +453,7 @@ CELERY_TASK_ROUTES = {
     "overbae.tasks.training_preparation.inspect_preparation": {"queue": "io"},
     "overbae.tasks.innermind.generate_row": {"queue": "batch"},
     "overbae.tasks.innermind.score_eval_run": {"queue": "batch"},
+    "overbae.tasks.innermind.report_lexicon_gaps": {"queue": "batch"},
     # Model warm-up blocks for minutes; control stays free for reconcilers and metrics.
     "overbae.tasks.innermind.run_eval_run": {"queue": "io"},
     "overbae.tasks.datasets.land": {"queue": "landing"},
@@ -466,6 +468,7 @@ CELERY_TASK_ROUTES = {
     "overbae.tasks.capability_rebind.rebind_unbound_spans": {"queue": "io"},
     "overbae.tasks.innermind.dispatch_live_scoring": {"queue": "control"},
     "overbae.tasks.innermind.execute_live_scoring": {"queue": "io_traces"},
+    "overbae.tasks.innermind.execute_masked_scoring": {"queue": "masking"},
     "overbae.tasks.innermind.score_spans": {"queue": "io_traces"},
     "overbae.tasks.innermind.sweep_unscored_spans": {"queue": "io_traces"},
     "overbae.tasks.innermind.score_trajectories": {"queue": "io_traces"},
@@ -474,6 +477,22 @@ CELERY_TASK_ROUTES = {
 
 # Share of traces live scoring judges, chosen by trace id; 1 scores every trace.
 TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE") or "1")
+
+# Masked remote judging. The remote key is a separate file read only by the masking worker;
+# the gateway allows that key the remote judge model and nothing else.
+LLM_CLOUD_API_KEY_FILE = os.environ.get("LLM_CLOUD_API_KEY_FILE", "")
+MASKING_ENABLED = os.environ.get("MASKING_ENABLED", "0") == "1"
+MASKING_MODEL_DIR = os.environ.get("MASKING_MODEL_DIR", "")
+MASKING_MODEL_REVISION = os.environ.get("MASKING_MODEL_REVISION", "")
+# The context model (GLiNER) beside the name model; empty runs the name model alone.
+MASKING_CONTEXT_DIR = os.environ.get("MASKING_CONTEXT_DIR", "")
+MASKING_CONTEXT_REVISION = os.environ.get("MASKING_CONTEXT_REVISION", "")
+MASKING_CONTEXT_THRESHOLD = float(os.environ.get("MASKING_CONTEXT_THRESHOLD") or "0.15")
+MASKING_TIMEOUT_SECONDS = float(os.environ.get("MASKING_TIMEOUT_SECONDS") or "5")
+# The judge's state limit: a state that is larger than the judge reads is not masked either.
+MASKING_MAX_BYTES = int(os.environ.get("MASKING_MAX_BYTES") or "24000")
+# Test seam for the name model (package.module:Class); empty in every real deployment.
+MASKING_NER_BACKEND = os.environ.get("MASKING_NER_BACKEND", "")
 
 CELERY_BEAT_SCHEDULE = {
     "workshop-bindings": {
@@ -589,6 +608,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "overbae.tasks.innermind.score_trajectories",
         "schedule": 300.0,
         "options": {"expires": 290.0},
+    },
+    # Weekly: terms the masking lexicon lacks, read by the local judge.
+    "report-lexicon-gaps": {
+        "task": "overbae.tasks.innermind.report_lexicon_gaps",
+        "schedule": crontab(hour=3, minute=30, day_of_week="sunday"),
     },
     "run-signals": {
         "task": "overbae.tasks.innermind.run_signals",

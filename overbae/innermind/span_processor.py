@@ -16,11 +16,14 @@ from django.utils import timezone
 from overbae.core.model_registry import Role
 from overbae.innermind import evidence
 from overbae.innermind.evals import (
+    MARKER,
     JudgeRoute,
     JudgeUnavailableError,
+    MaskedFallbackError,
     evaluator_factory,
     expectation_rows,
     judge_route,
+    local_route,
     matches,
 )
 from overbae.innermind.metrics import Metric, answers_for_capability, mean_of
@@ -320,10 +323,12 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
     )
     # A single-stream judge answers one call at a time: more waiting spans would only hold
     # claims and poll the lock.
-    route = await judge_route(project_id)
-    slots = asyncio.Semaphore(1 if route.single_stream else MAX_CONCURRENT_SPANS)
+    project_route = await judge_route(project_id)
+    slots = asyncio.Semaphore(1 if project_route.single_stream else MAX_CONCURRENT_SPANS)
 
     async def score(span: Span) -> Span | None:
+        # A span masking could not handle is judged locally from then on.
+        route = project_route if MARKER not in span.eval_attributes else local_route()
         trace = traces[span.trace_id]
         fallback = span.capability.description if span.capability_id else ""
         processor = span_processor_factory.get_processor(span)
@@ -347,6 +352,10 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
                     checkpoint=save_partial,
                     route=route,
                 )
+            except MaskedFallbackError as exc:
+                # Marked and released without an attempt; the sweep offers it to the local judge.
+                logger.info("Span %s stays local: %s", span.span_id, exc.reason)
+                span.eval_attributes = {**span.eval_attributes, MARKER: exc.reason}
             except JudgeUnavailableError as exc:
                 # Released below without an attempt; the sweep offers the span again.
                 logger.info("Judge unavailable for span %s: %s", span.span_id, exc)

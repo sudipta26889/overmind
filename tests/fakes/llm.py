@@ -23,6 +23,7 @@ Reply = str | dict[str, Any] | Callable[["LLMRequest"], "str | dict[str, Any]"]
 class LLMRequest:
     url: str
     body: dict[str, Any]
+    headers: dict[str, str] = field(default_factory=dict)
     total_tokens: int = 0
     reply: dict[str, Any] = field(default_factory=dict)
 
@@ -180,6 +181,10 @@ class FakeLLM:
             for slug in slugs
         ]
 
+    # With a key set, the gateway behaves as GuardianAI's split: that key may call only the
+    # remote models, and every other key is refused them.
+    cloud_key: str | None = None
+    cloud_models: frozenset[str] = frozenset({"openai/gpt-6-luna"})
     # Maps the judged state to "yes", "partial" or "no"; unset answers "yes".
     verdict: Callable[[dict[str, Any]], str] | None = None
 
@@ -327,7 +332,22 @@ class FakeLLM:
             )
         if method == "POST" and url.rstrip("/").endswith("/chat/completions"):
             body = json.loads(raw or b"{}")
-            request = LLMRequest(url=url, body=body)
+            request = LLMRequest(
+                url=url, body=body, headers={k.lower(): v for k, v in (headers or {}).items()}
+            )
+            if self.cloud_key and (
+                (request.model in self.cloud_models)
+                != (request.headers.get("authorization") == f"Bearer {self.cloud_key}")
+            ):
+                with self._lock:
+                    self.requests.append(request)
+                return (
+                    403,
+                    {"content-type": "application/json"},
+                    json.dumps(
+                        {"error": {"message": "key not allowed to call this model"}}
+                    ).encode(),
+                )
             if body.get("stream"):
                 return 200, {"content-type": "text/event-stream"}, self.stream(request)
             completion = self.completion(request)

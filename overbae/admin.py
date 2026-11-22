@@ -13,6 +13,7 @@ from overbae.models import (
     EvalScore,
     EvalSet,
     Feedback,
+    LexiconGapReport,
     ModelRef,
     OptimizerCandidate,
     OptimizerCommand,
@@ -439,3 +440,9 @@ class SignalEventAdmin(admin.ModelAdmin):
     list_filter = ["signal_type", "occurred_at"]
     search_fields = ["signal_type", "trace_id", "message"]
     readonly_fields = ["id", "occurred_at"]
+
+
+@admin.register(LexiconGapReport)
+class LexiconGapReportAdmin(admin.ModelAdmin):
+    list_display = ["created_at", "sampled", "calls", "skipped"]
+    readonly_fields = ["created_at", "sampled", "calls", "terms", "skipped"]

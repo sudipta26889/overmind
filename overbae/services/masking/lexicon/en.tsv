@@ -1,0 +1,635 @@
+# English lexicon. term<TAB>TYPE. Types: CONDITION MEDICATION TEST FINANCE_ORG RELATION.
+diabetes	CONDITION
+diabetic	CONDITION
+prediabetes	CONDITION
+hypertension	CONDITION
+high blood pressure	CONDITION
+low blood pressure	CONDITION
+hypotension	CONDITION
+asthma	CONDITION
+copd	CONDITION
+tuberculosis	CONDITION
+tb	CONDITION
+pneumonia	CONDITION
+bronchitis	CONDITION
+cancer	CONDITION
+tumour	CONDITION
+tumor	CONDITION
+leukemia	CONDITION
+lymphoma	CONDITION
+chemotherapy	CONDITION
+chemo	CONDITION
+radiation therapy	CONDITION
+dialysis	CONDITION
+kidney failure	CONDITION
+kidney stone	CONDITION
+fatty liver	CONDITION
+hepatitis	CONDITION
+jaundice	CONDITION
+cirrhosis	CONDITION
+thyroid	CONDITION
+hypothyroidism	CONDITION
+hyperthyroidism	CONDITION
+pcos	CONDITION
+pcod	CONDITION
+endometriosis	CONDITION
+pregnancy	CONDITION
+pregnant	CONDITION
+miscarriage	CONDITION
+infertility	CONDITION
+anemia	CONDITION
+anaemia	CONDITION
+thalassemia	CONDITION
+arthritis	CONDITION
+osteoporosis	CONDITION
+migraine	CONDITION
+epilepsy	CONDITION
+seizure	CONDITION
+stroke	CONDITION
+heart attack	CONDITION
+heart failure	CONDITION
+angina	CONDITION
+arrhythmia	CONDITION
+cholesterol	CONDITION
+dengue	CONDITION
+malaria	CONDITION
+typhoid	CONDITION
+covid	CONDITION
+covid-19	CONDITION
+hiv	CONDITION
+aids	CONDITION
+depression	CONDITION
+anxiety	CONDITION
+bipolar	CONDITION
+schizophrenia	CONDITION
+adhd	CONDITION
+autism	CONDITION
+insomnia	CONDITION
+panic attack	CONDITION
+ptsd	CONDITION
+dementia	CONDITION
+alzheimer	CONDITION
+parkinson	CONDITION
+allergy	CONDITION
+eczema	CONDITION
+psoriasis	CONDITION
+acne	CONDITION
+obesity	CONDITION
+gastritis	CONDITION
+ulcer	CONDITION
+ibs	CONDITION
+piles	CONDITION
+hernia	CONDITION
+appendicitis	CONDITION
+sinusitis	CONDITION
+fever	CONDITION
+cough	CONDITION
+vomiting	CONDITION
+diarrhoea	CONDITION
+diarrhea	CONDITION
+cataract	CONDITION
+glaucoma	CONDITION
+metformin	MEDICATION
+insulin	MEDICATION
+glimepiride	MEDICATION
+gliclazide	MEDICATION
+sitagliptin	MEDICATION
+amlodipine	MEDICATION
+telmisartan	MEDICATION
+losartan	MEDICATION
+atenolol	MEDICATION
+metoprolol	MEDICATION
+ramipril	MEDICATION
+atorvastatin	MEDICATION
+rosuvastatin	MEDICATION
+clopidogrel	MEDICATION
+aspirin	MEDICATION
+warfarin	MEDICATION
+paracetamol	MEDICATION
+acetaminophen	MEDICATION
+ibuprofen	MEDICATION
+diclofenac	MEDICATION
+amoxicillin	MEDICATION
+azithromycin	MEDICATION
+ciprofloxacin	MEDICATION
+doxycycline	MEDICATION
+cetirizine	MEDICATION
+montelukast	MEDICATION
+salbutamol	MEDICATION
+pantoprazole	MEDICATION
+omeprazole	MEDICATION
+levothyroxine	MEDICATION
+sertraline	MEDICATION
+escitalopram	MEDICATION
+fluoxetine	MEDICATION
+alprazolam	MEDICATION
+clonazepam	MEDICATION
+zolpidem	MEDICATION
+prednisolone	MEDICATION
+methotrexate	MEDICATION
+tamoxifen	MEDICATION
+dolo	MEDICATION
+crocin	MEDICATION
+combiflam	MEDICATION
+ecosprin	MEDICATION
+shelcal	MEDICATION
+becosules	MEDICATION
+hba1c	TEST
+blood sugar	TEST
+fasting sugar	TEST
+lipid profile	TEST
+thyroid profile	TEST
+tsh	TEST
+cbc	TEST
+complete blood count	TEST
+ecg	TEST
+echocardiogram	TEST
+2d echo	TEST
+mri	TEST
+ct scan	TEST
+x-ray	TEST
+ultrasound	TEST
+sonography	TEST
+biopsy	TEST
+endoscopy	TEST
+colonoscopy	TEST
+mammogram	TEST
+pap smear	TEST
+pet scan	TEST
+urine culture	TEST
+liver function test	TEST
+kidney function test	TEST
+creatinine	TEST
+vitamin d	TEST
+vitamin b12	TEST
+rt-pcr	TEST
+rapid antigen	TEST
+angiography	TEST
+hdfc bank	FINANCE_ORG
+hdfc	FINANCE_ORG
+icici bank	FINANCE_ORG
+icici	FINANCE_ORG
+state bank of india	FINANCE_ORG
+sbi	FINANCE_ORG
+axis bank	FINANCE_ORG
+kotak mahindra	FINANCE_ORG
+kotak	FINANCE_ORG
+punjab national bank	FINANCE_ORG
+pnb	FINANCE_ORG
+bank of baroda	FINANCE_ORG
+canara bank	FINANCE_ORG
+union bank	FINANCE_ORG
+indusind bank	FINANCE_ORG
+yes bank	FINANCE_ORG
+idfc first	FINANCE_ORG
+federal bank	FINANCE_ORG
+bandhan bank	FINANCE_ORG
+paytm payments bank	FINANCE_ORG
+bajaj finance	FINANCE_ORG
+bajaj finserv	FINANCE_ORG
+muthoot finance	FINANCE_ORG
+manappuram	FINANCE_ORG
+tata capital	FINANCE_ORG
+lic	FINANCE_ORG
+hdfc life	FINANCE_ORG
+sbi life	FINANCE_ORG
+icici prudential	FINANCE_ORG
+max life	FINANCE_ORG
+star health	FINANCE_ORG
+niva bupa	FINANCE_ORG
+care health	FINANCE_ORG
+zerodha	FINANCE_ORG
+groww	FINANCE_ORG
+upstox	FINANCE_ORG
+paytm	FINANCE_ORG
+phonepe	FINANCE_ORG
+google pay	FINANCE_ORG
+gpay	FINANCE_ORG
+lendingkart	FINANCE_ORG
+kreditbee	FINANCE_ORG
+moneyview	FINANCE_ORG
+mutual fund	FINANCE_ORG
+nse	FINANCE_ORG
+bse	FINANCE_ORG
+my wife	RELATION
+my husband	RELATION
+my mother	RELATION
+my father	RELATION
+my son	RELATION
+my daughter	RELATION
+my brother	RELATION
+my sister	RELATION
+my grandmother	RELATION
+my grandfather	RELATION
+my uncle	RELATION
+my aunt	RELATION
+my mother-in-law	RELATION
+my father-in-law	RELATION
+my daughter-in-law	RELATION
+my son-in-law	RELATION
+
+# Widened coverage: common tests, chronic conditions, generic and brand drugs, relation words.
+ferritin	TEST
+ecg	TEST
+ekg	TEST
+mri	TEST
+ct scan	TEST
+x-ray	TEST
+xray	TEST
+ultrasound	TEST
+sonography	TEST
+usg	TEST
+2d echo	TEST
+tmt	TEST
+angiography	TEST
+endoscopy	TEST
+colonoscopy	TEST
+mammography	TEST
+pap smear	TEST
+biopsy	TEST
+pet scan	TEST
+dexa scan	TEST
+eeg	TEST
+emg	TEST
+spirometry	TEST
+hba1c	TEST
+fasting sugar	TEST
+random blood sugar	TEST
+post prandial	TEST
+ppbs	TEST
+fbs	TEST
+rbs	TEST
+cbc	TEST
+complete blood count	TEST
+lipid profile	TEST
+liver function test	TEST
+lft	TEST
+kidney function test	TEST
+kft	TEST
+rft	TEST
+thyroid profile	TEST
+tsh	TEST
+t3	TEST
+t4	TEST
+creatinine	TEST
+urea	TEST
+uric acid	TEST
+bilirubin	TEST
+sgpt	TEST
+sgot	TEST
+hemoglobin	TEST
+haemoglobin	TEST
+platelet count	TEST
+esr	TEST
+crp	TEST
+d-dimer	TEST
+troponin	TEST
+psa	TEST
+vitamin d	TEST
+vitamin b12	TEST
+calcium test	TEST
+urine culture	TEST
+urine routine	TEST
+stool test	TEST
+blood culture	TEST
+widal	TEST
+ns1	TEST
+rt-pcr	TEST
+rtpcr	TEST
+pcr test	TEST
+rapid antigen	TEST
+mantoux	TEST
+hiv test	TEST
+hepatitis b test	TEST
+beta hcg	TEST
+semen analysis	TEST
+bone density	TEST
+sleep study	TEST
+fibromyalgia	CONDITION
+vertigo	CONDITION
+gout	CONDITION
+sciatica	CONDITION
+spondylitis	CONDITION
+cervical spondylosis	CONDITION
+slip disc	CONDITION
+lupus	CONDITION
+multiple sclerosis	CONDITION
+crohn's disease	CONDITION
+ulcerative colitis	CONDITION
+celiac disease	CONDITION
+gerd	CONDITION
+acidity	CONDITION
+constipation	CONDITION
+hemorrhoids	CONDITION
+kidney infection	CONDITION
+uti	CONDITION
+urinary tract infection	CONDITION
+prostate enlargement	CONDITION
+bph	CONDITION
+fibroid	CONDITION
+ovarian cyst	CONDITION
+menopause	CONDITION
+gestational diabetes	CONDITION
+preeclampsia	CONDITION
+cerebral palsy	CONDITION
+down syndrome	CONDITION
+sickle cell	CONDITION
+hemophilia	CONDITION
+breast cancer	CONDITION
+lung cancer	CONDITION
+oral cancer	CONDITION
+cervical cancer	CONDITION
+prostate cancer	CONDITION
+colon cancer	CONDITION
+liver cancer	CONDITION
+blood cancer	CONDITION
+brain tumour	CONDITION
+brain tumor	CONDITION
+heart blockage	CONDITION
+bypass surgery	CONDITION
+angioplasty	CONDITION
+pacemaker	CONDITION
+heart murmur	CONDITION
+palpitations	CONDITION
+varicose veins	CONDITION
+deep vein thrombosis	CONDITION
+dvt	CONDITION
+tonsillitis	CONDITION
+ear infection	CONDITION
+hearing loss	CONDITION
+tinnitus	CONDITION
+conjunctivitis	CONDITION
+myopia	CONDITION
+retinopathy	CONDITION
+dry eyes	CONDITION
+dandruff	CONDITION
+vitiligo	CONDITION
+ringworm	CONDITION
+scabies	CONDITION
+chickenpox	CONDITION
+measles	CONDITION
+mumps	CONDITION
+cholera	CONDITION
+chikungunya	CONDITION
+swine flu	CONDITION
+influenza	CONDITION
+flu	CONDITION
+cold and cough	CONDITION
+sore throat	CONDITION
+bipolar disorder	CONDITION
+ocd	CONDITION
+eating disorder	CONDITION
+alcohol addiction	CONDITION
+panic disorder	CONDITION
+burnout	CONDITION
+hypothyroid	CONDITION
+pcos	CONDITION
+anaphylaxis	CONDITION
+tamsulosin	MEDICATION
+colchicine	MEDICATION
+allopurinol	MEDICATION
+febuxostat	MEDICATION
+glipizide	MEDICATION
+vildagliptin	MEDICATION
+teneligliptin	MEDICATION
+dapagliflozin	MEDICATION
+empagliflozin	MEDICATION
+pioglitazone	MEDICATION
+voglibose	MEDICATION
+nifedipine	MEDICATION
+cilnidipine	MEDICATION
+olmesartan	MEDICATION
+valsartan	MEDICATION
+bisoprolol	MEDICATION
+carvedilol	MEDICATION
+nebivolol	MEDICATION
+furosemide	MEDICATION
+torsemide	MEDICATION
+spironolactone	MEDICATION
+hydrochlorothiazide	MEDICATION
+digoxin	MEDICATION
+nitroglycerin	MEDICATION
+isosorbide	MEDICATION
+ticagrelor	MEDICATION
+rivaroxaban	MEDICATION
+apixaban	MEDICATION
+heparin	MEDICATION
+simvastatin	MEDICATION
+fenofibrate	MEDICATION
+ezetimibe	MEDICATION
+levocetirizine	MEDICATION
+fexofenadine	MEDICATION
+chlorpheniramine	MEDICATION
+levosalbutamol	MEDICATION
+budesonide	MEDICATION
+formoterol	MEDICATION
+ipratropium	MEDICATION
+deriphyllin	MEDICATION
+theophylline	MEDICATION
+ranitidine	MEDICATION
+famotidine	MEDICATION
+rabeprazole	MEDICATION
+esomeprazole	MEDICATION
+domperidone	MEDICATION
+ondansetron	MEDICATION
+metoclopramide	MEDICATION
+loperamide	MEDICATION
+lactulose	MEDICATION
+isabgol	MEDICATION
+zinc tablets	MEDICATION
+ciprofloxacin	MEDICATION
+levofloxacin	MEDICATION
+ofloxacin	MEDICATION
+norfloxacin	MEDICATION
+cefixime	MEDICATION
+cefuroxime	MEDICATION
+ceftriaxone	MEDICATION
+amoxyclav	MEDICATION
+augmentin	MEDICATION
+clindamycin	MEDICATION
+metronidazole	MEDICATION
+tinidazole	MEDICATION
+nitrofurantoin	MEDICATION
+fluconazole	MEDICATION
+terbinafine	MEDICATION
+ivermectin	MEDICATION
+albendazole	MEDICATION
+hydroxychloroquine	MEDICATION
+acyclovir	MEDICATION
+oseltamivir	MEDICATION
+rifampicin	MEDICATION
+isoniazid	MEDICATION
+ethambutol	MEDICATION
+pyrazinamide	MEDICATION
+naproxen	MEDICATION
+etoricoxib	MEDICATION
+aceclofenac	MEDICATION
+nimesulide	MEDICATION
+tramadol	MEDICATION
+gabapentin	MEDICATION
+pregabalin	MEDICATION
+amitriptyline	MEDICATION
+duloxetine	MEDICATION
+venlafaxine	MEDICATION
+paroxetine	MEDICATION
+mirtazapine	MEDICATION
+olanzapine	MEDICATION
+risperidone	MEDICATION
+quetiapine	MEDICATION
+aripiprazole	MEDICATION
+lithium	MEDICATION
+valproate	MEDICATION
+carbamazepine	MEDICATION
+levetiracetam	MEDICATION
+phenytoin	MEDICATION
+lorazepam	MEDICATION
+diazepam	MEDICATION
+melatonin	MEDICATION
+levodopa	MEDICATION
+donepezil	MEDICATION
+hydroxyurea	MEDICATION
+letrozole	MEDICATION
+anastrozole	MEDICATION
+imatinib	MEDICATION
+capecitabine	MEDICATION
+cisplatin	MEDICATION
+dexamethasone	MEDICATION
+hydrocortisone	MEDICATION
+deflazacort	MEDICATION
+folic acid	MEDICATION
+ferrous sulphate	MEDICATION
+iron tablets	MEDICATION
+vitamin d3	MEDICATION
+cholecalciferol	MEDICATION
+calcium tablets	MEDICATION
+b12 injection	MEDICATION
+multivitamin	MEDICATION
+sildenafil	MEDICATION
+tadalafil	MEDICATION
+finasteride	MEDICATION
+progesterone	MEDICATION
+clomiphene	MEDICATION
+misoprostol	MEDICATION
+mifepristone	MEDICATION
+oral contraceptive	MEDICATION
+i-pill	MEDICATION
+ipill	MEDICATION
+glycomet	MEDICATION
+januvia	MEDICATION
+jalra	MEDICATION
+telma	MEDICATION
+amlong	MEDICATION
+atorva	MEDICATION
+rosuvas	MEDICATION
+ecosprin	MEDICATION
+clopilet	MEDICATION
+thyronorm	MEDICATION
+eltroxin	MEDICATION
+pan 40	MEDICATION
+pantop	MEDICATION
+rantac	MEDICATION
+gelusil	MEDICATION
+digene	MEDICATION
+cyclopam	MEDICATION
+meftal	MEDICATION
+meftal spas	MEDICATION
+volini	MEDICATION
+moov	MEDICATION
+sinarest	MEDICATION
+vicks action 500	MEDICATION
+benadryl	MEDICATION
+grilinctus	MEDICATION
+ascoril	MEDICATION
+allegra	MEDICATION
+montair	MEDICATION
+levolin	MEDICATION
+foracort	MEDICATION
+seroflo	MEDICATION
+azithral	MEDICATION
+zifi	MEDICATION
+taxim	MEDICATION
+norflox	MEDICATION
+ofloxacin	MEDICATION
+shelcal	MEDICATION
+becosules	MEDICATION
+zincovit	MEDICATION
+neurobion	MEDICATION
+evion	MEDICATION
+limcee	MEDICATION
+revital	MEDICATION
+liv 52	MEDICATION
+volini gel	MEDICATION
+my wife	RELATION
+my husband	RELATION
+my father	RELATION
+my mother	RELATION
+my son	RELATION
+my daughter	RELATION
+my brother	RELATION
+my sister	RELATION
+my uncle	RELATION
+my aunt	RELATION
+my grandfather	RELATION
+my grandmother	RELATION
+my father-in-law	RELATION
+my mother-in-law	RELATION
+my cousin	RELATION
+my nephew	RELATION
+my niece	RELATION
+grandmother	RELATION
+grandfather	RELATION
+nephew	RELATION
+niece	RELATION
+mother-in-law	RELATION
+father-in-law	RELATION
+daughter-in-law	RELATION
+son-in-law	RELATION
+brother-in-law	RELATION
+sister-in-law	RELATION
+fiance	RELATION
+fiancee	RELATION
+boyfriend	RELATION
+girlfriend	RELATION
+mom	RELATION
+dad	RELATION
+mommy	RELATION
+daddy	RELATION
+maa	RELATION
+ma	RELATION
+papa	RELATION
+baba	RELATION
+didi	RELATION
+dada	RELATION
+bhai	RELATION
+bhaiya	RELATION
+behen	RELATION
+bhabhi	RELATION
+boudi	RELATION
+dadi	RELATION
+dadu	RELATION
+nani	RELATION
+nana	RELATION
+chacha	RELATION
+chachi	RELATION
+mama	RELATION
+mami	RELATION
+mausi	RELATION
+bua	RELATION
+fufa	RELATION
+patni	RELATION
+pati	RELATION
+beti	RELATION
+sasur	RELATION
+saas	RELATION
+jeth	RELATION
+devar	RELATION
+nanad	RELATION
+thakuma	RELATION
+thakurma	RELATION
+jethu	RELATION
+kaku	RELATION
+kakima	RELATION
+mashi	RELATION
+pishi	RELATION
+mama	RELATION
+meye	RELATION

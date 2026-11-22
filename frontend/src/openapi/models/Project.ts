@@ -80,7 +80,7 @@ export interface Project {
      * @type {boolean}
      * @memberof Project
      */
-    readonly personalData: boolean;
+    readonly cloudJudging: boolean;
     /**
      *
      * @type {Date}
@@ -106,7 +106,7 @@ export function instanceOfProject(value: object): value is Project {
     if (!('memberEmails' in value) || value['memberEmails'] === undefined) return false;
     if (!('name' in value) || value['name'] === undefined) return false;
     if (!('slug' in value) || value['slug'] === undefined) return false;
-    if (!('personalData' in value) || value['personalData'] === undefined) return false;
+    if (!('cloudJudging' in value) || value['cloudJudging'] === undefined) return false;
     if (!('createdAt' in value) || value['createdAt'] === undefined) return false;
     if (!('updatedAt' in value) || value['updatedAt'] === undefined) return false;
     return true;
@@ -130,7 +130,7 @@ export function ProjectFromJSONTyped(json: any, ignoreDiscriminator: boolean): P
         'integrationType': json['integration_type'] == null ? undefined : IntegrationTypeEnumFromJSON(json['integration_type']),
         'isActive': json['is_active'] == null ? undefined : json['is_active'],
         'settings': json['settings'] == null ? undefined : json['settings'],
-        'personalData': json['personal_data'],
+        'cloudJudging': json['cloud_judging'],
         'createdAt': (new Date(json['created_at'])),
         'updatedAt': (new Date(json['updated_at'])),
     };
@@ -140,7 +140,7 @@ export function ProjectToJSON(json: any): Project {
     return ProjectToJSONTyped(json, false);
 }
 
-export function ProjectToJSONTyped(value?: Omit<Project, 'id'|'member_count'|'member_emails'|'personal_data'|'created_at'|'updated_at'> | null, ignoreDiscriminator: boolean = false): any {
+export function ProjectToJSONTyped(value?: Omit<Project, 'id'|'member_count'|'member_emails'|'cloud_judging'|'created_at'|'updated_at'> | null, ignoreDiscriminator: boolean = false): any {
     if (value == null) {
         return value;
     }

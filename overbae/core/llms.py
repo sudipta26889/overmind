@@ -95,9 +95,11 @@ class IncompleteCompletionError(RuntimeError):
 _SDK_RETRIES = 0
 
 
-def _provider_client(provider: str | Provider, timeout: float = _REQUEST_TIMEOUT) -> AsyncOpenAI:
+def _provider_client(
+    provider: str | Provider, timeout: float = _REQUEST_TIMEOUT, api_key: str | None = None
+) -> AsyncOpenAI:
     provider = PROVIDERS[provider] if isinstance(provider, str) else provider
-    api_key = provider.key()
+    api_key = api_key or provider.key()
     if not api_key:
         raise RuntimeError(f"{provider.key_env} is required for LLM completions")
     return AsyncOpenAI(
@@ -562,6 +564,7 @@ def call_llm(
     retry_deadline: float = RETRY_DEADLINE_BACKGROUND,
     max_attempts: int | None = None,
     lock_wait: float | None = None,
+    api_key: str | None = None,
 ) -> tuple[str, dict]:
     if request_kwargs is None:
         request_kwargs = {}
@@ -626,6 +629,7 @@ def call_llm(
         client = _provider_client(
             "openrouter",
             SINGLE_STREAM_TIMEOUT if is_single_stream(selected_model_name) else _REQUEST_TIMEOUT,
+            api_key,
         )
 
         completion_kwargs: dict = {

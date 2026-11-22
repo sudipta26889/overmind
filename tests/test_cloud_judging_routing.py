@@ -14,6 +14,7 @@ from django.core.management.base import CommandError
 from django.db import connection, transaction
 from django.utils import timezone
 from factories import auth_client, make_project, make_span, make_user
+from fakes import masking as fake_masking
 
 from overbae.core.model_registry import ROLE_CHAINS, Role, check_cloud_judge, check_local_judge
 from overbae.innermind import admission, evals, judge_health, signals, span_processor, trajectory
@@ -21,12 +22,12 @@ from overbae.innermind.evals import Judge, JudgeUnavailableError, judge_route, r
 from overbae.models import (
     LiveScoringWork,
     Project,
-    ProjectPersonalDataChange,
+    ProjectCloudJudgingChange,
     SignalSubscription,
     Span,
 )
 
-pytestmark = pytest.mark.covers("personal-data-routing")
+pytestmark = pytest.mark.covers("cloud-judging-routing")
 
 # Each xdist worker gets its own Redis database, so concurrent tests never share keys.
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
@@ -37,8 +38,9 @@ EXPECTATION = "The answer addresses the question."
 
 
 @pytest.fixture(autouse=True)
-def _cloud_judge(monkeypatch, settings):
+def _cloud_judge(monkeypatch, settings, fake_llm, tmp_path):
     monkeypatch.setitem(ROLE_CHAINS, Role.CLOUD_JUDGE, ("gpt-6-luna",))
+    fake_masking.enable_remote(settings, fake_llm, tmp_path)
     # The local judge samples almost nothing; a certified project is judged in full anyway.
     settings.TRACE_SCORING_SAMPLE_RATE = 1
 
@@ -64,7 +66,7 @@ def calls_today(client) -> int:
 
 
 def certify(project):
-    Project.objects.filter(pk=project.pk).update(personal_data=False)
+    Project.objects.filter(pk=project.pk).update(cloud_judging=True)
 
 
 def span_of(project, **fields):
@@ -129,7 +131,7 @@ def score_plan_drift(project):
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("path", [score_span, score_trajectory, score_plan_drift])
-def test_a_project_with_personal_data_is_never_judged_remotely(fake_llm, path):
+def test_a_project_without_approval_is_never_judged_remotely(fake_llm, path):
     # A "no" verdict is what asks a remote judge for an explanation; here none may be sent.
     fake_llm.verdict = lambda state: "no"
 
@@ -244,7 +246,7 @@ def test_a_revocation_between_a_traces_spans_and_its_trajectory_ends_remote_call
     assert set(models(fake_llm)) == {CLOUD}
     sent = len(fake_llm.requests)
 
-    Project.objects.filter(pk=project.pk).update(personal_data=True)
+    Project.objects.filter(pk=project.pk).update(cloud_judging=False)
     assert async_to_sync(trajectory.score_trace)(project.pk, trace_id)
 
     after = models(fake_llm)[sent:]
@@ -257,7 +259,7 @@ def test_a_flip_during_an_item_sends_no_remote_request_and_releases_the_span(fak
     certify(project)
     span = span_of(project)
     remote = async_to_sync(judge_route)(project.pk)
-    Project.objects.filter(pk=project.pk).update(personal_data=True)
+    Project.objects.filter(pk=project.pk).update(cloud_judging=False)
 
     with pytest.raises(JudgeUnavailableError):
         async_to_sync(Judge(str(project.pk), route=remote).judge)({"output": "a"}, EXPECTATION)
@@ -339,7 +341,7 @@ def command(project, *args, slug=None):
     out = io.StringIO()
     extra = ["--slug", slug] if slug else []
     call_command(
-        "set_project_personal_data",
+        "set_project_cloud_judging",
         "--project-id",
         str(project if isinstance(project, str) else project.pk),
         *extra,
@@ -349,34 +351,34 @@ def command(project, *args, slug=None):
     return out.getvalue()
 
 
-def revoke(project, value="yes"):
-    return command(project, "--personal-data", value, "--by", "Guardian", "--reason", "Audit 12")
+def revoke(project, value="off"):
+    return command(project, "--cloud-judging", value, "--by", "Guardian", "--reason", "Audit 12")
 
 
 @pytest.mark.django_db
 def test_the_command_changes_the_flag_once_prints_the_project_and_logs_it():
     project = make_project(name="Studio")
 
-    first = revoke(project, "no")
+    first = revoke(project, "on")
     assert first.startswith("changed") and str(project.pk) in first
     assert "Studio" in first and project.slug in first
-    assert revoke(project, "no").startswith("unchanged")
+    assert revoke(project, "on").startswith("unchanged")
 
     project.refresh_from_db()
-    assert project.personal_data is False
-    change = ProjectPersonalDataChange.objects.get()
+    assert project.cloud_judging is True
+    change = ProjectCloudJudgingChange.objects.get()
     assert (change.project_id, change.project_id_copy, change.project_slug) == (
         project.pk,
         project.pk,
         project.slug,
     )
-    assert (change.old_value, change.new_value) == (True, False)
+    assert (change.old_cloud_judging, change.new_cloud_judging) == (False, True)
     assert (change.changed_by, change.reason) == ("Guardian", "Audit 12")
 
-    revoke(project, "yes")
-    assert list(ProjectPersonalDataChange.objects.values_list("new_value", flat=True)) == [
-        False,
+    revoke(project, "off")
+    assert list(ProjectCloudJudgingChange.objects.values_list("new_cloud_judging", flat=True)) == [
         True,
+        False,
     ]
 
 
@@ -384,25 +386,25 @@ def test_the_command_changes_the_flag_once_prints_the_project_and_logs_it():
 def test_the_command_refuses_an_unknown_project_a_bad_id_or_a_slug_that_differs():
     project = make_project()
     with pytest.raises(CommandError, match="No project"):
-        revoke(str(uuid.uuid4()), "no")
+        revoke(str(uuid.uuid4()), "on")
     with pytest.raises(CommandError, match="not a project id"):
-        revoke("not-a-uuid", "no")
+        revoke("not-a-uuid", "on")
     with pytest.raises(CommandError, match="slug"):
-        command(project, "--personal-data", "no", "--by", "G", "--reason", "x", slug="other")
+        command(project, "--cloud-judging", "on", "--by", "G", "--reason", "x", slug="other")
 
     project.refresh_from_db()
-    assert project.personal_data is True
-    assert not ProjectPersonalDataChange.objects.exists()
+    assert project.cloud_judging is False
+    assert not ProjectCloudJudgingChange.objects.exists()
 
 
 @pytest.mark.django_db
 def test_the_change_log_survives_the_deletion_of_its_project():
     project = make_project()
-    revoke(project, "no")
+    revoke(project, "on")
 
     Project.objects.filter(pk=project.pk).delete()
 
-    change = ProjectPersonalDataChange.objects.get()
+    change = ProjectCloudJudgingChange.objects.get()
     assert change.project_id is None
     assert (change.project_id_copy, change.project_slug) == (project.pk, project.slug)
 
@@ -412,14 +414,14 @@ def test_a_stale_save_cannot_undo_a_revocation():
     project = make_project()
     certify(project)
     stale = Project.objects.get(pk=project.pk)
-    stale.personal_data = False
+    stale.cloud_judging = True
 
-    revoke(project, "yes")
+    revoke(project, "off")
     stale.name = "Renamed"
     stale.save()
 
     project.refresh_from_db()
-    assert project.personal_data is True
+    assert project.cloud_judging is False
     assert project.name == "Renamed"
 
 
@@ -431,13 +433,13 @@ def test_the_api_shows_the_flag_and_never_writes_it():
 
     shown = client.get(f"/api/projects/{project.pk}/")
     assert shown.status_code == 200
-    assert shown.json()["personal_data"] is True
+    assert shown.json()["cloud_judging"] is False
 
-    changed = client.patch(f"/api/projects/{project.pk}/", {"personal_data": False}, format="json")
+    changed = client.patch(f"/api/projects/{project.pk}/", {"cloud_judging": True}, format="json")
     assert changed.status_code == 200
     project.refresh_from_db()
-    assert project.personal_data is True
-    assert not ProjectPersonalDataChange.objects.exists()
+    assert project.cloud_judging is False
+    assert not ProjectCloudJudgingChange.objects.exists()
 
 
 def test_the_local_judge_must_be_local():

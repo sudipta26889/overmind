@@ -1,0 +1,360 @@
+# Hindi lexicon (Devanagari). term<TAB>TYPE<TAB>roman variants separated by |
+मधुमेह	CONDITION	madhumeh|diabeties
+शुगर की बीमारी	CONDITION	shugar ki bimari|sugar ki bimari
+उच्च रक्तचाप	CONDITION	uchch raktchap|high bp|hai bp
+निम्न रक्तचाप	CONDITION	nimn raktchap|low bp
+रक्तचाप	CONDITION	raktchap
+अस्थमा	CONDITION	asthma
+दमा	CONDITION	dama
+तपेदिक	CONDITION	tapedik
+क्षय रोग	CONDITION	kshay rog
+टीबी	CONDITION
+निमोनिया	CONDITION	nimoniya
+कैंसर	CONDITION	kainsar|kensar
+कर्क रोग	CONDITION	kark rog
+ट्यूमर	CONDITION	tyumar
+ल्यूकेमिया	CONDITION
+कीमोथेरेपी	CONDITION	kimotherapy|kemo
+डायलिसिस	CONDITION	dyalisis
+पथरी	CONDITION	pathri
+गुर्दे की बीमारी	CONDITION	gurde ki bimari
+गुर्दे फेल	CONDITION	gurde fail|kidney fail
+पीलिया	CONDITION	peeliya|piliya
+हेपेटाइटिस	CONDITION	hepatitis
+थायराइड	CONDITION	thyroid
+पीसीओडी	CONDITION
+गर्भावस्था	CONDITION	garbhavastha
+गर्भवती	CONDITION	garbhvati|garbhwati
+गर्भपात	CONDITION	garbhpat
+बांझपन	CONDITION	banjhpan
+खून की कमी	CONDITION	khoon ki kami|khun ki kami
+एनीमिया	CONDITION
+थैलेसीमिया	CONDITION	thalassemia
+गठिया	CONDITION	gathiya
+जोड़ों का दर्द	CONDITION	jodon ka dard
+माइग्रेन	CONDITION
+मिर्गी	CONDITION	mirgi
+लकवा	CONDITION	lakwa|laqwa
+पक्षाघात	CONDITION	pakshaghat
+दिल का दौरा	CONDITION	dil ka daura
+हृदय रोग	CONDITION	hriday rog
+दिल की बीमारी	CONDITION	dil ki bimari
+कोलेस्ट्रॉल	CONDITION	colestrol
+डेंगू	CONDITION	dengu
+मलेरिया	CONDITION
+टाइफाइड	CONDITION
+कोविड	CONDITION
+एचआईवी	CONDITION
+एड्स	CONDITION
+अवसाद	CONDITION	avsaad
+डिप्रेशन	CONDITION
+अनिद्रा	CONDITION	anidra|neend na aana
+मानसिक रोग	CONDITION	mansik rog
+एलर्जी	CONDITION
+खुजली	CONDITION	khujli
+एक्जिमा	CONDITION
+सोरायसिस	CONDITION
+मोटापा	CONDITION	motapa
+अल्सर	CONDITION
+बवासीर	CONDITION	bawasir
+हर्निया	CONDITION
+साइनस	CONDITION
+बुखार	CONDITION	bukhar|bukhaar
+खांसी	CONDITION	khansi|khaansi
+उल्टी	CONDITION	ulti
+दस्त	CONDITION	dast
+सर्दी जुकाम	CONDITION	sardi jukam
+जुकाम	CONDITION	jukam
+मोतियाबिंद	CONDITION	motiyabind
+सिरदर्द	CONDITION	sirdard|sar dard
+पेट दर्द	CONDITION	pet dard
+सीने में दर्द	CONDITION	seene mein dard|chest pain
+मेटफॉर्मिन	MEDICATION
+इंसुलिन	MEDICATION
+पैरासिटामोल	MEDICATION
+क्रोसिन	MEDICATION
+डोलो	MEDICATION
+एस्पिरिन	MEDICATION
+अमोक्सिसिलिन	MEDICATION
+एज़िथ्रोमाइसिन	MEDICATION	azithral
+सेटिरिजिन	MEDICATION
+पैंटोप्राज़ोल	MEDICATION	pan 40
+ओमेप्राज़ोल	MEDICATION
+थायरोक्सिन	MEDICATION	thyronorm|eltroxin
+एटोरवास्टेटिन	MEDICATION
+एम्लोडिपिन	MEDICATION
+टेल्मिसर्टन	MEDICATION
+डिक्लोफेनाक	MEDICATION
+आइबुप्रोफेन	MEDICATION
+कॉम्बिफ्लेम	MEDICATION
+इकोस्प्रिन	MEDICATION
+शेल्कल	MEDICATION
+विटामिन डी	MEDICATION
+आयरन की गोली	MEDICATION	iron ki goli
+स्टेरॉइड	MEDICATION	steroid
+एंटीबायोटिक	MEDICATION	antibiotic
+पेनकिलर	MEDICATION	painkiller
+नींद की गोली	MEDICATION	neend ki goli
+ब्लड टेस्ट	TEST	blood test
+खून की जांच	TEST	khoon ki jaanch|khun ki janch
+शुगर टेस्ट	TEST	sugar test|shugar test
+एचबीए1सी	TEST
+थायराइड टेस्ट	TEST	thyroid test
+लिपिड प्रोफाइल	TEST
+सीबीसी	TEST
+ईसीजी	TEST
+इको	TEST	echo
+एमआरआई	TEST
+सीटी स्कैन	TEST
+एक्स-रे	TEST	x ray
+अल्ट्रासाउंड	TEST
+सोनोग्राफी	TEST
+बायोप्सी	TEST
+एंडोस्कोपी	TEST
+कोलोनोस्कोपी	TEST
+मैमोग्राफी	TEST
+यूरिन टेस्ट	TEST	urine test
+पेशाब की जांच	TEST	peshab ki jaanch
+एंजियोग्राफी	TEST
+आरटी-पीसीआर	TEST
+कोविड टेस्ट	TEST	covid test
+विटामिन बी12	TEST
+क्रिएटिनिन	TEST
+प्रेगनेंसी टेस्ट	TEST	pregnancy test
+एचडीएफसी बैंक	FINANCE_ORG	hdfc bank
+आईसीआईसीआई बैंक	FINANCE_ORG	icici bank
+स्टेट बैंक ऑफ इंडिया	FINANCE_ORG
+भारतीय स्टेट बैंक	FINANCE_ORG
+एसबीआई	FINANCE_ORG
+एक्सिस बैंक	FINANCE_ORG
+कोटक महिंद्रा	FINANCE_ORG
+पंजाब नेशनल बैंक	FINANCE_ORG
+बैंक ऑफ बड़ौदा	FINANCE_ORG	bank of baroda
+केनरा बैंक	FINANCE_ORG
+यूनियन बैंक	FINANCE_ORG
+इंडसइंड बैंक	FINANCE_ORG
+यस बैंक	FINANCE_ORG
+बजाज फाइनेंस	FINANCE_ORG
+मुथूट फाइनेंस	FINANCE_ORG
+टाटा कैपिटल	FINANCE_ORG
+एलआईसी	FINANCE_ORG
+स्टार हेल्थ	FINANCE_ORG
+ज़ेरोधा	FINANCE_ORG	zerodha
+पेटीएम	FINANCE_ORG
+फोनपे	FINANCE_ORG
+गूगल पे	FINANCE_ORG
+म्यूचुअल फंड	FINANCE_ORG	mutual fund
+ग्रामीण बैंक	FINANCE_ORG	gramin bank
+सहकारी बैंक	FINANCE_ORG	sahkari bank
+साहूकार	FINANCE_ORG	sahukar
+माँ	RELATION	maa|mummy|mummyji
+मां	RELATION
+माता जी	RELATION	mataji
+मम्मी	RELATION
+पापा	RELATION	papa
+पिताजी	RELATION	pitaji|pita ji
+बाबूजी	RELATION	babuji
+बाबा	RELATION	baba
+दादी	RELATION	dadi
+दादा	RELATION	dada
+नानी	RELATION	nani
+नाना	RELATION	nana
+चाचा	RELATION	chacha
+चाची	RELATION	chachi
+मामा	RELATION	mama
+मामी	RELATION	mami
+मौसी	RELATION	mausi
+बुआ	RELATION	bua
+भैया	RELATION	bhaiya
+दीदी	RELATION	didi
+बहन	RELATION	behen|bahan
+पत्नी	RELATION	patni
+बीवी	RELATION	biwi
+पति	RELATION	pati
+बेटी	RELATION	beti
+बहू	RELATION	bahu
+दामाद	RELATION	damad
+सास	RELATION	saas
+ससुर	RELATION	sasur
+देवर	RELATION	devar
+जेठ	RELATION	jeth
+भाभी	RELATION	bhabhi
+ननद	RELATION	nanad
+साली	RELATION	sali
+भतीजा	RELATION	bhatija
+भांजा	RELATION	bhanja
+पोता	RELATION	pota
+पोती	RELATION	poti
+# Widened coverage.
+फेरिटिन	TEST	ferritin|pheritin
+ईसीजी	TEST	ecg
+एमआरआई	TEST	mri
+सीटी स्कैन	TEST
+एक्स-रे	TEST	x ray|xray
+अल्ट्रासाउंड	TEST
+सोनोग्राफी	TEST	sonography
+इको	TEST
+एंजियोग्राफी	TEST
+एंडोस्कोपी	TEST
+बायोप्सी	TEST
+लिपिड प्रोफाइल	TEST
+थायराइड प्रोफाइल	TEST
+टीएसएच	TEST
+सीबीसी	TEST
+खून की जांच	TEST	khoon ki jaanch
+पेशाब की जांच	TEST
+क्रिएटिनिन	TEST
+यूरिक एसिड	TEST
+बिलीरुबिन	TEST
+हीमोग्लोबिन	TEST
+एचबीए1सी	TEST
+शुगर टेस्ट	TEST
+विटामिन डी	TEST
+विटामिन बी12	TEST
+डेंगू टेस्ट	TEST
+आरटी-पीसीआर	TEST
+एलएफटी	TEST
+केएफटी	TEST
+फाइब्रोमायल्जिया	CONDITION
+वर्टिगो	CONDITION	chakkar
+चक्कर आना	CONDITION	chakkar aana
+गाउट	CONDITION
+साइटिका	CONDITION	sciatica
+स्पॉन्डिलाइटिस	CONDITION
+ल्यूपस	CONDITION
+अम्लता	CONDITION
+एसिडिटी	CONDITION	acidity
+कब्ज	CONDITION	kabz
+पित्त की पथरी	CONDITION
+पित्ताशय की पथरी	CONDITION
+प्रोस्टेट	CONDITION
+रजोनिवृत्ति	CONDITION
+फाइब्रॉएड	CONDITION
+ब्रेस्ट कैंसर	CONDITION
+फेफड़ों का कैंसर	CONDITION
+मुंह का कैंसर	CONDITION
+ब्लड कैंसर	CONDITION
+हार्ट ब्लॉकेज	CONDITION
+बाईपास सर्जरी	CONDITION
+एंजियोप्लास्टी	CONDITION
+पेसमेकर	CONDITION
+धड़कन तेज़	CONDITION
+वैरिकोज़ वेन्स	CONDITION
+टॉन्सिलाइटिस	CONDITION
+कान का संक्रमण	CONDITION
+आँख आना	CONDITION
+चिकनपॉक्स	CONDITION	chickenpox
+छोटी माता	CONDITION
+बड़ी माता	CONDITION
+खसरा	CONDITION
+कण्ठमाला	CONDITION
+हैजा	CONDITION
+चिकनगुनिया	CONDITION
+स्वाइन फ्लू	CONDITION
+इन्फ्लुएंजा	CONDITION
+गले में खराश	CONDITION
+सफेद दाग	CONDITION
+दाद	CONDITION
+खुजली की बीमारी	CONDITION
+पैनिक अटैक	CONDITION
+शराब की लत	CONDITION
+द्विध्रुवी विकार	CONDITION
+टैमसुलोसिन	MEDICATION	tamsulosin
+कोल्चिसिन	MEDICATION
+एलोप्यूरिनॉल	MEDICATION
+ग्लिमेपिराइड	MEDICATION
+एम्लोडिपिन	MEDICATION	amlodipine
+टेल्मिसार्टन	MEDICATION
+लोसार्टन	MEDICATION
+एटोरवास्टेटिन	MEDICATION	atorvastatin
+रोसुवास्टेटिन	MEDICATION
+क्लोपिडोग्रेल	MEDICATION
+वारफेरिन	MEDICATION
+फ्यूरोसेमाइड	MEDICATION
+लेवोथायरोक्सिन	MEDICATION
+थायरोनॉर्म	MEDICATION
+सेटिरिज़िन	MEDICATION
+लेवोसेटिरिज़िन	MEDICATION
+मोंटेलुकास्ट	MEDICATION
+ओमेप्राज़ोल	MEDICATION
+रेबेप्राज़ोल	MEDICATION
+डोमपेरिडोन	MEDICATION
+ओंडेनसेट्रॉन	MEDICATION
+सिप्रोफ्लॉक्सासिन	MEDICATION
+सेफिक्सिम	MEDICATION
+ऑगमेंटिन	MEDICATION
+मेट्रोनिडाजोल	MEDICATION
+फ्लुकोनाज़ोल	MEDICATION
+आइवरमेक्टिन	MEDICATION
+डाइक्लोफेनाक	MEDICATION
+आइबुप्रोफेन	MEDICATION
+कॉम्बिफ्लाम	MEDICATION
+मेफ्टाल	MEDICATION
+ट्रामाडोल	MEDICATION
+गैबापेंटिन	MEDICATION
+प्रीगैबलिन	MEDICATION
+सर्ट्रालाइन	MEDICATION
+एस्सीटालोप्राम	MEDICATION
+अल्प्राज़ोलम	MEDICATION
+क्लोनाज़ेपाम	MEDICATION
+ओलानज़ापाइन	MEDICATION
+प्रेडनिसोलोन	MEDICATION
+डेक्सामेथासोन	MEDICATION
+फोलिक एसिड	MEDICATION
+आयरन की गोली	MEDICATION
+कैल्शियम की गोली	MEDICATION
+मल्टीविटामिन	MEDICATION
+शेल्कल	MEDICATION
+जिंकोविट	MEDICATION
+न्यूरोबियोन	MEDICATION
+गेलुसिल	MEDICATION
+डाइजीन	MEDICATION
+सिनारेस्ट	MEDICATION
+बेनाड्रिल	MEDICATION
+मां	RELATION	maa|ma|maan
+माँ	RELATION
+माता	RELATION
+माताजी	RELATION
+मम्मी	RELATION	mummy
+पापा	RELATION	papa
+पिता	RELATION
+पिताजी	RELATION
+बाबूजी	RELATION
+पति	RELATION	pati
+पत्नी	RELATION	patni
+बीवी	RELATION	biwi
+घरवाली	RELATION
+बेटा	RELATION	beta
+बेटी	RELATION	beti
+बहू	RELATION	bahu
+दामाद	RELATION
+भाई	RELATION	bhai
+भैया	RELATION	bhaiya
+बहन	RELATION	behen|bahan
+दीदी	RELATION	didi
+भाभी	RELATION	bhabhi
+दादी	RELATION	dadi
+दादा	RELATION	dada
+नानी	RELATION	nani
+नाना	RELATION	nana
+चाचा	RELATION	chacha
+चाची	RELATION	chachi
+मामा	RELATION	mama
+मामी	RELATION	mami
+मौसी	RELATION	mausi
+बुआ	RELATION	bua
+फूफा	RELATION	fufa
+ससुर	RELATION	sasur
+सास	RELATION	saas
+जेठ	RELATION	jeth
+देवर	RELATION	devar
+ननद	RELATION	nanad
+साली	RELATION
+साला	RELATION
+पोता	RELATION
+पोती	RELATION
+नाती	RELATION
+भतीजा	RELATION
+भतीजी	RELATION
+भांजा	RELATION
+भांजी	RELATION
