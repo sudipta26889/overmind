@@ -41,35 +41,56 @@ def daily_limit() -> int:
     return limit
 
 
+def cloud_daily_limit() -> int:
+    """Remote judge and explanation calls per UTC day: a bound on spend. A bad value fails."""
+    raw = os.environ.get("CLOUD_JUDGE_DAILY_LIMIT") or "20000"
+    try:
+        limit = int(raw)
+    except ValueError:
+        limit = 0
+    if limit <= 0:
+        raise ValueError(f"CLOUD_JUDGE_DAILY_LIMIT={raw!r} must be a positive integer")
+    return limit
+
+
 def mark_unavailable(px: int | None = None, *, cloud: bool = False) -> None:
     client = cache_redis()
     if client is not None:
         with suppress(redis.RedisError):
             if cloud:
-                client.set(CLOUD_KEY, "1", px=CLOUD_BACKOFF_MS)
+                client.set(CLOUD_KEY, "1", px=px or CLOUD_BACKOFF_MS)
             else:
                 client.set(KEY, "1", px=px or backoff_ms())
 
 
-def spend_call() -> bool:
-    """Counts one judge request against today's limit. False once the limit is passed, and
-    judging then backs off until the next UTC midnight. Without a cache Redis, uncapped."""
+def _spend(prefix: str, limit: int, *, cloud: bool) -> bool:
     client = cache_redis()
     if client is None:
         return True
     moment = now()
-    key = f"overmind:judge:calls:{moment.date().isoformat()}"
+    key = f"overmind:judge:{prefix}:{moment.date().isoformat()}"
     try:
         count = client.incr(key)
         if count == 1:
             client.expire(key, 48 * 3600)
     except redis.RedisError:
         return True
-    if count <= daily_limit():
+    if count <= limit:
         return True
     midnight = datetime.combine(moment.date() + timedelta(days=1), datetime.min.time(), UTC)
-    mark_unavailable(px=max(1000, int((midnight - moment).total_seconds() * 1000)))
+    mark_unavailable(px=max(1000, int((midnight - moment).total_seconds() * 1000)), cloud=cloud)
     return False
+
+
+def spend_call() -> bool:
+    """Counts one local judge request against today's limit. False once the limit is passed, and
+    judging then backs off until the next UTC midnight. Without a cache Redis, uncapped."""
+    return _spend("calls", daily_limit(), cloud=False)
+
+
+def spend_cloud_call() -> bool:
+    """The same for a remote judge or explanation call, against its own limit and back-off."""
+    return _spend("cloud_calls", cloud_daily_limit(), cloud=True)
 
 
 def backed_off(*, cloud: bool = False) -> bool:

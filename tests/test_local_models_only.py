@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import threading
 import time
 import uuid
@@ -33,7 +34,9 @@ from overbae.tasks import innermind
 
 pytestmark = pytest.mark.covers("llm-gateway")
 
-REDIS_URL = "redis://localhost:6379/15"
+# Each xdist worker gets its own Redis database, so concurrent tests never share keys.
+_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
+REDIS_URL = f"redis://localhost:6379/{15 - int(_WORKER or 0)}"
 EXPECTATION = "The answer addresses the question."
 JUDGE_DOWN = "overmind:judge:unavailable"
 

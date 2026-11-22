@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import os
+import threading
 import uuid
 from datetime import timedelta
 
@@ -9,17 +11,26 @@ import redis
 from asgiref.sync import async_to_sync
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection, transaction
 from django.utils import timezone
 from factories import auth_client, make_project, make_span, make_user
 
-from overbae.core.model_registry import ROLE_CHAINS, Role, check_cloud_judge
+from overbae.core.model_registry import ROLE_CHAINS, Role, check_cloud_judge, check_local_judge
 from overbae.innermind import admission, evals, judge_health, signals, span_processor, trajectory
 from overbae.innermind.evals import Judge, JudgeUnavailableError, judge_route, route_for
-from overbae.models import LiveScoringWork, Project, ProjectPersonalDataChange, Span
+from overbae.models import (
+    LiveScoringWork,
+    Project,
+    ProjectPersonalDataChange,
+    SignalSubscription,
+    Span,
+)
 
-pytestmark = pytest.mark.covers("llm-gateway")
+pytestmark = pytest.mark.covers("personal-data-routing")
 
-REDIS_URL = "redis://localhost:6379/15"
+# Each xdist worker gets its own Redis database, so concurrent tests never share keys.
+_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
+REDIS_URL = f"redis://localhost:6379/{15 - int(_WORKER or 0)}"
 CLOUD = "openai/gpt-6-luna"
 LOCAL = "local/judge"
 EXPECTATION = "The answer addresses the question."
@@ -110,20 +121,51 @@ def score_plan_drift(project):
         eval_attributes={"score": 0.9, "intent": "Resolve the order"},
         attributes={"input": "q", "output": "a"},
     )
-    runner = signals.SignalRunner(project.pk)
-    runner.route = async_to_sync(judge_route)(project.pk)
-    signal = signals.PlanDriftSignal(str(project.pk))
-    signal.route = runner.route
-    async_to_sync(signal.check)([root, step])
+    SignalSubscription.objects.create(project=project, signal_type="plan_drift", enabled=True)
+    async_to_sync(signals.SignalRunner(project.pk).run)()
+    step.refresh_from_db()
+    assert "drift" in step.eval_attributes
 
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("path", [score_span, score_trajectory, score_plan_drift])
 def test_a_project_with_personal_data_is_never_judged_remotely(fake_llm, path):
+    # A "no" verdict is what asks a remote judge for an explanation; here none may be sent.
+    fake_llm.verdict = lambda state: "no"
+
     path(make_project())
 
     assert models(fake_llm) and set(models(fake_llm)) == {LOCAL}
+    assert len(fake_llm.requests) == len(fake_llm.judgments())
     assert all("user" not in request.body for request in fake_llm.requests)
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("path", [score_trajectory, score_plan_drift])
+def test_a_certified_trajectory_and_plan_drift_are_judged_remotely_with_the_audit_user(
+    fake_llm, path
+):
+    project = make_project()
+    certify(project)
+
+    path(project)
+
+    assert models(fake_llm) and set(models(fake_llm)) == {CLOUD}
+    assert {request.body["user"] for request in fake_llm.requests} == {str(project.pk)}
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_span_scored_for_a_project_that_has_no_row_is_judged_locally(fake_llm):
+    """A span cannot exist without its project row (a foreign key), so a missing row is
+    reached through the project id the work item carries; a trajectory or signal run for a
+    missing project finds no spans at all and is covered by ``route_for`` below."""
+    project = make_project()
+    certify(project)
+    span = span_of(project)
+
+    async_to_sync(span_processor.score_project_spans)(uuid.uuid4(), [span])
+
+    assert models(fake_llm) and set(models(fake_llm)) == {LOCAL}
 
 
 @pytest.mark.django_db
@@ -183,19 +225,30 @@ def test_a_certified_project_is_judged_in_full_on_the_remote_model_with_an_expla
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_project_certified_back_to_personal_data_stops_remote_calls_on_the_next_item(
-    fake_llm,
-):
+def test_a_revocation_between_a_traces_spans_and_its_trajectory_ends_remote_calls(fake_llm):
     project = make_project()
     certify(project)
-    root = trace_of(project)
-    span_processor_route = async_to_sync(judge_route)(project.pk)
-    assert not span_processor_route.local
+    trace_id = uuid.uuid4().hex
+    root = make_span(
+        project,
+        trace_id=trace_id,
+        attributes={
+            "input": "Where is my order?",
+            "output": "I like turtles.",
+            "overmind.expectations": [EXPECTATION],
+            "intent": "Resolve the order",
+        },
+    )
+    child = make_span(project, trace_id=trace_id, parent_span_id=root.span_id)
+    async_to_sync(span_processor.score_project_spans)(project.pk, [root, child])
+    assert set(models(fake_llm)) == {CLOUD}
+    sent = len(fake_llm.requests)
+
     Project.objects.filter(pk=project.pk).update(personal_data=True)
+    assert async_to_sync(trajectory.score_trace)(project.pk, trace_id)
 
-    assert async_to_sync(trajectory.score_trace)(project.pk, root.trace_id)
-
-    assert models(fake_llm) and set(models(fake_llm)) == {LOCAL}
+    after = models(fake_llm)[sent:]
+    assert after and set(after) == {LOCAL}
 
 
 @pytest.mark.django_db(transaction=True)
@@ -282,27 +335,45 @@ def test_the_remote_judge_may_not_be_a_local_model():
             check_cloud_judge((local,))
 
 
-def run_command(*args):
+def command(project, *args, slug=None):
     out = io.StringIO()
-    call_command("set_project_personal_data", *args, stdout=out)
+    extra = ["--slug", slug] if slug else []
+    call_command(
+        "set_project_personal_data",
+        "--project-id",
+        str(project if isinstance(project, str) else project.pk),
+        *extra,
+        *args,
+        stdout=out,
+    )
     return out.getvalue()
 
 
-@pytest.mark.django_db
-def test_the_command_changes_the_flag_once_and_logs_it():
-    project = make_project()
-    args = [project.slug, "--personal-data", "no", "--by", "Guardian", "--reason", "Audit 12"]
+def revoke(project, value="yes"):
+    return command(project, "--personal-data", value, "--by", "Guardian", "--reason", "Audit 12")
 
-    assert run_command(*args).startswith("changed")
-    assert run_command(*args).startswith("unchanged")
+
+@pytest.mark.django_db
+def test_the_command_changes_the_flag_once_prints_the_project_and_logs_it():
+    project = make_project(name="Studio")
+
+    first = revoke(project, "no")
+    assert first.startswith("changed") and str(project.pk) in first
+    assert "Studio" in first and project.slug in first
+    assert revoke(project, "no").startswith("unchanged")
 
     project.refresh_from_db()
     assert project.personal_data is False
     change = ProjectPersonalDataChange.objects.get()
-    assert (change.project_id, change.old_value, change.new_value) == (project.pk, True, False)
+    assert (change.project_id, change.project_id_copy, change.project_slug) == (
+        project.pk,
+        project.pk,
+        project.slug,
+    )
+    assert (change.old_value, change.new_value) == (True, False)
     assert (change.changed_by, change.reason) == ("Guardian", "Audit 12")
 
-    run_command(project.slug, "--personal-data", "yes", "--by", "Guardian", "--reason", "Revoked")
+    revoke(project, "yes")
     assert list(ProjectPersonalDataChange.objects.values_list("new_value", flat=True)) == [
         False,
         True,
@@ -310,11 +381,46 @@ def test_the_command_changes_the_flag_once_and_logs_it():
 
 
 @pytest.mark.django_db
-def test_the_command_refuses_an_unknown_project_and_writes_nothing():
+def test_the_command_refuses_an_unknown_project_a_bad_id_or_a_slug_that_differs():
+    project = make_project()
     with pytest.raises(CommandError, match="No project"):
-        run_command("nope", "--personal-data", "no", "--by", "Guardian", "--reason", "x")
+        revoke(str(uuid.uuid4()), "no")
+    with pytest.raises(CommandError, match="not a project id"):
+        revoke("not-a-uuid", "no")
+    with pytest.raises(CommandError, match="slug"):
+        command(project, "--personal-data", "no", "--by", "G", "--reason", "x", slug="other")
 
+    project.refresh_from_db()
+    assert project.personal_data is True
     assert not ProjectPersonalDataChange.objects.exists()
+
+
+@pytest.mark.django_db
+def test_the_change_log_survives_the_deletion_of_its_project():
+    project = make_project()
+    revoke(project, "no")
+
+    Project.objects.filter(pk=project.pk).delete()
+
+    change = ProjectPersonalDataChange.objects.get()
+    assert change.project_id is None
+    assert (change.project_id_copy, change.project_slug) == (project.pk, project.slug)
+
+
+@pytest.mark.django_db
+def test_a_stale_save_cannot_undo_a_revocation():
+    project = make_project()
+    certify(project)
+    stale = Project.objects.get(pk=project.pk)
+    stale.personal_data = False
+
+    revoke(project, "yes")
+    stale.name = "Renamed"
+    stale.save()
+
+    project.refresh_from_db()
+    assert project.personal_data is True
+    assert project.name == "Renamed"
 
 
 @pytest.mark.django_db
@@ -332,3 +438,141 @@ def test_the_api_shows_the_flag_and_never_writes_it():
     project.refresh_from_db()
     assert project.personal_data is True
     assert not ProjectPersonalDataChange.objects.exists()
+
+
+def test_the_local_judge_must_be_local():
+    check_local_judge(())
+    check_local_judge(("local-judge",))
+    check_local_judge(("flint",))
+    with pytest.raises(ValueError, match="remote model"):
+        check_local_judge(("gpt-6-luna",))
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_remote_judge_makes_one_attempt_so_the_flag_is_read_before_each(fake_llm):
+    project = make_project()
+    certify(project)
+    fake_llm.fail(lambda r: r.model == CLOUD, 503)
+
+    span = score_span(project)
+
+    assert models(fake_llm) == [CLOUD]
+    assert "score" not in span.eval_attributes
+    assert span.eval_attributes.get("attempts", 0) == 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_remote_explanation_makes_one_attempt(fake_llm):
+    project = make_project()
+    certify(project)
+    fake_llm.verdict = lambda state: "no"
+    fake_llm.fail(lambda r: r.schema_name != "Verdict", 503)
+
+    span = score_span(project)
+
+    assert models(fake_llm) == [CLOUD, CLOUD]
+    assert span.eval_attributes["score"] == 0.0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_database_error_in_the_route_does_not_abort_the_callers_transaction():
+    project = make_project()
+    locked, release = threading.Event(), threading.Event()
+
+    def hold():
+        try:
+            with transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute("LOCK TABLE overbae_project IN ACCESS EXCLUSIVE MODE")
+                locked.set()
+                release.wait(10)
+        finally:
+            connection.close()
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert locked.wait(10)
+    try:
+        with transaction.atomic():
+            with connection.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '100ms'")
+            assert route_for(project.pk).local
+            # The outer transaction is still usable.
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                assert cursor.fetchone() == (1,)
+    finally:
+        release.set()
+        holder.join()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_remote_daily_limit_re_offers_certified_items_without_an_attempt(
+    fake_llm, redis_cache, monkeypatch
+):
+    monkeypatch.setenv("CLOUD_JUDGE_DAILY_LIMIT", "2")
+    day = judge_health.now().date().isoformat()
+    redis_cache.delete(f"overmind:judge:cloud_calls:{day}")
+    fake_llm.verdict = lambda state: "no"
+    project = make_project()
+    certify(project)
+
+    first = score_span(project)
+    assert first.eval_attributes["score"] == 0.0
+    assert models(fake_llm) == [CLOUD, CLOUD]
+
+    second = score_span(project)
+    assert models(fake_llm) == [CLOUD, CLOUD]
+    assert "score" not in second.eval_attributes
+    assert second.eval_attributes.get("attempts", 0) == 0
+    assert second.eval_claimed_at is None
+    assert judge_health.backed_off(cloud=True) and not judge_health.backed_off()
+    assert 0 < redis_cache.pttl(judge_health.CLOUD_KEY) <= 24 * 3600 * 1000
+    assert int(redis_cache.get(f"overmind:judge:cloud_calls:{day}")) == 3
+    redis_cache.delete(f"overmind:judge:cloud_calls:{day}")
+
+
+def test_an_invalid_remote_daily_limit_fails_loudly(monkeypatch):
+    for bad in ("0", "-1", "lots"):
+        monkeypatch.setenv("CLOUD_JUDGE_DAILY_LIMIT", bad)
+        with pytest.raises(ValueError, match="CLOUD_JUDGE_DAILY_LIMIT"):
+            judge_health.cloud_daily_limit()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Unknown parameter: 'user'",
+        "extra inputs are not permitted",
+        "bad user field",
+        "Unrecognized request argument supplied: user",
+    ],
+)
+def test_a_gateway_that_refuses_the_audit_field_re_offers_the_item_uncounted(
+    fake_llm, redis_cache, message
+):
+    project = make_project()
+    certify(project)
+    fake_llm.fail(lambda r: r.model == CLOUD, 400, message)
+
+    span = score_span(project)
+
+    assert "score" not in span.eval_attributes
+    assert span.eval_attributes.get("attempts", 0) == 0
+    assert span.eval_claimed_at is None
+    assert judge_health.backed_off(cloud=True)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_any_other_bad_request_to_the_remote_judge_is_an_attempt(fake_llm, redis_cache):
+    project = make_project()
+    certify(project)
+    fake_llm.fail(
+        lambda r: r.model == CLOUD, 400, "maximum context length exceeded in the user message"
+    )
+
+    span = score_span(project)
+
+    assert span.eval_attributes["attempts"] == 1
+    assert not judge_health.backed_off(cloud=True)

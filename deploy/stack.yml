@@ -37,6 +37,8 @@ x-env: &env
   # The remote judge for projects certified to hold no personal data; first entry only.
   LLM_CLOUD_JUDGE_CHAIN: gpt-6-luna
   JUDGE_DAILY_LIMIT: "3000"
+  # Spend bound: remote judge and explanation calls per UTC day.
+  CLOUD_JUDGE_DAILY_LIMIT: "20000"
   LLM_EXPLAIN_CHAIN: ""
   LLM_FAST_CHAIN: ""
   LLM_JUDGE_CHAIN: local-judge

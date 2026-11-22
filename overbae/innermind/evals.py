@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -14,6 +15,7 @@ import openai
 from asgiref.sync import sync_to_async
 from celery.exceptions import SoftTimeLimitExceeded
 from django.conf import settings
+from django.db import transaction
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from overbae.core.llms import (
@@ -85,6 +87,31 @@ def is_unavailable(exc: BaseException) -> bool:
     return False
 
 
+_FIELD = r"(?:parameter|argument|field|property)"
+_REFUSED_PARAMETER = re.compile(
+    # ``user`` counts only when named as the field: quoted, or next to a field word. A bare
+    # "user" also appears in ordinary errors ("... in the user message").
+    r"""['"`]user['"`]|\buser\W+(?:\w+\W+){0,3}"""
+    + _FIELD
+    + r"|"
+    + _FIELD
+    + r"""\W+(?:\w+\W+){0,3}user\b"""
+    r"|unknown parameter|unrecognized request argument|unsupported parameter|"
+    r"extra inputs|extra_forbidden|invalid parameter",
+    re.IGNORECASE,
+)
+
+
+def refuses_parameter(exc: BaseException) -> bool:
+    """A gateway that rejects a request field (the audit ``user``) must not fail every span:
+    the work is re-offered and the remote judge backs off, instead of counting an attempt."""
+    while exc is not None:
+        if isinstance(exc, openai.APIStatusError) and exc.status_code == 400:
+            return bool(_REFUSED_PARAMETER.search(str(exc)))
+        exc = exc.__cause__
+    return False
+
+
 def throttled(call, *args, **kwargs):
     """Runs a blocking judge call in a worker thread under the process-wide cap. Every
     task has its own event loop, so only a thread-level lock bounds the whole worker."""
@@ -139,8 +166,10 @@ def route_for(project_id) -> JudgeRoute:
     if not cloud:
         return local_route()
     try:
-        personal = Project.objects.filter(pk=project_id).values_list("personal_data", flat=True)
-        value = personal.first()
+        # Its own savepoint: a database error here must not abort the caller's transaction.
+        with transaction.atomic():
+            personal = Project.objects.filter(pk=project_id).values_list("personal_data", flat=True)
+            value = personal.first()
     except Exception:  # noqa: BLE001 — any doubt keeps the work on this machine
         return local_route()
     if value is not False:
@@ -295,6 +324,8 @@ class Judge(Evaluator):
         local = self.live and not remote
         if local and not judge_health.spend_call():
             raise JudgeUnavailableError("The judge's daily call limit is spent")
+        if remote and not judge_health.spend_cloud_call():
+            raise JudgeUnavailableError("The remote judge's daily call limit is spent")
         prompt = json.dumps(fit(state), ensure_ascii=False)
         started = time.monotonic()
         single = local and is_single_stream(model)
@@ -315,7 +346,8 @@ class Judge(Evaluator):
                         "lock_wait": lock_wait(),
                     }
                     if local
-                    else {"max_attempts": LLM_ATTEMPTS}
+                    # One attempt, so every remote request follows a fresh read of the flag.
+                    else {"max_attempts": 1 if remote else LLM_ATTEMPTS}
                 ),
             )
             verdict = self.parse(raw)
@@ -330,7 +362,7 @@ class Judge(Evaluator):
                 raise
             return Metric(expectation, error=f"judge: {exc}")
         except Exception as exc:
-            if is_unavailable(exc):
+            if is_unavailable(exc) or (remote and refuses_parameter(exc)):
                 if self.live:
                     judge_health.mark_unavailable(cloud=remote)
                 raise JudgeUnavailableError(str(exc)) from exc
@@ -358,12 +390,21 @@ class Judge(Evaluator):
             model = await self.remote_model()
             if model is None:
                 return ""
-            extra = {"fallback_models": None, "request_kwargs": {"user": self.project_id}}
+            if not judge_health.spend_cloud_call():
+                return ""
+            extra = {
+                "fallback_models": None,
+                "request_kwargs": {"user": self.project_id},
+                "max_attempts": 1,
+            }
         else:
             if not role_enabled(Role.EXPLAIN):
                 return ""
             model = self.explain_model or resolve_model(TaskType.EVAL_EXPLANATION)
-            extra = {"fallback_models": model_chain(TaskType.EVAL_EXPLANATION)}
+            extra = {
+                "fallback_models": model_chain(TaskType.EVAL_EXPLANATION),
+                "max_attempts": LLM_ATTEMPTS,
+            }
         prompt = (
             f"An evaluator scored this {metric.score:.2f} out of 1 against its expectation.\n"
             "In one or two sentences, state the specific reason the output falls short. "
@@ -377,12 +418,11 @@ class Judge(Evaluator):
                 prompt,
                 model=model,
                 max_tokens=EXPLAIN_MAX_TOKENS,
-                max_attempts=LLM_ATTEMPTS,
                 **extra,
             )
         except Exception as exc:  # noqa: BLE001 — a missing reason never blocks the score
             logger.warning("Explanation failed: %s", exc)
-            if self.live and is_unavailable(exc):
+            if self.live and (is_unavailable(exc) or refuses_parameter(exc)):
                 judge_health.mark_unavailable(cloud=True)
             return f"(reason unavailable: {type(exc).__name__})"
         return " ".join((text or "").split()) or "(empty reason)"

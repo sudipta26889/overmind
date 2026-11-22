@@ -56,6 +56,12 @@ COVERAGE_MAP: dict[str, Entry] = {
         "No other account and no anonymous caller reads or writes a project's rows: "
         "REST, MCP, Console and ingest.",
     ),
+    "personal-data-routing": Entry(
+        S1,
+        INVARIANT,
+        "A project holding personal data is judged only on the local model; a remote judge sees "
+        "only projects an admin certified, re-checks the flag before every call, and is bounded.",
+    ),
     "authentication": Entry(
         S1,
         INVARIANT,
