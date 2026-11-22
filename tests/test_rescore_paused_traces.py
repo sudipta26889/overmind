@@ -69,7 +69,7 @@ def test_paused_traces_in_the_sample_are_offered_again_and_the_rest_are_left(mon
 
     for span in (in_sample_span, out_of_sample, before, released, root):
         span.refresh_from_db()
-    assert in_scoring_sample(inside) and not in_scoring_sample(outside)
+    assert in_scoring_sample(inside, RATE) and not in_scoring_sample(outside, RATE)
     assert in_sample_span.eval_attributes == {}
     assert out_of_sample.eval_attributes == MARKER
     assert before.eval_attributes == MARKER

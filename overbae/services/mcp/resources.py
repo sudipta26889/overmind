@@ -609,6 +609,7 @@ def _project_resource(project, uri: str) -> dict:
         "console_url": f"{settings.FRONTEND_URL.rstrip('/')}/?projectId={project.id}",
         "integration_type": project.integration_type,
         "is_active": project.is_active,
+        "personal_data": project.personal_data,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
         "repository_snapshot": (project.settings or {}).get("repository_snapshot"),

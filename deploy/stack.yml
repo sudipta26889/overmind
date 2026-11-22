@@ -34,6 +34,8 @@ x-env: &env
   INFERENCE_API_URL: ${INFERENCE_API_URL:-}
   # Model roles come from the release, not the stack Env, whose old values name cloud chains.
   LLM_AGENT_CHAIN: flint
+  # The remote judge for projects certified to hold no personal data; first entry only.
+  LLM_CLOUD_JUDGE_CHAIN: gpt-6-luna
   JUDGE_DAILY_LIMIT: "3000"
   LLM_EXPLAIN_CHAIN: ""
   LLM_FAST_CHAIN: ""

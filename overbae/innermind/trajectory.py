@@ -12,7 +12,13 @@ from celery.exceptions import SoftTimeLimitExceeded
 from django.utils import timezone
 
 from overbae.innermind import evidence
-from overbae.innermind.evals import JUDGE_STATE_LIMIT, Judge, JudgeUnavailableError
+from overbae.innermind.evals import (
+    JUDGE_STATE_LIMIT,
+    Judge,
+    JudgeRoute,
+    JudgeUnavailableError,
+    judge_route,
+)
 from overbae.innermind.metrics import (
     FAIL_BELOW,
     Metric,
@@ -44,7 +50,7 @@ class TrajectoryEvaluator:
     expectation: str
     calls_judge = False
 
-    async def score(self, spans: list[Span]) -> Metric | None: ...
+    async def score(self, spans: list[Span], route: JudgeRoute | None = None) -> Metric | None: ...
 
 
 class OutcomeEvaluator(TrajectoryEvaluator):
@@ -53,7 +59,7 @@ class OutcomeEvaluator(TrajectoryEvaluator):
     name = "outcome"
     expectation = "The agent achieves the intent."
 
-    async def score(self, spans: list[Span]) -> Metric | None:
+    async def score(self, spans: list[Span], route: JudgeRoute | None = None) -> Metric | None:
         trace = {span.span_id: span for span in spans}
         score = mean_of(score_of(span) for span in spans if answers_for_capability(span, trace))
         if score is None:
@@ -65,7 +71,7 @@ class WeakestStepEvaluator(TrajectoryEvaluator):
     name = "weakest_step"
     expectation = "Every step meets its expectations."
 
-    async def score(self, spans: list[Span]) -> Metric | None:
+    async def score(self, spans: list[Span], route: JudgeRoute | None = None) -> Metric | None:
         steps = [span for span in spans if not span.is_root and score_of(span) is not None]
         if not steps:
             return None
@@ -79,7 +85,7 @@ class EfficiencyEvaluator(TrajectoryEvaluator):
     name = "efficiency"
     expectation = "The agent makes no redundant calls and recovers from every error."
 
-    async def score(self, spans: list[Span]) -> Metric | None:
+    async def score(self, spans: list[Span], route: JudgeRoute | None = None) -> Metric | None:
         calls = Counter(
             (evidence.tool_name(span), evidence.read_input(span))
             for span in spans
@@ -119,7 +125,7 @@ class PathJudgeEvaluator(TrajectoryEvaluator):
     )
     step_chars = 300
 
-    async def score(self, spans: list[Span]) -> Metric | None:
+    async def score(self, spans: list[Span], route: JudgeRoute | None = None) -> Metric | None:
         root = roots_of(spans)[0]
         intent = root.eval_attributes.get("intent")
         if not intent:
@@ -147,14 +153,14 @@ class PathJudgeEvaluator(TrajectoryEvaluator):
             if len(json.dumps(state).encode()) <= JUDGE_STATE_LIMIT or len(steps) <= 2:
                 break
             del steps[len(steps) // 2]
-        return await Judge(root.project_id).judge(state, self.expectation)
+        return await Judge(root.project_id, route=route).judge(state, self.expectation)
 
 
 class ReferenceEvaluator(TrajectoryEvaluator):
     name = "reference"
     expectation = "The agent calls the reference tools in order."
 
-    async def score(self, spans: list[Span]) -> Metric | None:
+    async def score(self, spans: list[Span], route: JudgeRoute | None = None) -> Metric | None:
         expected = evidence.read_reference(roots_of(spans)[0].attributes or {})
         if not expected:
             return None
@@ -181,6 +187,7 @@ class TrajectoryProcessor:
         last_attempt: bool,
         partial: dict | None = None,
         checkpoint: Callable[[str, dict], Awaitable[None]] | None = None,
+        route: JudgeRoute | None = None,
     ) -> Span:
         """Stores the trajectory on the root span without saving it. A failing evaluator
         raises unless this is the ``last_attempt``; then it, like every judged evaluator
@@ -197,7 +204,7 @@ class TrajectoryProcessor:
             if evaluator.name in partial:
                 return Metric(**partial[evaluator.name])
             try:
-                metric = await evaluator.score(spans)
+                metric = await evaluator.score(spans, route)
             except JudgeUnavailableError:
                 raise
             except Exception:
@@ -294,7 +301,8 @@ async def score_trace(project_id, trace_id: str) -> bool:
     if not is_ready(spans):
         return False
     root = roots_of(spans)[0]
-    if not in_scoring_sample(trace_id):
+    route = await judge_route(project_id)
+    if not in_scoring_sample(trace_id, route.sample_rate):
         unsampled = {"score": None, "metrics": {}, "unsampled": True}
         await store(root, {**root.eval_attributes, "trajectory": unsampled})
         return False
@@ -329,6 +337,7 @@ async def score_trace(project_id, trace_id: str) -> bool:
             last_attempt=attempts + 1 >= MAX_ATTEMPTS,
             partial=partial,
             checkpoint=checkpoint,
+            route=route,
         )
     except (JudgeUnavailableError, SoftTimeLimitExceeded, asyncio.CancelledError):
         await put(released())

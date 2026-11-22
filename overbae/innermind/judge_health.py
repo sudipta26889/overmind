@@ -11,6 +11,9 @@ import redis
 from overbae.core.llms import cache_redis
 
 KEY = "overmind:judge:unavailable"
+# A remote judge fails on its own account; it never pauses the local one.
+CLOUD_KEY = "overmind:judge:unavailable:cloud"
+CLOUD_BACKOFF_MS = 60_000
 
 
 def backoff_ms() -> int:
@@ -38,11 +41,14 @@ def daily_limit() -> int:
     return limit
 
 
-def mark_unavailable(px: int | None = None) -> None:
+def mark_unavailable(px: int | None = None, *, cloud: bool = False) -> None:
     client = cache_redis()
     if client is not None:
         with suppress(redis.RedisError):
-            client.set(KEY, "1", px=px or backoff_ms())
+            if cloud:
+                client.set(CLOUD_KEY, "1", px=CLOUD_BACKOFF_MS)
+            else:
+                client.set(KEY, "1", px=px or backoff_ms())
 
 
 def spend_call() -> bool:
@@ -66,12 +72,12 @@ def spend_call() -> bool:
     return False
 
 
-def backed_off() -> bool:
+def backed_off(*, cloud: bool = False) -> bool:
     client = cache_redis()
     if client is None:
         return False
     try:
-        return bool(client.exists(KEY))
+        return bool(client.exists(CLOUD_KEY if cloud else KEY))
     except redis.RedisError:
         return False
 
@@ -81,4 +87,4 @@ def clear() -> None:
     client = cache_redis()
     if client is not None:
         with suppress(redis.RedisError):
-            client.delete(KEY)
+            client.delete(KEY, CLOUD_KEY)

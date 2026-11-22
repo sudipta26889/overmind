@@ -96,6 +96,9 @@ class Project(models.Model):
     )
     is_active = models.BooleanField(default=True)
     settings = models.JSONField(default=dict, blank=True)
+    # True until an admin certifies the project holds no personal data. It decides whether a
+    # remote model may judge the project's traces; only ``set_project_personal_data`` writes it.
+    personal_data = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -105,6 +108,22 @@ class Project(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class ProjectPersonalDataChange(models.Model):
+    """Append-only record of every change to ``Project.personal_data``."""
+
+    project = models.ForeignKey(
+        Project, on_delete=models.CASCADE, related_name="personal_data_changes"
+    )
+    old_value = models.BooleanField()
+    new_value = models.BooleanField()
+    changed_by = models.CharField(max_length=255)
+    reason = models.TextField()
+    changed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["changed_at", "id"]
 
 
 class ProjectInvite(models.Model):
