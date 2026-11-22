@@ -9,7 +9,6 @@ from datetime import timedelta
 
 from asgiref.sync import sync_to_async
 from celery.exceptions import SoftTimeLimitExceeded
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -17,10 +16,11 @@ from django.utils import timezone
 from overbae.core.model_registry import Role
 from overbae.innermind import evidence
 from overbae.innermind.evals import (
+    JudgeRoute,
     JudgeUnavailableError,
     evaluator_factory,
     expectation_rows,
-    judge_is_single_stream,
+    judge_route,
     matches,
 )
 from overbae.innermind.metrics import Metric, answers_for_capability, mean_of
@@ -87,6 +87,7 @@ class SpanProcessor:
         judge: bool = True,
         last_attempt: bool = False,
         checkpoint: Callable[[Span, dict], Awaitable[None]] | None = None,
+        route: JudgeRoute | None = None,
     ) -> Span:
         """Writes "score" only once the result is final; a span without it is retried.
 
@@ -113,7 +114,7 @@ class SpanProcessor:
 
         async def judged(row: EvalMatrix) -> Metric:
             metric = await evaluator_factory.get_evaluator(
-                row, self.project_id, self.explain_model, self.judge_role
+                row, self.project_id, self.explain_model, self.judge_role, route
             ).score(row, span, nodes)
             # Kept the moment it exists, so a pass that ends early loses none of its work.
             for twin in rows:
@@ -259,9 +260,9 @@ async def load_traces(
     return traces
 
 
-def in_scoring_sample(trace_id: str) -> bool:
-    """Keyed on the trace id so a trace's spans and its trajectory share one decision."""
-    rate = settings.TRACE_SCORING_SAMPLE_RATE
+def in_scoring_sample(trace_id: str, rate: float) -> bool:
+    """Keyed on the trace id so a trace's spans and its trajectory share one decision at a
+    given rate; the rate is the work item's route's."""
     if rate >= 1:
         return True
     bucket = int.from_bytes(hashlib.sha256(trace_id.encode()).digest()[:4], "big")
@@ -319,13 +320,14 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
     )
     # A single-stream judge answers one call at a time: more waiting spans would only hold
     # claims and poll the lock.
-    slots = asyncio.Semaphore(1 if judge_is_single_stream() else MAX_CONCURRENT_SPANS)
+    route = await judge_route(project_id)
+    slots = asyncio.Semaphore(1 if route.single_stream else MAX_CONCURRENT_SPANS)
 
     async def score(span: Span) -> Span | None:
         trace = traces[span.trace_id]
         fallback = span.capability.description if span.capability_id else ""
         processor = span_processor_factory.get_processor(span)
-        if not in_scoring_sample(span.trace_id):
+        if not in_scoring_sample(span.trace_id, route.sample_rate):
             await mark_unsampled(span)
             return None
         async with slots:
@@ -343,6 +345,7 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
                     judge=not spent,
                     last_attempt=attempts + 1 >= MAX_ATTEMPTS,
                     checkpoint=save_partial,
+                    route=route,
                 )
             except JudgeUnavailableError as exc:
                 # Released below without an attempt; the sweep offers the span again.

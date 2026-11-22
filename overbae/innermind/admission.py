@@ -9,7 +9,7 @@ from django.db.models import Count, F, OuterRef, Subquery
 from django.utils import timezone
 
 from overbae.innermind import judge_health
-from overbae.innermind.evals import judge_is_single_stream
+from overbae.innermind.evals import route_for
 from overbae.models import LiveScoringProject, LiveScoringScheduler, LiveScoringWork, Span
 
 ACTIVE = ("queued", "running")
@@ -31,6 +31,20 @@ def enqueue(project_id, kind: str, keys: list[str]) -> None:
     ).update(state="waiting", task_id="", expires_at=None)
 
 
+def judge_ready(project_id, active: dict) -> bool:
+    """Whether this project's judge can take work. The local judge pauses while it is backed
+    off and, being a single stream, serves one project at a time; a remote judge pauses only for
+    its own faults, and never waits behind the local one."""
+    route = route_for(project_id)
+    if not route.local:
+        return not judge_health.backed_off(cloud=True)
+    if judge_health.backed_off():
+        return False
+    if route.single_stream:
+        return not any(route_for(other).local for other in active)
+    return True
+
+
 @transaction.atomic
 def dispatch(publish) -> dict:
     LiveScoringScheduler.objects.get_or_create(pk=1)
@@ -47,14 +61,10 @@ def dispatch(publish) -> dict:
     expired = work.filter(state__in=ACTIVE, expires_at__lte=now).update(
         state="done", finished_at=now, error="worker admission expired"
     )
-    # While the judge is down or slow, no judge work starts; the work waits, uncounted.
-    if judge_health.backed_off():
-        return {"admitted": 0, "expired": expired, "backed_off": True}
     cap = max(1, int(getattr(settings, "LIVE_SCORING_MAX_IN_FLIGHT", 16)))
-    if judge_is_single_stream():
-        # One consumer for a one-stream judge: more would only sit polling its lock.
-        cap = 1
     per_project = max(1, int(getattr(settings, "LIVE_SCORING_MAX_PER_PROJECT", 2)))
+    # Projects whose judge cannot take work right now; they wait, uncounted, for a later tick.
+    held: list = []
     admitted = 0
     while work.filter(state__in=ACTIVE).count() < cap:
         active = dict(
@@ -67,12 +77,20 @@ def dispatch(publish) -> dict:
             LiveScoringProject.objects.filter(
                 project_id__in=work.filter(state="waiting").values("project_id")
             )
-            .exclude(project_id__in=[key for key, count in active.items() if count >= per_project])
+            .exclude(
+                project_id__in=[
+                    *(key for key, count in active.items() if count >= per_project),
+                    *held,
+                ]
+            )
             .order_by(F("last_admitted_at").asc(nulls_first=True), "project_id")
             .first()
         )
         if project is None:
             break
+        if not judge_ready(project.project_id, active):
+            held.append(project.project_id)
+            continue
         kinds = ["span", "trajectory", "signals"]
         if project.last_kind in kinds:
             offset = kinds.index(project.last_kind) + 1

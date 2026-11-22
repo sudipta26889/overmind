@@ -354,6 +354,7 @@ def is_inference_model(model_id: str) -> bool:
 
 class Role(StrEnum):
     JUDGE = "judge"
+    CLOUD_JUDGE = "cloud_judge"
     FAST = "fast"
     AGENT = "agent"
     EXPLAIN = "explain"
@@ -370,10 +371,32 @@ def _role_chain(env: str) -> tuple[str, ...]:
 
 ROLE_CHAINS: dict[Role, tuple[str, ...]] = {
     Role.JUDGE: _role_chain("LLM_JUDGE_CHAIN"),
+    Role.CLOUD_JUDGE: _role_chain("LLM_CLOUD_JUDGE_CHAIN"),
     Role.FAST: _role_chain("LLM_FAST_CHAIN"),
     Role.AGENT: _role_chain("LLM_AGENT_CHAIN"),
     Role.EXPLAIN: _role_chain("LLM_EXPLAIN_CHAIN"),
 }
+
+
+def check_cloud_judge(chain: tuple[str, ...]) -> None:
+    """Only the first entry is ever used. A model that runs on this deployment's own hardware
+    must never be the one that serves certified projects."""
+    if chain and (
+        MODELS_BY_NAME[chain[0]].single_stream or MODELS_BY_NAME[chain[0]].vendor is Vendor.LOCAL
+    ):
+        raise ValueError(f"LLM_CLOUD_JUDGE_CHAIN names a local model: {chain[0]}")
+
+
+def check_local_judge(chain: tuple[str, ...]) -> None:
+    """The judge for projects that hold personal data must run on this deployment's hardware."""
+    if chain:
+        first = MODELS_BY_NAME[chain[0]]
+        if not (first.single_stream or first.vendor is Vendor.LOCAL):
+            raise ValueError(f"LLM_JUDGE_CHAIN names a remote model: {chain[0]}")
+
+
+check_cloud_judge(ROLE_CHAINS[Role.CLOUD_JUDGE])
+check_local_judge(ROLE_CHAINS[Role.JUDGE])
 
 
 class RoleOffError(RuntimeError):

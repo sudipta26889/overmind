@@ -302,7 +302,8 @@ class ProjectSerializer(serializers.ModelSerializer):
     class Meta:
         model = Project
         fields = "__all__"
-        read_only_fields = ["id", "created_at", "updated_at"]
+        # personal_data is written only by the set_project_personal_data command.
+        read_only_fields = ["id", "personal_data", "created_at", "updated_at"]
         # ``_unique_project_slug`` resolves collisions; the auto
         # ``UniqueTogetherValidator`` would hard-400 them first.
         validators = []

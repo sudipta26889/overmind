@@ -17,9 +17,14 @@ from django.db.models import Func, IntegerField, Sum, TextField, Window
 from django.db.models.functions import Cast, Coalesce
 from django.utils import timezone
 
-from overbae.core.model_registry import Role, role_enabled
 from overbae.innermind import evidence
-from overbae.innermind.evals import Judge, JudgeUnavailableError
+from overbae.innermind.evals import (
+    Judge,
+    JudgeRoute,
+    JudgeUnavailableError,
+    judge_route,
+    local_route,
+)
 from overbae.innermind.metrics import (
     FAIL_BELOW,
     REASON_BELOW,
@@ -88,6 +93,8 @@ class Signal:
     default_enabled: ClassVar[bool] = True
     # Class attributes a subscription's ``config`` may override.
     params: ClassVar[tuple[str, ...]] = ()
+    # Where this run's judge calls go, set by the runner once per run.
+    route: JudgeRoute | None = None
 
     def __init__(self, project_id: str, config: dict | None = None):
         self.project_id = str(project_id)
@@ -327,7 +334,7 @@ class PlanDriftSignal(Signal):
             if "drift" not in span.eval_attributes
             and span.eval_attributes.get("drift_attempts", 0) < MAX_ATTEMPTS
         ]
-        if role_enabled(Role.JUDGE):
+        if (self.route or local_route()).model:
             await asyncio.gather(*map(self.judge_and_record, unjudged[: self.STEPS_PER_RUN]))
         drifting = [
             span.name
@@ -348,7 +355,7 @@ class PlanDriftSignal(Signal):
         await self.record(span, outcome)
 
     async def judge(self, span: Span) -> float | None:
-        judge = Judge(self.project_id)
+        judge = Judge(self.project_id, route=self.route)
         state = judge.evidence(span, self.expectation)
         if "output" not in state:
             return None
@@ -683,6 +690,7 @@ class SignalRunner:
 
     def __init__(self, project_id):
         self.project_id = project_id
+        self.route: JudgeRoute | None = None
 
     async def batches(self):
         recent = (
@@ -721,6 +729,7 @@ class SignalRunner:
             )
 
     async def run(self) -> int:
+        self.route = await judge_route(self.project_id)
         configured = [
             s async for s in SignalSubscription.objects.filter(project_id=self.project_id)
         ]
@@ -773,6 +782,7 @@ class SignalRunner:
                 )
             ]
             signal = signal_factory.get_signal(subscription)
+            signal.route = self.route
             for key, group in group_by(scoped, group_key).items():
                 try:
                     message = await signal.check(group)
