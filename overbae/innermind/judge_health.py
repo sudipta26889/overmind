@@ -10,7 +10,10 @@ import redis
 from overbae.core.llms import cache_redis
 
 KEY = "overmind:judge:unavailable"
-BACKOFF_MS = 300_000
+
+
+def backoff_ms() -> int:
+    return int(float(os.environ.get("JUDGE_BACKOFF_SECONDS", 300)) * 1000)
 
 
 def slow_seconds() -> float:
@@ -22,7 +25,7 @@ def mark_unavailable() -> None:
     client = cache_redis()
     if client is not None:
         with suppress(redis.RedisError):
-            client.set(KEY, "1", px=BACKOFF_MS)
+            client.set(KEY, "1", px=backoff_ms())
 
 
 def backed_off() -> bool:
@@ -33,3 +36,11 @@ def backed_off() -> bool:
         return bool(client.exists(KEY))
     except redis.RedisError:
         return False
+
+
+def clear() -> None:
+    """Ends the back-off, as an operator does once the judge is known to be back."""
+    client = cache_redis()
+    if client is not None:
+        with suppress(redis.RedisError):
+            client.delete(KEY)

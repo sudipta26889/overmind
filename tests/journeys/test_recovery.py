@@ -8,6 +8,7 @@ import redis
 from django.utils import timezone
 
 from overbae.celery import app
+from overbae.innermind import judge_health
 from overbae.models import Activity, DatasetPreparation
 from overbae.tasks.datasets import reap_stuck_runs
 from overbae.tasks.utils.task_lock import acquire_task_lock, with_task_lock
@@ -98,9 +99,13 @@ def test_a_judge_that_is_down_never_fails_a_span_and_scores_it_when_it_returns(
         beat(SWEEP_SPANS, SWEEP_TRAJECTORIES)
     root = trace_spans(rest, project_id, trace)[trace.root_id.hex()]
     assert "score" not in root["eval_attributes"]
-    assert len(fake_llm.judgments()) > 5
+    # The outage backs judging off, so the sweeps do not hammer the judge.
+    attempts = len(fake_llm.judgments())
+    assert 0 < attempts <= 5
+    assert judge_health.backed_off()
 
     fake_llm.forget()
+    judge_health.clear()
     clock.shift(SWEEP_WAIT)
     beat(SWEEP_SPANS, SWEEP_TRAJECTORIES)
     root = trace_spans(rest, project_id, trace)[trace.root_id.hex()]
