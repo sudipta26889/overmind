@@ -13,13 +13,13 @@
  */
 
 import { mapValues } from '../runtime';
-import type { Kind703Enum } from './Kind703Enum';
+import type { KindFf8Enum } from './KindFf8Enum';
 import {
-    Kind703EnumFromJSON,
-    Kind703EnumFromJSONTyped,
-    Kind703EnumToJSON,
-    Kind703EnumToJSONTyped,
-} from './Kind703Enum';
+    KindFf8EnumFromJSON,
+    KindFf8EnumFromJSONTyped,
+    KindFf8EnumToJSON,
+    KindFf8EnumToJSONTyped,
+} from './KindFf8Enum';
 
 /**
  *
@@ -41,10 +41,10 @@ export interface DecisionModelOption {
     name: string;
     /**
      *
-     * @type {Kind703Enum}
+     * @type {KindFf8Enum}
      * @memberof DecisionModelOption
      */
-    kind: Kind703Enum;
+    kind: KindFf8Enum;
     /**
      *
      * @type {string}
@@ -78,7 +78,7 @@ export function DecisionModelOptionFromJSONTyped(json: any, ignoreDiscriminator:
 
         'id': json['id'],
         'name': json['name'],
-        'kind': Kind703EnumFromJSON(json['kind']),
+        'kind': KindFf8EnumFromJSON(json['kind']),
         'qualification': json['qualification'],
     };
 }
@@ -96,7 +96,7 @@ export function DecisionModelOptionToJSONTyped(value?: DecisionModelOption | nul
 
         'id': value['id'],
         'name': value['name'],
-        'kind': Kind703EnumToJSON(value['kind']),
+        'kind': KindFf8EnumToJSON(value['kind']),
         'qualification': value['qualification'],
     };
 }

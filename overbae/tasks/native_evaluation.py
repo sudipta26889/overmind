@@ -79,13 +79,9 @@ def advance_plan(plan_id, stage=None):
             call["enqueued_at"] = timezone.now().isoformat()
             locked.calls = {**locked.calls, ready: call}
             locked.save()
-            external = ready not in {"verify_inputs", "fit_calibration", "score"} and any(
-                ready.endswith("_" + p["key"]) and p["kind"] == "external"
-                for p in locked.config["participants"]
-            )
             transaction.on_commit(
-                lambda ready=ready, delay=2 if external else 15 if call.get("id") else 0: (
-                    advance_plan.apply_async(args=[str(plan.pk), ready], countdown=delay)
+                lambda ready=ready, delay=15 if call.get("id") else 0: advance_plan.apply_async(
+                    args=[str(plan.pk), ready], countdown=delay
                 ),
                 robust=True,
             )

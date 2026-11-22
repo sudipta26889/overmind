@@ -13,13 +13,13 @@
  */
 
 import { mapValues } from '../runtime';
-import type { Kind703Enum } from './Kind703Enum';
+import type { KindFf8Enum } from './KindFf8Enum';
 import {
-    Kind703EnumFromJSON,
-    Kind703EnumFromJSONTyped,
-    Kind703EnumToJSON,
-    Kind703EnumToJSONTyped,
-} from './Kind703Enum';
+    KindFf8EnumFromJSON,
+    KindFf8EnumFromJSONTyped,
+    KindFf8EnumToJSON,
+    KindFf8EnumToJSONTyped,
+} from './KindFf8Enum';
 
 /**
  *
@@ -41,10 +41,10 @@ export interface DecisionParticipantRequest {
     name: string;
     /**
      *
-     * @type {Kind703Enum}
+     * @type {KindFf8Enum}
      * @memberof DecisionParticipantRequest
      */
-    kind: Kind703Enum;
+    kind: KindFf8Enum;
     /**
      *
      * @type {string}
@@ -57,12 +57,6 @@ export interface DecisionParticipantRequest {
      * @memberof DecisionParticipantRequest
      */
     model?: string;
-    /**
-     *
-     * @type {string}
-     * @memberof DecisionParticipantRequest
-     */
-    servedModel?: string;
 }
 
 
@@ -89,10 +83,9 @@ export function DecisionParticipantRequestFromJSONTyped(json: any, ignoreDiscrim
 
         'key': json['key'],
         'name': json['name'],
-        'kind': Kind703EnumFromJSON(json['kind']),
+        'kind': KindFf8EnumFromJSON(json['kind']),
         'job': json['job'] == null ? undefined : json['job'],
         'model': json['model'] == null ? undefined : json['model'],
-        'servedModel': json['served_model'] == null ? undefined : json['served_model'],
     };
 }
 
@@ -109,9 +102,8 @@ export function DecisionParticipantRequestToJSONTyped(value?: DecisionParticipan
 
         'key': value['key'],
         'name': value['name'],
-        'kind': Kind703EnumToJSON(value['kind']),
+        'kind': KindFf8EnumToJSON(value['kind']),
         'job': value['job'],
         'model': value['model'],
-        'served_model': value['servedModel'],
     };
 }

@@ -21,7 +21,7 @@ Filters are span-native (`received_at__gte`, `span_type`, `operation`, `service_
 
 ## Live scoring (`innermind/`)
 
-`EvalMatrix` rows are `llm` (a one-sentence expectation judged by `evals.JevEvaluator`) or `deterministic` (`def evaluate(span)` run by `deterministic.py` in an audited `python3 -I` child: no imports, `json`/`re` preloaded, 5 s CPU, 15 s wall, 512 MB). Rows are project-wide or per capability and narrow by `span_type`/`span_name`; span-declared expectations add llm rows for that span. `innermind.definitions` derives the read-only `definition_source` of each row.
+`EvalMatrix` rows are `llm` (a one-sentence expectation judged by `evals.Judge`) or `deterministic` (`def evaluate(span)` run by `deterministic.py` in an audited `python3 -I` child: no imports, `json`/`re` preloaded, 5 s CPU, 15 s wall, 512 MB). Rows are project-wide or per capability and narrow by `span_type`/`span_name`; span-declared expectations add llm rows for that span. `innermind.definitions` derives the read-only `definition_source` of each row.
 
 `span_processor.score_spans`:
 
@@ -30,7 +30,7 @@ Filters are span-native (`received_at__gte`, `span_type`, `operation`, `service_
 - A pass counts in `attempts` before its judges run, so a killed pass counts too. At `MAX_ATTEMPTS` (3) the failing rows become error metrics and no judge is called again.
 - A span never waits for its ancestors. Intent falls back from the span, to the nearest arrived ancestor, to the root input, to the capability description. The beat sweep re-drives spans unscored after 90 s.
 - Re-ingest keeps a score whose `fingerprint` matches the incoming span.
-- Jev and explanation calls share one process-wide thread cap (`evals.throttled`); an event-loop semaphore cannot bound them.
+- Judge and explanation calls share one process-wide thread cap (`evals.throttled`); an event-loop semaphore cannot bound them.
 
 `trajectory.score_trace` runs once, when every arrived span of a single-root trace is final, and stores `score` (the outcome), `passed`, `span_count` and `metrics` (`weakest_step`, `efficiency`, `path_judge`, `reference`) under the root's `eval_attributes.trajectory`; a single-span trace stores the outcome only. It shares the attempt limit.
 
@@ -42,6 +42,6 @@ Every span, trajectory and run-row score appends an `EvalScore` (`source_type` `
 
 `health.py` backs MCP `inspect_capability_health` and `query_failures`.
 
-## Jev decisions
+## The judge
 
-`core/decisions.py` calls the registered Jev model with structured choice questions and validates complete probability distributions. A generative model (`EVAL_EXPLANATION`) only writes reasons for low scores. Eval matrix llm rows call Jev with no generative fallback: transient transport failures raise so the span retries; other `DecisionError`s become metric errors. Fixed classification and Workshop semantic services keep a generative fallback through `services/judging/decisions.py`. Jev confidence is not calibrated correctness. Jev is excluded from inference and chat-model pickers. `POST /api/v1/systemone` proxies a body synchronously to OpenRouter, or to a fine-tuned decision deployment's Modal worker; it has no request key or receipt.
+`evals.Judge` makes one chat call with a strict `json_schema` verdict (`yes`/`partial`/`no`, scored 1/0.5/0, temperature 0). Live scoring (spans, trajectories, plan-drift signals) uses `Role.JUDGE`, the local `single_stream` model: `llms._one_stream` holds the Redis lock `overmind:llm:single-stream:<model>` for each call, and the request timeout is 300 s. A busy lock, a timeout, a 429 or a 5xx raises `JudgeUnavailableError`: the span is released unclaimed, `attempts` is unchanged and the sweep (newest first) offers it again. Only an answer without a verdict counts an attempt; the third is scored with error metrics. Live scoring never writes explanations. Eval runs, optimiser comparisons and task classification are person-started and use FAST/EXPLAIN. `TRACE_SCORING_SAMPLE_RATE` keeps arrivals near the judge's capacity. `POST /api/v1/systemone` serves fine-tuned decision deployments only.

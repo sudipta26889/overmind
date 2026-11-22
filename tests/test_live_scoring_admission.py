@@ -6,10 +6,17 @@ import pytest
 from django.db import close_old_connections
 from django.utils import timezone
 
+from overbae.core.model_registry import ROLE_CHAINS, Role
 from overbae.innermind import admission
 from overbae.models import LiveScoringWork, Project
 
 pytestmark = [pytest.mark.django_db(transaction=True), pytest.mark.covers("capacity")]
+
+
+@pytest.fixture(autouse=True)
+def _concurrent_judge(monkeypatch):
+    # A single-stream judge is admitted one at a time; these tests cover the general limits.
+    monkeypatch.setitem(ROLE_CHAINS, Role.JUDGE, ("gpt-6-luna",))
 
 
 def project():

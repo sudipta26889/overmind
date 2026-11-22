@@ -5,13 +5,13 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import pytest
+from conftest import frozen_dataset
 from django.test import TestCase
 from django.utils import timezone
 from mcp_fixtures import asgi_db
 from rest_framework.test import APIClient
 from starlette.testclient import TestClient
 from test_data_first_workflow import workspace
-from test_decision_provider_recovery import fixture, payload
 from test_native_evaluation_plan import setup_plan
 
 from overbae.models import (
@@ -26,7 +26,6 @@ from overbae.models import (
 from overbae.services import native_evaluation, native_evaluation_monitor, training_experiments
 from overbae.services.datasets import exploration, land, rows, store
 from overbae.services.datasets.exploration import advance
-from overbae.services.decision_providers import external_step
 from overbae.services.mcp.server import create_mcp_application
 from overbae.tasks.native_evaluation import advance_plan
 
@@ -275,13 +274,13 @@ def test_mcp_comparison_draft_requires_explicit_launch_and_resumes_after_reconne
                 "final_cell": str(dataset.active_cell.pk),
                 "participants": [
                     {
-                        "key": "external",
-                        "name": "External",
-                        "kind": "external",
-                        "model": "typesafe/jev-1.13",
+                        "key": "base",
+                        "name": "Base",
+                        "kind": "foundation",
+                        "model": "Qwen/Qwen3.5-4B",
                     }
                 ],
-                "baseline": "external",
+                "baseline": "base",
             },
         )
         identifier = result["workflow"]["id"]
@@ -299,66 +298,39 @@ def test_mcp_comparison_draft_requires_explicit_launch_and_resumes_after_reconne
         assert dispatch.call_count == 1
 
 
-def test_saved_prediction_reuse_is_explicit_and_refuses_changed_conditions():
-
-    source, participant, _ = fixture()
-    with patch(
-        "overbae.core.decisions.request_once", return_value=(payload(), {"response_cost": 0.002})
-    ):
-        receipt = external_step(source, "final", participant)
-    source.calls = {"final_external": {"state": "completed", "receipt": receipt}}
-    source.save()
-    target = native_evaluation.create_plan(
-        source.project,
-        name="Reuse",
-        request_key="reuse",
-        final_cell=source.final_cell,
-        participants=[participant],
-        baseline="external",
-    )
-    native_evaluation.reuse_predictions(
-        target, source=source, participant="external", source_participant="external"
-    )
-    target.refresh_from_db()
-    with patch("overbae.tasks.native_evaluation.advance_plan.delay"):
-        target = native_evaluation.launch(target)
-    with patch(
-        "overbae.core.decisions.request_once",
-        side_effect=AssertionError("never repeat cached work"),
-    ):
-        native_evaluation.advance(target.pk, stage="verify_inputs")
-        native_evaluation.advance(target.pk, stage="final_external")
-    target.refresh_from_db()
-    assert target.calls["final_external"]["state"] == "completed"
-    assert target.calls["final_external"]["receipt"]["reused_from"] == str(source.pk)
-    assert not target.requests.exists()
-
-    incompatible = native_evaluation.create_plan(
-        source.project,
-        name="Different inference",
-        request_key="incompatible-reuse",
-        final_cell=source.final_cell,
-        participants=[participant],
-        baseline="external",
-        inference={"context_length": 1024},
-    )
-    with pytest.raises(ValueError, match="identical sources"):
-        native_evaluation.reuse_predictions(
-            incompatible, source=source, participant="external", source_participant="external"
-        )
-    incompatible.refresh_from_db()
-    assert not incompatible.config.get("reuse")
-    foreign = Project.objects.create(name="Other tenant", slug="reuse-other-tenant")
-    NativeEvaluationPlan.objects.filter(pk=incompatible.pk).update(project=foreign)
-    with pytest.raises(ValueError, match="same project"):
-        native_evaluation.reuse_predictions(
-            incompatible, source=source, participant="external", source_participant="external"
-        )
-
-
 def test_expired_stage_lease_is_reconciled_after_worker_loss():
 
-    plan, _, _ = fixture()
+    project = Project.objects.create(name="Lease", slug="lease")
+    dataset = frozen_dataset(
+        project,
+        [
+            {
+                "input": {
+                    "decision": {
+                        "state": "Evidence",
+                        "question": "Pick",
+                        "kind": "choice",
+                        "options": ["a", "b"],
+                    }
+                },
+                "expected_output": {"probabilities": [1, 0]},
+            }
+        ],
+        contract="eval",
+    )
+    with patch.object(
+        native_evaluation, "runtime", return_value={"app": "offline", "environment": "test"}
+    ):
+        plan = native_evaluation.create_plan(
+            project,
+            name="Lease",
+            request_key="lease",
+            final_cell=dataset.active_cell,
+            participants=[
+                {"key": "base", "name": "Base", "kind": "foundation", "model": "Qwen/Qwen3.5-4B"}
+            ],
+            baseline="base",
+        )
     with patch("overbae.tasks.native_evaluation.advance_plan.delay"):
         native_evaluation.launch(plan)
     plan.refresh_from_db()

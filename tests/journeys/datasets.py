@@ -1,9 +1,11 @@
 import json
 
+from overbae.core.model_registry import model_defaults
+
 from .conftest import GOOD_REPLY
 
 SYSTEM = "You are a support agent. Answer the customer in two sentences."
-JUDGE = "gpt-5.6-terra"
+JUDGE = model_defaults()["judge_models"][0]
 
 
 def upload(cli, sample_agent, path, *extra) -> str:

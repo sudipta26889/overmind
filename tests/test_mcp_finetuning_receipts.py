@@ -63,7 +63,7 @@ def test_start_rejects_invalid_training_method_without_creating_job(monkeypatch,
     assert train.active_cell.used_at is None
 
 
-@pytest.mark.parametrize("judge_model", ["", "gpt-5.6-luna"])
+@pytest.mark.parametrize("judge_model", ["", "flint"])
 def test_start_finetune_job_receipt_has_kind_and_preserves_reference(monkeypatch, judge_model):
     from overbae.services.mcp import tools_finetuning
 

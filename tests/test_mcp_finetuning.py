@@ -198,7 +198,6 @@ def test_readiness_classifies_selected_capability_and_defers_to_data_for_none(fa
     capability, dataset, _, _ = training_setup(context)
     capability.description = "Write Python code."
     capability.save(update_fields=["description"])
-    fake_llm.decide = lambda _key, _question: "code_generation"
     fake_llm.on("Classify the task an AI capability", '{"task_type":"code_generation"}')
     selected = _call(
         "check_finetune_readiness",

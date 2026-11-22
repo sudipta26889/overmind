@@ -240,11 +240,14 @@ def test_deleting_an_adapter_leaves_the_shared_base_alone(scripted):
 
 
 @pytest.mark.parametrize("adapter", [False, True])
-def test_an_evaluation_call_to_a_deployment_carries_its_routing(gateway, monkeypatch, adapter):
+def test_an_evaluation_call_to_a_deployment_carries_its_routing(
+    gateway, monkeypatch, settings, adapter
+):
     from modal_shared.shared import ADAPTER_PATH_HEADER, LORA_RANK_HEADER
     from overbae.core.llms import ModelSpec, call_llm
 
     monkeypatch.setenv("INFERENCE_API_KEY", "k")
+    settings.INFERENCE_API_URL = GATEWAY
     deployed = _deployed(
         "ft-eval",
         gpu_type="L40S",

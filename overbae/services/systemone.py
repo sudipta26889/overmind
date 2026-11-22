@@ -1,5 +1,4 @@
-"""JEV systemone requests. The API proxies them in the request: a catalog model
-goes to OpenRouter, and a fine-tuned deployment calls its Modal worker."""
+"""Decision requests for fine-tuned decision deployments, which call their Modal worker."""
 
 from __future__ import annotations
 
@@ -8,23 +7,17 @@ import logging
 import time
 import uuid
 from contextlib import suppress
-from decimal import Decimal
 
-import requests
-from django.conf import settings
 from django.db.models import Q
 
 from overbae.core.errors import InputValidationError
-from overbae.core.model_registry import OPENROUTER_BASE_URL, decision_models, openrouter_configured
 from overbae.models import APIToken, DeployedModel
-from overbae.services.billing_ledger import BillingService, charge_credits
 from overbae.services.decision_serving import worker
 from overbae.services.deployed_chat import is_cold_start, record_inference_call
 
 logger = logging.getLogger(__name__)
 
 _KINDS = {"choice", "noul", "score"}
-_OPENROUTER_TIMEOUT = 120
 
 
 def parse(body: dict) -> tuple[str, str, list[str], list[dict]]:
@@ -118,12 +111,6 @@ def resolve(model: str, project_ids) -> DeployedModel | None:
             "model matches more than one deployment. Pass the deployment id."
         )
     return matches[0] if matches else None
-
-
-def catalog_model(model: str) -> bool:
-    return any(
-        model == item.slug or model.startswith(item.slug + "-") for item in decision_models()
-    )
 
 
 def answer(names: list[str], kinds: list[str], predictions: list[dict]) -> dict:
@@ -237,55 +224,3 @@ def call_deployment(
         "id": str(uuid.uuid4()),
         "provider": "Overmind",
     }
-
-
-def call_openrouter(user, body: dict) -> tuple[int, dict]:
-    if not openrouter_configured():
-        return _error(503, "Frontier model inference is not configured.", "server_error")
-    try:
-        response = requests.post(
-            f"{OPENROUTER_BASE_URL}/systemone",
-            headers={
-                "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://overmindlab.ai",
-            },
-            json=body,
-            timeout=_OPENROUTER_TIMEOUT,
-        )
-    except requests.RequestException:
-        logger.exception("OpenRouter systemone request failed")
-        return _error(502, "The model provider request failed.", "server_error")
-    if response.status_code == 429:
-        return _error(
-            429,
-            "The model provider is rate-limiting requests. Try again shortly.",
-            "rate_limit_error",
-        )
-    if not response.ok:
-        logger.error("OpenRouter systemone HTTP %s", response.status_code)
-        return _error(
-            502,
-            f"The model provider returned an error (HTTP {response.status_code}).",
-            "server_error",
-        )
-    try:
-        payload = response.json()
-    except ValueError:
-        return _error(502, "The model provider returned an invalid response.", "server_error")
-    if not isinstance(payload, dict):
-        return _error(502, "The model provider returned an invalid response.", "server_error")
-    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-    cost = usage.get("cost")
-    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
-        try:
-            charge_credits(
-                user,
-                Decimal(str(cost)),
-                BillingService.INFERENCE,
-                idempotency_key=f"inference:{user.pk}:{uuid.uuid4()}",
-                metadata={"model_id": body.get("model"), "usage": usage},
-            )
-        except Exception:
-            logger.exception("Failed to charge systemone inference for user_id=%s", user.pk)
-    return 200, payload

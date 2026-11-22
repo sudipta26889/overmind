@@ -60,11 +60,11 @@ def test_mixed_large_payload_soak(live_api, settings, fake_llm, fake_modal, sft)
     fake_llm.extra_models.append("fake/candidate")
     fake_llm.on(lambda request: request.model == "fake/candidate", "Answer")
 
-    def decision(*_):
+    def verdict(_state):
         time.sleep(0.05)
         return "yes"
 
-    fake_llm.decide = decision
+    fake_llm.verdict = verdict
     seconds = int(os.environ.get("OVERMIND_SOAK_SECONDS", "30"))
     clients = int(os.environ.get("OVERMIND_SOAK_CLIENTS", "8"))
     rows = int(os.environ.get("OVERMIND_SOAK_ROWS", "8192"))

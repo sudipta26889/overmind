@@ -53,19 +53,10 @@ export interface EvaluationContextRequestRequest {
     evalSet?: string | null;
     /**
      * Explanation judge for this run. Blank uses the configured default.
-     *
-     * * `` -
-     * * `gpt-5.6-luna` - gpt-5.6-luna
-     * * `gpt-5.6-terra` - gpt-5.6-terra
-     * * `claude-sonnet-5` - claude-sonnet-5
-     * * `claude-haiku-4-5` - claude-haiku-4-5
-     * * `gemini-3.1-pro-preview` - gemini-3.1-pro-preview
-     * * `gemini-3.8-flash` - gemini-3.8-flash
-     * * `deepseek-v3.2` - deepseek-v3.2
      * @type {string}
      * @memberof EvaluationContextRequestRequest
      */
-    judgeModel?: EvaluationContextRequestRequestJudgeModelEnum;
+    judgeModel?: string;
     /**
      *
      * @type {Array<EvalRunTargetRequest>}
@@ -73,23 +64,6 @@ export interface EvaluationContextRequestRequest {
      */
     targets?: Array<EvalRunTargetRequest>;
 }
-
-
-/**
- * @export
- */
-export const EvaluationContextRequestRequestJudgeModelEnum = {
-    gpt_5_6_luna: 'gpt-5.6-luna',
-    gpt_5_6_terra: 'gpt-5.6-terra',
-    claude_sonnet_5: 'claude-sonnet-5',
-    claude_haiku_4_5: 'claude-haiku-4-5',
-    gemini_3_1_pro_preview: 'gemini-3.1-pro-preview',
-    gemini_3_8_flash: 'gemini-3.8-flash',
-    deepseek_v3_2: 'deepseek-v3.2',
-    empty: ''
-} as const;
-export type EvaluationContextRequestRequestJudgeModelEnum = typeof EvaluationContextRequestRequestJudgeModelEnum[keyof typeof EvaluationContextRequestRequestJudgeModelEnum];
-
 
 /**
  * Check if a given object implements the EvaluationContextRequestRequest interface.

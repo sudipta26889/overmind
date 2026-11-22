@@ -26,7 +26,7 @@ This file is the playbook every task needs; Claude Code, Codex and Cursor read i
 - Most status transitions use `.filter().update()`, so no Django signals fire and the in-memory object goes stale. Wire each side effect at the call site on a freshly reloaded row.
 - MCP (`/api/mcp/`, `services/mcp/`) is the first-class agent surface. REST, MCP and the Console share domain services; MCP is not a proxy of either. Every change gets an MCP-impact decision (mcp skill).
 - The frontend uses only the generated OpenAPI client in `frontend/src/openapi/`; never hand-edit it.
-- Platform model IDs (judges, generation, Jev) live in `overbae/core/model_registry.py`; the training and serving catalog lives in `overbae/modal/models.json`. Jev decisions use `overbae/core/decisions.py`.
+- Platform model IDs live in `overbae/core/model_registry.py`, and every role (`LLM_JUDGE_CHAIN`, `LLM_FAST_CHAIN`, `LLM_EXPLAIN_CHAIN`, `LLM_AGENT_CHAIN`) comes only from env; an empty chain turns the role off. Live trace scoring uses the local judge, one call at a time (`single_stream`); person-started work uses FAST/EXPLAIN. The training and serving catalog lives in `overbae/modal/models.json`.
 - Tenancy is project-scoped with no org layer. A view that accepts guest writes opts in with `guest_allowed = True`, never with a permission class or middleware.
 - OTLP ingest never creates a capability, a scan never deletes one, and `DELETE` is a soft delete. On OTLP spans, wire identity is `overmind.capability.id` alone.
 - Every Redis key and pub/sub channel starts with `overmind:`. The self-hosted ACL refuses anything else, and CI's Redis holds to the same rule. `PSUBSCRIBE` patterns must match the ACL exactly, so a new pattern needs an ACL change.

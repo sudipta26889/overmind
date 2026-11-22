@@ -63,10 +63,9 @@ class CreatePartitionInput(MCPModel):
 class ParticipantInput(MCPModel):
     key: str = Field(pattern=r"^[a-z][a-z0-9-]{0,47}$")
     name: str = Field(min_length=1, max_length=255)
-    kind: Literal["foundation", "trained", "external"]
+    kind: Literal["foundation", "trained"]
     model: str | None = None
     job: UUID | None = None
-    served_model: str | None = None
 
 
 class CreateComparisonInput(MCPModel):

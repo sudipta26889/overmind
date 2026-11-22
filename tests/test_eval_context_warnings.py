@@ -3,7 +3,7 @@ from conftest import frozen_dataset
 from pydantic import BaseModel
 
 from overbae.core import llms
-from overbae.core.model_registry import OPENROUTER_MODEL_SLUGS
+from overbae.core.model_registry import OPENROUTER_MODEL_SLUGS, ROLE_CHAINS, Role
 from overbae.innermind import context, replay
 from overbae.models import DeployedModel, Project
 from overbae.services import llm_context
@@ -126,7 +126,8 @@ def test_generation_warning_does_not_skip_provider_call(fake_llm):
 
 
 @pytest.mark.django_db
-def test_preflight_profiles_generation_and_judge_from_selected_version(fake_llm):
+def test_preflight_profiles_generation_and_judge_from_selected_version(fake_llm, monkeypatch):
+    monkeypatch.setitem(ROLE_CHAINS, Role.EXPLAIN, ("flint",))
     project = Project.objects.create(name="Context")
     dataset = frozen_dataset(project, [{"input": "input" * 5000, "expected_output": "answer"}])
     fake_llm.limits = dict.fromkeys(OPENROUTER_MODEL_SLUGS.values(), 1000)
@@ -139,6 +140,19 @@ def test_preflight_profiles_generation_and_judge_from_selected_version(fake_llm)
     )
     assert [check["role"] for check in checks] == ["generation", "judge"]
     assert all(check["status"] == "warning" and check["checked_rows"] == 1 for check in checks)
+
+
+@pytest.mark.django_db
+def test_preflight_skips_the_judge_while_explanations_are_off(fake_llm):
+    project = Project.objects.create(name="No explanations")
+    dataset = frozen_dataset(project, [{"input": "question", "expected_output": "answer"}])
+    checks = context.check_context(
+        dataset=dataset,
+        cell=dataset.active_cell,
+        targets=[{"model_name": "gpt-4.1"}],
+        has_llm_rows=True,
+    )
+    assert [check["role"] for check in checks] == ["generation"]
 
 
 @pytest.mark.django_db

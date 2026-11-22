@@ -525,8 +525,8 @@ def seed_model_workflows(project):
                 {
                     "key": "demo",
                     "name": "Synthetic fixture",
-                    "kind": "external",
-                    "model": "demo:fixture",
+                    "kind": "foundation",
+                    "model": "Qwen/Qwen3.5-4B",
                 }
             ],
             "baseline": "demo",

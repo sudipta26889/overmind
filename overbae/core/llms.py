@@ -3,7 +3,8 @@ import json
 import logging
 import os
 import time
-from contextlib import suppress
+import uuid
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
@@ -11,8 +12,10 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import json_repair
 import openai
+import redis
 from celery.exceptions import SoftTimeLimitExceeded
-from openai import AsyncOpenAI, OpenAI
+from django.conf import settings
+from openai import AsyncOpenAI
 from openai.lib._pydantic import to_strict_json_schema
 from pydantic import BaseModel
 from tenacity import (
@@ -28,10 +31,11 @@ from modal_shared.context_budget import INCOMPLETE_FINISH_REASONS
 from modal_shared.modelfam import serve_image_key
 from modal_shared.shared import routing_headers as _modal_routing_headers
 from overbae.core.model_registry import (
+    OPENROUTER_BASE_URL,
     PROVIDERS,
     Provider,
     TaskType,
-    is_decision_model,
+    is_single_stream,
     normalize_model_name,
     openrouter_slug,
     reasoning_of,
@@ -40,8 +44,6 @@ from overbae.core.model_registry import (
 from overbae.models import DeployedModel
 
 logger = logging.getLogger(__name__)
-
-_TOGETHER_BASE_URL = "https://api.together.xyz/v1"
 
 # Seconds per completion. The SDK default of 600s lets one hung socket read pin
 # a `--pool=threads` worker thread long enough to starve the queue, so this stays
@@ -73,7 +75,7 @@ class ModelSpec:
     fine-tunes and custom OpenAI-compatible endpoints — built from a ``ModelRef``.
     """
 
-    provider: str  # openai | anthropic | gemini | together | custom
+    provider: str  # openai | anthropic | gemini | custom
     model_id: str
     base_url: str = ""
     # Env var name; secrets are never persisted.
@@ -93,7 +95,7 @@ class IncompleteCompletionError(RuntimeError):
 _SDK_RETRIES = 0
 
 
-def _provider_client(provider: str | Provider) -> AsyncOpenAI:
+def _provider_client(provider: str | Provider, timeout: float = _REQUEST_TIMEOUT) -> AsyncOpenAI:
     provider = PROVIDERS[provider] if isinstance(provider, str) else provider
     api_key = provider.key()
     if not api_key:
@@ -102,21 +104,13 @@ def _provider_client(provider: str | Provider) -> AsyncOpenAI:
         api_key=api_key,
         base_url=provider.base_url,
         default_headers=provider.headers or None,
-        timeout=_REQUEST_TIMEOUT,
+        timeout=timeout,
         max_retries=_SDK_RETRIES,
     )
 
 
 def _openrouter_client() -> AsyncOpenAI:
     return _provider_client("openrouter")
-
-
-@lru_cache(maxsize=1)
-def _openai_client() -> OpenAI:
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required")
-    return OpenAI(api_key=api_key, timeout=_REQUEST_TIMEOUT)
 
 
 def _openai_compatible_client(
@@ -173,18 +167,26 @@ def _split_base_url(url: str) -> tuple[str, tuple[tuple[str, str], ...]]:
     return base, tuple(parse_qsl(parts.query))
 
 
+def _is_gateway_url(url: str) -> bool:
+    """Only the model gateway and the Modal inference endpoint may serve a custom model."""
+    base = _split_base_url(url)[0].rstrip("/")
+    allowed = (OPENROUTER_BASE_URL, (settings.INFERENCE_API_URL or "").rstrip("/"))
+    return any(a and (base == a or base.startswith(a + "/")) for a in allowed)
+
+
 def _model_spec_client_and_name(spec: ModelSpec) -> tuple[AsyncOpenAI, str, str]:
     provider = (spec.provider or "").lower()
     if provider == "together":
-        key_env = spec.api_key_env or "TOGETHER_API_KEY"
-        api_key = os.environ.get(key_env)
-        if not api_key:
-            raise RuntimeError(f"{key_env} is required for Together model '{spec.model_id}'")
-        return _openai_compatible_client(_TOGETHER_BASE_URL, api_key), spec.model_id, provider
+        raise RuntimeError(f"Together model '{spec.model_id}' is not served by the model gateway")
 
     if provider == "custom":
         if not spec.base_url:
             raise RuntimeError(f"Custom model '{spec.model_id}' requires base_url")
+        if not _is_gateway_url(spec.base_url):
+            raise RuntimeError(
+                f"Custom model '{spec.model_id}' must be served by the model gateway or the "
+                "inference endpoint"
+            )
         if not spec.api_key_env:
             raise RuntimeError(f"Custom model '{spec.model_id}' requires api_key_env")
         api_key = os.environ.get(spec.api_key_env)
@@ -272,6 +274,58 @@ class _WaitHonouringRetryAfter:
 _LLM_WAIT = _WaitHonouringRetryAfter(wait_exponential_jitter(initial=1, max=60, jitter=5))
 
 
+@lru_cache(maxsize=4)
+def _redis_client(url: str):
+    return redis.Redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
+
+
+def cache_redis():
+    """The cache's Redis, or None when the cache is not Redis (a unit-test process)."""
+    location = settings.CACHES["default"].get("LOCATION")
+    if not isinstance(location, str) or not location.startswith(("redis://", "rediss://")):
+        return None
+    return _redis_client(location)
+
+
+class LLMBusyError(RuntimeError):
+    """Flint serves one stream for the whole fleet and another caller held it past this deadline."""
+
+
+# A single-stream model answers slowly, so its request gets this long, and the lock that
+# serializes callers outlives it.
+SINGLE_STREAM_TIMEOUT = 300.0
+_SINGLE_STREAM_LOCK = "overmind:llm:single-stream:{}"
+_LOCK_MS = int((SINGLE_STREAM_TIMEOUT + 30) * 1000)
+_RELEASE = (
+    "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0"
+)
+
+
+@contextmanager
+def _one_stream(model_name: str, wait_seconds: float):
+    """Serializes calls to a single-stream model across processes. Without a Redis cache
+    (a unit-test process) there is nothing to share, so the call runs unlocked."""
+    client = cache_redis() if is_single_stream(model_name) else None
+    if client is None:
+        yield
+        return
+    key = _SINGLE_STREAM_LOCK.format(model_name)
+    token = uuid.uuid4().hex
+    give_up = time.monotonic() + max(wait_seconds, 0)
+    try:
+        while not client.set(key, token, nx=True, px=_LOCK_MS):
+            if time.monotonic() >= give_up:
+                raise LLMBusyError(f"{model_name} is serving another request")
+            time.sleep(0.25)
+    except redis.RedisError as exc:
+        raise LLMBusyError(f"The lock for {model_name} is unavailable") from exc
+    try:
+        yield
+    finally:
+        with suppress(redis.RedisError):
+            client.eval(_RELEASE, 1, key, token)
+
+
 class CompletionDeadlineExceededError(TimeoutError):
     """The total completion budget expired, even if the server kept sending bytes."""
 
@@ -331,36 +385,6 @@ def _do_openai_completion(
             ) from exc
 
     return asyncio.run(complete())
-
-
-class EmbeddingUnavailableError(RuntimeError):
-    """Raised when embeddings cannot run: they need a direct OpenAI key
-    (OpenRouter does not proxy the embeddings API)."""
-
-
-_EMBEDDING_MODEL = "text-embedding-3-small"
-
-
-# Well under the 2048-input / payload ceilings; keeps each request small and retryable.
-def _require_openai_key() -> None:
-    if not os.environ.get("OPENAI_API_KEY"):
-        raise EmbeddingUnavailableError(
-            "Embeddings require OPENAI_API_KEY (text-embedding-3-small); "
-            "OpenRouter does not proxy the embeddings API."
-        )
-
-
-def _vector(item: Any) -> list[float]:
-    embedding = item["embedding"] if isinstance(item, dict) else item.embedding
-    if embedding is None:
-        raise ValueError("No embedding received")
-    return embedding
-
-
-def get_embedding(input_text: str) -> list[float]:
-    _require_openai_key()
-    response = _openai_client().embeddings.create(model=_EMBEDDING_MODEL, input=[input_text])
-    return _vector(response.data[0])
 
 
 def _extra(obj: Any) -> dict[str, Any]:
@@ -537,16 +561,8 @@ def call_llm(
     fallback_models: list[str] | None = None,
     retry_deadline: float = RETRY_DEADLINE_BACKGROUND,
     max_attempts: int | None = None,
+    lock_wait: float | None = None,
 ) -> tuple[str, dict]:
-    if any(
-        is_decision_model(name)
-        for name in [
-            model or "",
-            model_spec.model_id if model_spec else "",
-            *(fallback_models or []),
-        ]
-    ):
-        raise ValueError("Decision models require typed questions through the decision transport.")
     if request_kwargs is None:
         request_kwargs = {}
 
@@ -607,7 +623,10 @@ def call_llm(
 
         selected_model_name = normalize_model_name(model) if model else _get_default_model()
         selected_model = openrouter_slug(selected_model_name)
-        client = _openrouter_client()
+        client = _provider_client(
+            "openrouter",
+            SINGLE_STREAM_TIMEOUT if is_single_stream(selected_model_name) else _REQUEST_TIMEOUT,
+        )
 
         completion_kwargs: dict = {
             "model": selected_model,
@@ -643,12 +662,16 @@ def call_llm(
         if chain:
             completion_kwargs["extra_body"]["models"] = chain
 
-        response = _do_openai_completion(
-            client, completion_kwargs, request_kwargs, retry_deadline, max_attempts
-        )
+        with _one_stream(
+            selected_model_name,
+            retry_deadline if lock_wait is None else min(retry_deadline, lock_wait),
+        ):
+            response = _do_openai_completion(
+                client, completion_kwargs, request_kwargs, retry_deadline, max_attempts
+            )
         return _extract_llm_response(response)
 
-    except (IncompleteCompletionError, SoftTimeLimitExceeded):
+    except (IncompleteCompletionError, SoftTimeLimitExceeded, LLMBusyError):
         raise
     except Exception as e:
         raise RuntimeError(f"Error calling LLM: {e}") from e
@@ -710,11 +733,19 @@ def call_llm_tools(
     completion_kwargs, selected = _tool_completion_kwargs(
         messages, tools, model, max_tokens, fallback_models
     )
+    model_name = normalize_model_name(model) if model else _get_default_model()
     try:
-        response = _do_openai_completion(
-            _provider_client("openrouter"), completion_kwargs, {}, retry_deadline
-        )
-    except SoftTimeLimitExceeded:
+        with _one_stream(model_name, retry_deadline):
+            response = _do_openai_completion(
+                _provider_client(
+                    "openrouter",
+                    SINGLE_STREAM_TIMEOUT if is_single_stream(model_name) else _REQUEST_TIMEOUT,
+                ),
+                completion_kwargs,
+                {},
+                retry_deadline,
+            )
+    except (SoftTimeLimitExceeded, LLMBusyError):
         raise
     except Exception as e:
         raise RuntimeError(f"Error calling LLM: {e}") from e

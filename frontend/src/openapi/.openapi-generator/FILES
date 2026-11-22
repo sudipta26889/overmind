@@ -164,7 +164,6 @@ models/DefinitionSourceEnum.ts
 models/DeployedModel.ts
 models/DeployedModelStatusEnum.ts
 models/DeploymentProgress.ts
-models/EvalJudgeModelEnum.ts
 models/EvalMatrix.ts
 models/EvalMatrixRequest.ts
 models/EvalMatrixTypeEnum.ts
@@ -253,8 +252,7 @@ models/InferenceReceipt.ts
 models/InspectUploadRequest.ts
 models/IntegrationTypeEnum.ts
 models/IntentEnum.ts
-models/JudgeModelEnum.ts
-models/Kind703Enum.ts
+models/KindFf8Enum.ts
 models/LocalSessionRequest.ts
 models/MetricComparison.ts
 models/ModeCd6Enum.ts

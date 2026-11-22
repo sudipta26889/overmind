@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import uuid
 from typing import Literal
 
 from django.core.cache import cache
@@ -14,8 +13,6 @@ from overbae.core.model_registry import TaskType as ModelTask
 from overbae.core.model_registry import model_chain, resolve_model
 from overbae.services.benchmarks.taxonomy import TaskType
 from overbae.services.codebase.flow import build_capability_flow
-from overbae.services.judging import decisions
-from overbae.services.judging.funnel import JudgeOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +90,7 @@ def classify_capability_task(capability) -> str:
         ensure_ascii=False,
     )
     context_json = json.dumps(context, sort_keys=True, ensure_ascii=False)
-    digest = hashlib.sha256(
-        f"{_SYSTEM}\n{context_json}\n{decisions.DecisionPolicy(backend='jev').model_dump_json()}".encode()
-    ).hexdigest()
+    digest = hashlib.sha256(f"{_SYSTEM}\n{context_json}".encode()).hexdigest()
     key = f"capability-task:{capability.project_id}:{capability.id}:{digest}"
     try:
         cached = cache.get(key)
@@ -104,8 +99,8 @@ def classify_capability_task(capability) -> str:
     except Exception:  # noqa: BLE001 — cache availability must not block recommendations
         logger.warning("Capability task cache unavailable", exc_info=True)
 
-    def fallback():
-        raw, stats = call_llm(
+    try:
+        raw, _ = call_llm(
             evidence,
             system_prompt=_SYSTEM,
             response_format=_Classification,
@@ -114,34 +109,7 @@ def classify_capability_task(capability) -> str:
             retry_deadline=RETRY_DEADLINE_INTERACTIVE,
             max_tokens=500,
         )
-        return JudgeOutcome(
-            parsed=_Classification.model_validate_json(raw),
-            raw=raw,
-            stats=stats,
-            judge_trace_id=uuid.uuid4().hex,
-        )
-
-    metadata = {}
-    try:
-        outcome = decisions.invoke(
-            context,
-            {
-                "task_type": decisions.decision_question(
-                    _SYSTEM,
-                    {
-                        **dict(TaskType.choices),
-                        "unknown": "The primary objective is not established.",
-                    },
-                )
-            },
-            convert=lambda answers: _Classification(task_type=answers["task_type"].choice),
-            fallback=fallback,
-            project_id=str(capability.project_id),
-            workload="capability_task_classification",
-            contract="capability_task@1",
-        )
-        task_type = str(outcome.parsed.task_type)
-        metadata = outcome.stats.get("decision", {})
+        task_type = str(_Classification.model_validate_json(raw).task_type)
     except Exception:  # noqa: BLE001 — missing context or provider leaves models ungraded
         logger.warning("Capability task classification unavailable for %s", capability.id)
         task_type = "unknown"
@@ -149,7 +117,7 @@ def classify_capability_task(capability) -> str:
     try:
         cache.set(
             key,
-            {"task_type": task_type, "decision": metadata},
+            {"task_type": task_type},
             timeout=60 if task_type == "unknown" else 86_400,
         )
     except Exception:  # noqa: BLE001

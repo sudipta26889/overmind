@@ -50,7 +50,11 @@ def dispatch_live_scoring() -> dict:
     bind=True,
     acks_late=True,
     reject_on_worker_lost=True,
-    time_limit=300,
+    # One judge call can wait for this process's slot (120 s), the Redis lock (120 s) and the
+    # request (300 s). The soft limit lets the work release its claim before the hard one; the
+    # admission lease and the span claim both outlive the hard limit.
+    soft_time_limit=600,
+    time_limit=660,
 )
 def execute_live_scoring(self, *, work_id: int) -> dict:
     item = admission.claim(work_id, self.request.id)
@@ -119,7 +123,7 @@ def sweep_unscored_spans() -> dict:
     for project_id in waiting.order_by().values_list("project_id", flat=True).distinct():
         spans = list(
             waiting.filter(project_id=project_id)
-            .order_by("received_at")
+            .order_by("-received_at")
             .values_list("trace_id", "span_id")[:SWEEP_LIMIT]
         )
         enqueue_span_scoring(spans)

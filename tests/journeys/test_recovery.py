@@ -8,6 +8,7 @@ import redis
 from django.utils import timezone
 
 from overbae.celery import app
+from overbae.innermind import judge_health
 from overbae.models import Activity, DatasetPreparation
 from overbae.tasks.datasets import reap_stuck_runs
 from overbae.tasks.utils.task_lock import acquire_task_lock, with_task_lock
@@ -83,35 +84,57 @@ def project(cli, mcp_for, rest_for, sample_agent, worker, judges):
     return mcp_for(key), rest_for(key), key
 
 
-def test_a_failing_judge_is_tried_three_times_then_scored_with_errors(
+def test_a_judge_that_is_down_never_fails_a_span_and_scores_it_when_it_returns(
     project, live_api, worker, fake_llm, beat, clock
 ):
     mcp, rest, key = project
     project_id = mcp.project()["id"]
-    fake_llm.fail(lambda request: request.url.rstrip("/").endswith("/systemone"))
-
-    def judge_calls() -> int:
-        return sum(r.url.rstrip("/").endswith("/systemone") for r in fake_llm.requests)
+    fake_llm.fail(lambda request: request.schema_name == "Verdict")
 
     trace = Trace(mcp.capability("answer")["id"], GOOD_REPLY, tools=[True])
     trace.send(live_api.url, key)
     drain(worker)
-    per_pass = judge_calls()
-    assert per_pass > 0
-
     for _ in range(5):
         clock.shift(SWEEP_WAIT)
         beat(SWEEP_SPANS, SWEEP_TRAJECTORIES)
-    # Three span passes over the root's rows, then three trajectory passes of path_judge.
-    assert judge_calls() == 3 * per_pass + 3
+    root = trace_spans(rest, project_id, trace)[trace.root_id.hex()]
+    assert "score" not in root["eval_attributes"]
+    # The outage backs judging off, so the sweeps do not hammer the judge.
+    attempts = len(fake_llm.judgments())
+    assert 0 < attempts <= 5
+    assert judge_health.backed_off()
+
+    fake_llm.forget()
+    judge_health.clear()
+    clock.shift(SWEEP_WAIT)
+    beat(SWEEP_SPANS, SWEEP_TRAJECTORIES)
+    root = trace_spans(rest, project_id, trace)[trace.root_id.hex()]
+    assert root["eval_attributes"]["score"] is not None
+
+
+def test_a_judge_that_never_answers_with_a_verdict_is_tried_three_times_then_scored_with_errors(
+    project, live_api, worker, fake_llm, beat, clock
+):
+    mcp, rest, key = project
+    project_id = mcp.project()["id"]
+    fake_llm.on(lambda request: request.schema_name == "Verdict", "no verdict here")
+
+    trace = Trace(mcp.capability("answer")["id"], GOOD_REPLY, tools=[True])
+    trace.send(live_api.url, key)
+    drain(worker)
+    for _ in range(5):
+        clock.shift(SWEEP_WAIT)
+        beat(SWEEP_SPANS, SWEEP_TRAJECTORIES)
+    settled = len(fake_llm.judgments())
 
     root = trace_spans(rest, project_id, trace)[trace.root_id.hex()]
     attributes = root["eval_attributes"]
     assert {m["error"] for m in attributes["metrics"].values() if m["type"] == "llm"} == {
         "scoring failed after 3 attempts"
     }
-    path_judge = attributes["trajectory"]["metrics"]["path_judge"]
-    assert path_judge["error"] == "scoring failed after 3 attempts"
+    assert attributes["trajectory"]["metrics"]["path_judge"]["error"] == (
+        "scoring failed after 3 attempts"
+    )
     assert {row["source_type"] for row in score_history(rest, project_id, trace)} == {
         "span",
         "trajectory",
@@ -119,7 +142,7 @@ def test_a_failing_judge_is_tried_three_times_then_scored_with_errors(
 
     clock.shift(SWEEP_WAIT)
     beat(SWEEP_SPANS, SWEEP_TRAJECTORIES)
-    assert judge_calls() == 3 * per_pass + 3
+    assert len(fake_llm.judgments()) == settled
 
 
 def test_console_ends_an_open_preparation_and_idle_preparations_expire(console, workshop):

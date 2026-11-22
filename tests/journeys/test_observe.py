@@ -253,11 +253,11 @@ def score_once_per_evidence(mcp, rest, project, key, live_api, fake_llm, worker)
 
     first = score_history(rest, project, good)
     assert {row["source_type"] for row in first} == {"span", "trajectory"}
-    judged = len(fake_llm.decisions)
+    judged = len(fake_llm.judgments())
     good.send(live_api.url, key)
     drain_scoring(worker)
     assert score_history(rest, project, good) == first
-    assert len(fake_llm.decisions) == judged
+    assert len(fake_llm.judgments()) == judged
 
     good.reply = "Your refund is on its way."
     good.send(live_api.url, key)

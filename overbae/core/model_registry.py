@@ -15,7 +15,8 @@ class Vendor(StrEnum):
     MOONSHOT = "moonshotai"
     META = "meta-llama"
     QWEN = "qwen"
-    TYPESAFE = "typesafe"
+    LOCAL = "local"
+    RECURSIVESI = "recursivesi"
 
 
 class Tier(StrEnum):
@@ -24,7 +25,6 @@ class Tier(StrEnum):
     FLAGSHIP = "flagship"
     LEGACY = "legacy"
     OPEN = "open"
-    DECISION = "decision"
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,8 @@ class Model:
     description: str = ""
     reasoning: Reasoning = NO_REASONING
     library: bool = False
+    # The gateway serves one request at a time for the whole fleet; calls take a shared lock.
+    single_stream: bool = False
 
     @property
     def supports_reasoning(self) -> bool:
@@ -59,18 +61,20 @@ class Model:
 
 CATALOG: tuple[Model, ...] = (
     Model(
-        "jev-1.13",
-        Vendor.TYPESAFE,
-        "typesafe/jev-1.13",
-        Tier.DECISION,
-        "Typed decisions over supplied evidence; not a chat or training model.",
+        "local-judge",
+        Vendor.LOCAL,
+        "local/judge",
+        Tier.FAST,
+        "The local chat judge for live trace scoring; slow, one request at a time.",
+        single_stream=True,
     ),
     Model(
-        "jev-1.14",
-        Vendor.TYPESAFE,
-        "typesafe/jev-1.14",
-        Tier.DECISION,
-        "Typed decisions over supplied evidence; not a chat or training model.",
+        "flint",
+        Vendor.RECURSIVESI,
+        "recursivesi/flint",
+        Tier.FAST,
+        "The local chat model behind the gateway; one stream serves the whole fleet.",
+        single_stream=True,
     ),
     Model(
         "gpt-5.6-sol",
@@ -349,35 +353,39 @@ def is_inference_model(model_id: str) -> bool:
 
 
 class Role(StrEnum):
+    JUDGE = "judge"
     FAST = "fast"
     AGENT = "agent"
     EXPLAIN = "explain"
 
 
-def _role_chain(env: str, default: tuple[str, ...]) -> tuple[str, ...]:
-    """A self-hosted gateway may serve only some catalog models; ``env`` narrows
-    the chain to comma-separated catalog names it actually routes."""
+def _role_chain(env: str) -> tuple[str, ...]:
+    """The chain is comma-separated catalog names the gateway routes. Empty turns the role off."""
     names = tuple(n.strip() for n in os.environ.get(env, "").split(",") if n.strip())
     unknown = [n for n in names if n not in MODELS_BY_NAME]
     if unknown:
         raise ValueError(f"{env} names models outside the catalog: {', '.join(unknown)}")
-    return names or default
+    return names
 
 
 ROLE_CHAINS: dict[Role, tuple[str, ...]] = {
-    Role.FAST: _role_chain(
-        "LLM_FAST_CHAIN", ("gpt-5.6-luna", "claude-sonnet-5", "gemini-3.8-flash")
-    ),
-    Role.AGENT: _role_chain(
-        "LLM_AGENT_CHAIN", ("gpt-5.6-terra", "claude-sonnet-5", "gemini-3.1-pro-preview")
-    ),
-    Role.EXPLAIN: _role_chain(
-        "LLM_EXPLAIN_CHAIN", ("gpt-5-mini", "claude-haiku-4-5", "gemini-3.8-flash")
-    ),
+    Role.JUDGE: _role_chain("LLM_JUDGE_CHAIN"),
+    Role.FAST: _role_chain("LLM_FAST_CHAIN"),
+    Role.AGENT: _role_chain("LLM_AGENT_CHAIN"),
+    Role.EXPLAIN: _role_chain("LLM_EXPLAIN_CHAIN"),
 }
 
 
+class RoleOffError(RuntimeError):
+    """The role's ``LLM_*_CHAIN`` is empty, so no model may serve it."""
+
+
+def role_enabled(role: Role) -> bool:
+    return bool(ROLE_CHAINS[role])
+
+
 class TaskType(StrEnum):
+    SPAN_JUDGING = "span_judging"
     JUDGE_SCORING = "judge_scoring"
     CRITERIA_GENERATION = "criteria_generation"
     EVAL_RECOMMENDATION = "eval_recommendation"
@@ -386,6 +394,7 @@ class TaskType(StrEnum):
 
 
 TASK_ROLES: dict[TaskType, Role] = {
+    TaskType.SPAN_JUDGING: Role.JUDGE,
     TaskType.JUDGE_SCORING: Role.FAST,
     TaskType.CRITERIA_GENERATION: Role.FAST,
     TaskType.EVAL_RECOMMENDATION: Role.FAST,
@@ -394,12 +403,20 @@ TASK_ROLES: dict[TaskType, Role] = {
 }
 
 
+def _task_role(task: TaskType | str) -> Role:
+    return TASK_ROLES.get(task, Role.FAST)  # type: ignore[arg-type]
+
+
 def model_chain(task: TaskType | str) -> list[str]:
-    role = TASK_ROLES.get(task, Role.FAST)  # type: ignore[arg-type]
-    return list(ROLE_CHAINS[role])
+    return list(ROLE_CHAINS[_task_role(task)])
 
 
 def resolve_model(task: TaskType) -> str:
+    role = _task_role(task)
+    if not role_enabled(role):
+        raise RoleOffError(
+            f"No model is configured for task '{task.value}'; the {role} role is off."
+        )
     if not openrouter_configured():
         raise RuntimeError(
             f"No LLM API key configured for task '{task.value}'. Set OPENROUTER_API_KEY."
@@ -408,33 +425,12 @@ def resolve_model(task: TaskType) -> str:
 
 
 def default_judge_model() -> str:
-    return model_chain(TaskType.JUDGE_SCORING)[0]
-
-
-def decision_models() -> tuple[Model, ...]:
-    return tuple(model for model in CATALOG if model.tier is Tier.DECISION)
-
-
-def decision_model() -> Model:
-    """``JEV_MODEL`` pins the version a self-hosted gateway routes; blank takes the first."""
-    models = decision_models()
-    slug = os.environ.get("JEV_MODEL", "").strip()
-    if not slug:
-        return models[0]
-    for model in models:
-        if model.slug == slug:
-            return model
-    raise ValueError(f"JEV_MODEL={slug} is not one of {', '.join(m.slug for m in models)}")
-
-
-def is_decision_model(name: str) -> bool:
-    return name.startswith(("jev-", f"{Vendor.TYPESAFE}/", f"~{Vendor.TYPESAFE}/"))
+    chain = model_chain(TaskType.JUDGE_SCORING)
+    return chain[0] if chain else ""
 
 
 def judge_picker_models() -> list[str]:
-    default = default_judge_model()
-    rest = [m.name for m in picker_models(Tier.FAST, Tier.BALANCED) if m.name != default]
-    return [default, *rest]
+    return list(dict.fromkeys([*ROLE_CHAINS[Role.FAST], *ROLE_CHAINS[Role.EXPLAIN]]))
 
 
 def model_defaults() -> dict[str, object]:
@@ -443,6 +439,11 @@ def model_defaults() -> dict[str, object]:
         "judge_models": judge_picker_models(),
         "backtest_models": default_backtest_models(),
     }
+
+
+def is_single_stream(model_name: str) -> bool:
+    m = model(model_name)
+    return bool(m and m.single_stream)
 
 
 def default_backtest_models() -> list[str]:
@@ -467,8 +468,8 @@ class Provider:
         return bool(self.key())
 
 
-# Any OpenAI-compatible gateway that routes OpenRouter slugs (e.g. LiteLLM) can stand in.
-OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL") or "https://openrouter.ai/api/v1"
+# The OpenAI-compatible gateway (LiteLLM) that routes every model call; settings require it.
+OPENROUTER_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "").rstrip("/")
 
 PROVIDERS: dict[str, Provider] = {
     "openrouter": Provider(
@@ -477,22 +478,6 @@ PROVIDERS: dict[str, Provider] = {
         OPENROUTER_BASE_URL,
         openrouter_extras=True,
         headers={"HTTP-Referer": "https://overmindlab.ai", "X-Title": "Overmind Platform"},
-    ),
-    # OpenAI's reasoning models 400 on ``max_tokens``, and chat completions
-    # refuse function tools unless ``reasoning_effort`` is ``none``.
-    "openai": Provider(
-        "openai",
-        "OPENAI_API_KEY",
-        reasoning_effort=True,
-        tools_reasoning_effort="none",
-        output_cap_param="max_completion_tokens",
-    ),
-    "anthropic": Provider("anthropic", "ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/"),
-    "gemini": Provider(
-        "gemini",
-        "GEMINI_API_KEY",
-        "https://generativelanguage.googleapis.com/v1beta/openai/",
-        reasoning_effort=True,
     ),
 }
 

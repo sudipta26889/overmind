@@ -5,10 +5,6 @@ export function inferenceBaseUrl(apiUrl = config.apiUrl): string {
   return `${apiUrl.replace(/\/$/, "")}/api/v1`;
 }
 
-function sdkBaseUrl(apiUrl = config.apiUrl): string {
-  return inferenceBaseUrl(apiUrl).replace(/\/v1$/, "");
-}
-
 function choiceCriteria(decision: DecisionInputRequest): Record<string, string | null> {
   const described = new Map<string, string>();
   for (const line of decision.question.split("\n").slice(1)) {
@@ -21,51 +17,6 @@ function choiceCriteria(decision: DecisionInputRequest): Record<string, string |
   return Object.fromEntries(
     decision.options.map((option) => [option, described.get(option) ?? null])
   );
-}
-
-function decisionQuestion(decision: DecisionInputRequest): string {
-  const instructions = JSON.stringify(decision.question);
-  if (decision.kind === "noul") {
-    return [
-      '    "decision": Noul(',
-      `        instructions=${instructions},`,
-      `        criteria={"false": ${JSON.stringify(decision.options[0] ?? "false")}, "true": ${JSON.stringify(decision.options[1] ?? "true")}},`,
-      "    ),",
-    ].join("\n");
-  }
-  if (decision.kind === "score") {
-    const levels = decision.options
-      .map((option) => `        ${JSON.stringify(option)},`)
-      .join("\n");
-    return [
-      '    "decision": Score(',
-      `        instructions=${instructions},`,
-      "        criteria=[",
-      levels,
-      "        ],",
-      "    ),",
-    ].join("\n");
-  }
-  const criteria = Object.entries(choiceCriteria(decision))
-    .map(
-      ([option, description]) =>
-        `        ${JSON.stringify(option)}: ${description == null ? "None" : JSON.stringify(description)},`
-    )
-    .join("\n");
-  return [
-    '    "decision": Choice(',
-    `        instructions=${instructions},`,
-    "        criteria={",
-    criteria,
-    "        },",
-    "    ),",
-  ].join("\n");
-}
-
-function decisionClass(kind: string): string {
-  if (kind === "noul") return "Noul";
-  if (kind === "score") return "Score";
-  return "Choice";
 }
 
 export function buildDecisionSnippets(
@@ -108,27 +59,23 @@ export function buildDecisionSnippets(
     ].join("\n"),
     python: [
       "import os",
-      `from typesafe_sdk import ${decisionClass(decision.kind)}, TypeSafeClient`,
+      "",
+      "import requests",
       "",
       "# Example from this model's training version. Replace state with your input.",
-      "with TypeSafeClient(",
-      '    api_key=os.environ["OVERMIND_API_KEY"],',
-      `    base_url=${JSON.stringify(sdkBaseUrl(apiUrl))},`,
-      `    model=${JSON.stringify(modelId)},`,
+      "response = requests.post(",
+      `    ${JSON.stringify(endpoint)},`,
+      '    headers={"Authorization": f"Bearer {os.environ[\'OVERMIND_API_KEY\']}", "Content-Type": "application/json"},',
+      `    data=r'''${body}''',`,
       "    timeout=200,",
-      "    compression=False,",
-      ") as client:",
-      "    response = client.system_one(",
-      `        state=${JSON.stringify(decision.state)},`,
-      "        questions={",
-      decisionQuestion(decision),
-      "        },",
-      "    )",
+      ")",
+      "response.raise_for_status()",
+      'answer = response.json()["answers"]["decision"]',
       decision.kind === "noul"
-        ? 'print(response.nouls["decision"].noul)'
+        ? 'print(answer["noul"])'
         : decision.kind === "score"
-          ? 'print(response.scores["decision"].score)\nprint(response.scores["decision"].probabilities)'
-          : 'print(response.choices["decision"].choice)\nprint(response.choices["decision"].probabilities)',
+          ? 'print(answer["score"])\nprint(answer["probabilities"])'
+          : 'print(answer["choice"])\nprint(answer["probabilities"])',
     ].join("\n"),
   };
 }

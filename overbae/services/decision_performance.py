@@ -11,7 +11,6 @@ from django.utils import timezone
 
 from modal_shared.decision_inference import input_digest
 from modal_shared.decision_metrics import probability_distribution
-from overbae.core import decisions
 from overbae.core.errors import InputValidationError
 from overbae.models import (
     BillingService,
@@ -24,7 +23,6 @@ from overbae.services import native_evaluation
 from overbae.services.billing_ledger import charge_llm_usage
 from overbae.services.compute_costs import estimate_usage
 from overbae.services.decision_benchmark_scoring import records
-from overbae.services.decision_providers import interpret_response, question
 
 
 @transaction.atomic
@@ -53,12 +51,6 @@ def create(evaluation, *, name, request_key, workload):
         )
     qualified = {}
     for participant in native_evaluation.participants(evaluation):
-        if participant["kind"] == "external":
-            qualified[participant["key"]] = {
-                "role": "final",
-                "served_model": participant.get("served_model"),
-            }
-            continue
         found = next(
             (
                 (role, evaluation.calls.get(f"{role}_{participant['key']}", {}).get("receipt", {}))
@@ -169,34 +161,7 @@ def prepare_workload(run):
     )
 
 
-def external_request(participant, requests):
-    body = {
-        "model": participant.get("served_model") or participant["model"],
-        "state": requests[0]["state"],
-        "questions": {
-            ("decision" if len(requests) == 1 else str(i)): question(request)
-            for i, request in enumerate(requests)
-        },
-    }
-    started = time.perf_counter()
-    payload, usage = decisions.request_once(body)
-    elapsed = (time.perf_counter() - started) * 1000
-    return payload, usage, elapsed
-
-
 def validate_response(participant, requests, payload):
-    if participant["kind"] == "external":
-        keys = {"decision"} if len(requests) == 1 else {str(i) for i in range(len(requests))}
-        if set(payload.get("answers", {})) != keys:
-            raise InputValidationError("Performance response coverage changed")
-        predictions = []
-        for index, request in enumerate(requests):
-            key = "decision" if len(requests) == 1 else str(index)
-            vector, _ = interpret_response(
-                request, {**payload, "answers": {"decision": payload["answers"][key]}}, participant
-            )
-            predictions.append(vector)
-        return predictions
     if payload.get("model_identity") != participant["quality_identity"]:
         raise InputValidationError("Performance model identity differs from the quality comparison")
     if payload.get("runtime_fingerprint") != participant["quality_runtime"]:
@@ -276,6 +241,13 @@ def advance(run_id):
             run.state == "running" and run.updated_at > timezone.now() - timedelta(seconds=1260)
         ):
             return
+        qualified = run.workload.get("qualification") or {}
+        if not qualified or any("model_identity" not in item for item in qualified.values()):
+            # Runs frozen before external participants were removed carry no native identity.
+            run.state = "failed"
+            run.error = "UnsupportedLegacyRun"
+            run.save()
+            return
         run.state = "running"
         run.save()
     settings = run.workload["settings"]
@@ -285,32 +257,10 @@ def advance(run_id):
         inputs = run.workload["inputs"] * settings["repetitions"]
         for original in native_evaluation.participants(run.evaluation):
             participant = dict(original)
-            native = participant["kind"] != "external"
-            if not native:
-                identity = (
-                    run.evaluation.requests.filter(
-                        participant=participant["key"], state="completed"
-                    )
-                    .order_by("created_at")
-                    .first()
-                )
-                if identity:
-                    participant["served_model"] = identity.response["model"]
-            if not native:
-                retained = (
-                    run.requests.filter(participant=participant["key"], response__isnull=False)
-                    .order_by("position")
-                    .first()
-                )
-                if retained:
-                    participant["served_model"] = participant.get(
-                        "served_model"
-                    ) or retained.response.get("model")
-            if native:
-                qualified = run.workload["qualification"][participant["key"]]
-                participant["quality_identity"] = qualified["model_identity"]
-                participant["quality_runtime"] = qualified["runtime"]
-            worker = endpoint(run, participant) if native else None
+            qualified = run.workload["qualification"][participant["key"]]
+            participant["quality_identity"] = qualified["model_identity"]
+            participant["quality_runtime"] = qualified["runtime"]
+            worker = endpoint(run, participant)
             # The first native request includes a fresh worker's startup; later ones reuse it.
             windows = [
                 [0],
@@ -350,26 +300,20 @@ def advance(run_id):
                             )
                             request.save()
                         if request.state in {"completed", "failed"} or (
-                            request.state == "submission_unknown"
-                            and not (native and request.call_id)
+                            request.state == "submission_unknown" and not request.call_id
                         ):
                             continue
                         request.state = "submitting"
                         request.save()
-                        if native:
-                            clock = None if request.call_id else time.perf_counter()
-                            call = (
-                                modal.FunctionCall.from_id(request.call_id)
-                                if request.call_id
-                                else worker.predict.spawn(inputs[position])
-                            )
-                            request.call_id = call.object_id
-                            request.save()
-                            future = executor.submit(native_result, call, clock)
-                        else:
-                            future = executor.submit(
-                                external_request, participant, inputs[position]
-                            )
+                        clock = None if request.call_id else time.perf_counter()
+                        call = (
+                            modal.FunctionCall.from_id(request.call_id)
+                            if request.call_id
+                            else worker.predict.spawn(inputs[position])
+                        )
+                        request.call_id = call.object_id
+                        request.save()
+                        future = executor.submit(native_result, call, clock)
                         futures[future] = request
                         launched += 1
                     for future in as_completed(futures):
@@ -383,18 +327,13 @@ def advance(run_id):
                             )
                             request.save()
                             validate_response(participant, inputs[request.position], payload)
-                            if not native and not participant.get("served_model"):
-                                participant["served_model"] = payload["model"]
                             request.state = "completed"
                         except Exception as exc:
                             request.error = type(exc).__name__
                             request.state = (
                                 "failed"
                                 if request.response is not None
-                                or isinstance(exc, decisions.DecisionError)
-                                and exc.stats.get("status_code")
-                                or native
-                                and isinstance(
+                                or isinstance(
                                     exc,
                                     (
                                         ValueError,
@@ -406,8 +345,6 @@ def advance(run_id):
                                 )
                                 else "submission_unknown"
                             )
-                            if isinstance(exc, decisions.DecisionError):
-                                request.usage = exc.stats
                         request.save()
                         charge_llm_usage(
                             run.evaluation.triggered_by,
@@ -443,7 +380,6 @@ def advance(run_id):
             count = sum(len(inputs[r.position]) for r in valid)
             seconds = totals.get(participant["key"], 0)
             latencies = [r.latency_ms for r in valid if r.latency_ms is not None]
-            native = participant["kind"] != "external"
             first_instance = (
                 requests[0].response.get("worker_instance")
                 if requests and requests[0].response
@@ -470,10 +406,8 @@ def advance(run_id):
             training_cost = (
                 float(job.cost_usd) if job and job.cost_usd is not None else 0 if not job else None
             )
-            compute = (
-                estimate_usage([(r.response or {}).get("compute_usage", {}) for r in requests])
-                if native
-                else None
+            compute = estimate_usage(
+                [(r.response or {}).get("compute_usage", {}) for r in requests]
             )
             result["participants"][participant["key"]] = {
                 "native_compute": compute,
@@ -495,7 +429,7 @@ def advance(run_id):
                 "unmeasured_latency_requests": sum(r.latency_ms is None for r in valid),
                 "latency_ms": percentiles(latencies),
                 "first_request_ms": requests[0].latency_ms if requests else None,
-                "warm_latency_ms": percentiles([r.latency_ms for r in warm]) if native else None,
+                "warm_latency_ms": percentiles([r.latency_ms for r in warm]),
                 "valid_decisions_per_active_second": count / seconds
                 if seconds and all(r.latency_ms is not None for r in valid)
                 else None,
@@ -511,12 +445,10 @@ def advance(run_id):
                     r.usage.get("response_cost") is None for r in requests
                 ),
                 "conditions": {
-                    "native_worker": native,
-                    "hardware": "H100" if native else "provider controlled",
-                    "provider_cache": "disabled" if native else "uncontrolled",
-                    "cold_start": "first observed worker request; warm requires matching instance"
-                    if native
-                    else "provider controlled",
+                    "native_worker": True,
+                    "hardware": "H100",
+                    "provider_cache": "disabled",
+                    "cold_start": "first observed worker request; warm requires matching instance",
                     "concurrency": settings["concurrency"],
                     "shared_state_questions": settings["questions_per_request"],
                 },

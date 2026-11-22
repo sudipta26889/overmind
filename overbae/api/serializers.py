@@ -1223,7 +1223,7 @@ class FinetuningJobSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Provide at most 100 nonblank finding descriptions.")
         return value
 
-    eval_judge_model = serializers.ChoiceField(choices=["", *judge_picker_models()], required=False)
+    eval_judge_model = serializers.CharField(required=False, allow_blank=True, max_length=255)
     events = FinetuningJobEventSerializer(many=True, read_only=True)
     deployed_model_id = serializers.SerializerMethodField()
     decision_job_id = serializers.SerializerMethodField()
@@ -1390,6 +1390,8 @@ class FinetuningJobSerializer(serializers.ModelSerializer):
         return value
 
     def validate_eval_judge_model(self, value):
+        if value and value not in judge_picker_models():
+            raise serializers.ValidationError(f'"{value}" is not a valid choice.')
         if self.instance is not None and value != self.instance.eval_judge_model:
             raise serializers.ValidationError("The evaluation judge is fixed when training starts.")
         return value
