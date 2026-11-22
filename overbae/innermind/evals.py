@@ -223,6 +223,8 @@ class Judge(Evaluator):
             model = resolve_model(task)
         except RoleOffError:
             return Metric(expectation, error="judge is off")
+        if self.live and not judge_health.spend_call():
+            raise JudgeUnavailableError("The judge's daily call limit is spent")
         prompt = json.dumps(fit(state), ensure_ascii=False)
         started = time.monotonic()
         try:

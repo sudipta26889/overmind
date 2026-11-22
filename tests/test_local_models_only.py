@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import openai
@@ -541,3 +541,42 @@ def test_a_slow_judge_backs_judging_off_even_when_it_answers(
     span.refresh_from_db()
     assert span.eval_attributes["score"] == 1.0
     assert redis.Redis.from_url(redis_cache).pttl(JUDGE_DOWN) > 0
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_spent_daily_limit_sends_nothing_keeps_the_span_offerable_and_resets_next_day(
+    fake_llm, sampled, redis_cache, monkeypatch
+):
+    monkeypatch.setenv("JUDGE_DAILY_LIMIT", "1")
+    day = [datetime(2026, 11, 22, 10, 0, tzinfo=UTC)]
+    monkeypatch.setattr(judge_health, "now", lambda: day[0])
+    client = redis.Redis.from_url(redis_cache)
+    client.delete("overmind:judge:calls:2026-11-22", "overmind:judge:calls:2026-11-23")
+    project = make_project()
+    first, second = _span(project), _span(project)
+
+    async_to_sync(span_processor.score_project_spans)(project.pk, [first])
+    assert len(fake_llm.judgments()) == 1
+
+    async_to_sync(span_processor.score_project_spans)(project.pk, [second])
+    second.refresh_from_db()
+    assert len(fake_llm.judgments()) == 1
+    assert "score" not in second.eval_attributes
+    assert second.eval_attributes.get("attempts", 0) == 0
+    assert second.eval_claimed_at is None
+    assert judge_health.backed_off()
+    assert 0 < client.pttl(JUDGE_DOWN) <= 14 * 3600 * 1000
+
+    judge_health.clear()
+    day[0] = datetime(2026, 11, 23, 0, 5, tzinfo=UTC)
+    async_to_sync(span_processor.score_project_spans)(project.pk, [second])
+    second.refresh_from_db()
+    assert second.eval_attributes["score"] == 1.0
+    client.delete("overmind:judge:calls:2026-11-22", "overmind:judge:calls:2026-11-23")
+
+
+def test_an_invalid_daily_limit_fails_loudly(monkeypatch):
+    for bad in ("0", "-5", "many"):
+        monkeypatch.setenv("JUDGE_DAILY_LIMIT", bad)
+        with pytest.raises(ValueError, match="JUDGE_DAILY_LIMIT"):
+            judge_health.daily_limit()
