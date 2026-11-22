@@ -44,6 +44,8 @@ x-env: &env
   LLM_JUDGE_CHAIN: local-judge
   MCP_SERVER_URL: ${MCP_SERVER_URL:-}
   MODAL_ENVIRONMENT: ${MODAL_ENVIRONMENT:-}
+  # A masking worker runs in this stack, so remote-approved work may be queued for it.
+  MASKING_QUEUE_ENABLED: "true"
   MODAL_TOKEN_ID: ${MODAL_TOKEN_ID:-}
   MODAL_TOKEN_SECRET: ${MODAL_TOKEN_SECRET:-}
   OPENAI_APPS_CHALLENGE: ${OPENAI_APPS_CHALLENGE:-}

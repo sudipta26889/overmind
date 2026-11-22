@@ -48,5 +48,4 @@ class Migration(migrations.Migration):
             ),
         ),
         migrations.RunPython(invert_log, invert_log),
-        migrations.RemoveField(model_name="project", name="personal_data"),
     ]

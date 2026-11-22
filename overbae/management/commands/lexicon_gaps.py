@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from django.conf import settings
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from overbae.innermind import lexicon_gaps
 
@@ -22,6 +22,11 @@ class Command(BaseCommand):
 
     def handle(self, *args, sample, days, out, **options):
         gaps = lexicon_gaps.collect(sample, days)
+        if gaps.skipped == "no_ner":
+            raise CommandError(
+                "lexicon_gaps needs the name model: run it on the masking worker "
+                "(MASKING_ENABLED=1), where the name model is loaded."
+            )
         lines = ["\t".join(("term", "type", "lang", "count"))] + [
             "\t".join((t["term"], t["type"], t["lang"], str(t["count"]))) for t in gaps.terms()
         ]

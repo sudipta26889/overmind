@@ -429,3 +429,44 @@ def test_a_context_model_directory_that_is_not_the_pinned_revision_is_refused(tm
         gliner_ner.load(str(tmp_path), "a" * 40, 0.15)
 
     assert refused.value.reason == "model_revision"
+
+
+@pytest.mark.covers("masking-egress")
+def test_an_object_key_is_masked_like_any_other_text():
+    fake_ner.NAMES[:] = ["Rahul Sharma"]
+    payload = mask_state({"output": json.dumps({"Rahul Sharma": "refund", "9876543210": 5})})
+
+    assert "Rahul" not in payload.text
+    assert "9876543210" not in payload.text
+    assert set(payload.mapping.values()) >= {"Rahul Sharma", "9876543210"}
+
+
+@pytest.mark.covers("masking-egress")
+def test_the_residual_check_reads_object_keys_too():
+    from overbae.services.masking import residual
+
+    assert "PHONE" in residual.findings('{"9876543210": 5}', {}) or "ID" in residual.findings(
+        '{"9876543210": 5}', {}
+    )
+    assert residual.findings('{"intent": "refund"}', {}) == []
+
+
+@pytest.mark.covers("masking-fail-closed")
+@pytest.mark.parametrize("hook", ["after_mask", "fit"])
+def test_a_cut_that_cannot_read_the_masked_shape_fails_closed_as_a_cut_error(hook):
+    from overbae.innermind.trajectory import PathJudgeEvaluator
+
+    state = {"input": json.dumps(["Ravi Kumar was seen on 5 March"]), "output": "ok"}
+    cut = PathJudgeEvaluator().cut_steps if hook == "after_mask" else None
+
+    def explode(masked):
+        raise KeyError("shape")
+
+    with pytest.raises(MaskingError) as refused:
+        mask_state(
+            state,
+            after_mask=cut if hook == "after_mask" else None,
+            fit=explode if hook == "fit" else None,
+        )
+
+    assert refused.value.reason == "cut"

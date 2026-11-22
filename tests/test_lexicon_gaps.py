@@ -6,7 +6,7 @@ import os
 
 import pytest
 import redis
-from django.core.management import call_command
+from django.core.management import CommandError, call_command
 from factories import make_project, make_span
 from fakes import masking as fake_ner
 
@@ -18,7 +18,9 @@ from overbae.tasks import innermind
 pytestmark = [pytest.mark.covers("lexicon-gaps"), pytest.mark.django_db]
 
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
-REDIS_URL = f"redis://localhost:6379/{15 - int(_WORKER or 0)}"
+REDIS_URL = (
+    f"{os.environ.get('TEST_CACHE_REDIS', 'redis://localhost:6379')}/{15 - int(_WORKER or 0)}"
+)
 TEXT = "The patient was given an unfamiliar syrup after the visit and the fee was refunded."
 
 
@@ -178,3 +180,28 @@ def test_the_command_prints_terms_and_never_the_trace_text(fake_llm, tmp_path):
     assert "syrup" not in out.getvalue() + (tmp_path / "gaps.tsv").read_text()
     assert "sampled 2, judge calls 2" in err.getvalue()
     only_local(fake_llm)
+
+
+def test_the_pass_refuses_to_run_without_the_name_model(fake_llm, settings):
+    spans(1)
+    settings.MASKING_NER_BACKEND = ""
+    settings.MASKING_ENABLED = False
+    reply(fake_llm, [{"term": "Zincovit Forte", "type": "MEDICATION", "lang": "en"}])
+
+    assert lexicon_gaps.collect(1, 14).skipped == "no_ner"
+    assert fake_llm.requests == []
+
+    ran = innermind.report_lexicon_gaps()
+    assert ran["skipped"] == "no_ner"
+    assert LexiconGapReport.objects.get().skipped == "no_ner"
+
+    with pytest.raises(CommandError, match="name model"):
+        call_command("lexicon_gaps", "--sample", "1", stdout=io.StringIO(), stderr=io.StringIO())
+    assert fake_llm.requests == []
+
+
+def test_the_weekly_task_runs_on_the_masking_queue():
+    from django.conf import settings
+
+    route = settings.CELERY_TASK_ROUTES["overbae.tasks.innermind.report_lexicon_gaps"]
+    assert route == {"queue": "masking"}

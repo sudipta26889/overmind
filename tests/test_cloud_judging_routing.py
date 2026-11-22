@@ -31,14 +31,16 @@ pytestmark = pytest.mark.covers("cloud-judging-routing")
 
 # Each xdist worker gets its own Redis database, so concurrent tests never share keys.
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
-REDIS_URL = f"redis://localhost:6379/{15 - int(_WORKER or 0)}"
+REDIS_URL = (
+    f"{os.environ.get('TEST_CACHE_REDIS', 'redis://localhost:6379')}/{15 - int(_WORKER or 0)}"
+)
 CLOUD = "openai/gpt-6-luna"
 LOCAL = "local/judge"
 EXPECTATION = "The answer addresses the question."
 
 
 @pytest.fixture(autouse=True)
-def _cloud_judge(monkeypatch, settings, fake_llm, tmp_path):
+def _cloud_judge(monkeypatch, settings, fake_llm, tmp_path, redis_cache):
     monkeypatch.setitem(ROLE_CHAINS, Role.CLOUD_JUDGE, ("gpt-6-luna",))
     fake_masking.enable_remote(settings, fake_llm, tmp_path)
     # The local judge samples almost nothing; a certified project is judged in full anyway.

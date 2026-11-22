@@ -139,7 +139,7 @@ class PathJudgeEvaluator(TrajectoryEvaluator):
         cut = None if remote else self.step_chars
         steps = [
             {
-                "name": span.name,
+                "step": span.name,
                 "type": span.span_type,
                 "status": evidence.status(span),
                 "score": score_of(span),
@@ -361,7 +361,8 @@ async def score_trace(project_id, trace_id: str) -> bool:
             route=route,
         )
     except MaskedFallbackError as exc:
-        await put(released(**{MARKER: exc.reason}))
+        # A deployment fault (no model, no key) leaves the trace unmarked for a working masker.
+        await put(released() if exc.config else released(**{MARKER: exc.reason}))
         raise
     except (JudgeUnavailableError, SoftTimeLimitExceeded, asyncio.CancelledError):
         await put(released())

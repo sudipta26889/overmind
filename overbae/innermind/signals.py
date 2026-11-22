@@ -366,7 +366,7 @@ class PlanDriftSignal(Signal):
 
     async def record(self, span: Span, outcome: float | None | Exception) -> None:
         attrs = span.eval_attributes
-        if isinstance(outcome, MaskedFallbackError):
+        if isinstance(outcome, MaskedFallbackError) and not outcome.config:
             # Masking could not handle this step: it is judged locally from now on, uncounted.
             judged = {**attrs, MARKER: outcome.reason}
         elif isinstance(outcome, Exception):

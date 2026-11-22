@@ -20,10 +20,17 @@ _MASKED = re.compile(r"^(?:<[A-Z]+(?:_[A-Z]+)*_\d+>|<ATTACHMENT>)$")
 
 
 def _walk(value: Any, key: str | None, siblings: Any, kinds: set[str], mapping: dict) -> None:
-    from overbae.services.masking.masker import key_type  # noqa: PLC0415 — masker imports us
+    from overbae.services.masking.masker import (
+        key_type as _key_type,  # noqa: PLC0415 — masker imports us
+    )
+
+    def key_type(name, siblings):
+        # A key that is itself a surrogate (``<PHONE_1>``) is already masked; its word is not a rule.
+        return None if _MASKED.match(name) else _key_type(name, siblings)
 
     if isinstance(value, dict):
         for k, v in value.items():
+            _text(str(k), kinds, mapping)
             _walk(v, str(k), value, kinds, mapping)
     elif isinstance(value, list):
         for item in value:

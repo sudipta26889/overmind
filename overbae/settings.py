@@ -453,7 +453,8 @@ CELERY_TASK_ROUTES = {
     "overbae.tasks.training_preparation.inspect_preparation": {"queue": "io"},
     "overbae.tasks.innermind.generate_row": {"queue": "batch"},
     "overbae.tasks.innermind.score_eval_run": {"queue": "batch"},
-    "overbae.tasks.innermind.report_lexicon_gaps": {"queue": "batch"},
+    # Needs the name model, which only the masking worker loads.
+    "overbae.tasks.innermind.report_lexicon_gaps": {"queue": "masking"},
     # Model warm-up blocks for minutes; control stays free for reconcilers and metrics.
     "overbae.tasks.innermind.run_eval_run": {"queue": "io"},
     "overbae.tasks.datasets.land": {"queue": "landing"},
@@ -482,6 +483,10 @@ TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE") or
 # the gateway allows that key the remote judge model and nothing else.
 LLM_CLOUD_API_KEY_FILE = os.environ.get("LLM_CLOUD_API_KEY_FILE", "")
 MASKING_ENABLED = os.environ.get("MASKING_ENABLED", "0") == "1"
+# This deployment runs a masking worker, so remote-approved work may be queued for it. Only
+# deploy/stack.yml sets it; without it every project is judged locally and nothing is queued
+# to an empty ``masking`` queue.
+MASKING_QUEUE_ENABLED = os.environ.get("MASKING_QUEUE_ENABLED", "") == "true"
 MASKING_MODEL_DIR = os.environ.get("MASKING_MODEL_DIR", "")
 MASKING_MODEL_REVISION = os.environ.get("MASKING_MODEL_REVISION", "")
 # The context model (GLiNER) beside the name model; empty runs the name model alone.
@@ -609,11 +614,6 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 300.0,
         "options": {"expires": 290.0},
     },
-    # Weekly: terms the masking lexicon lacks, read by the local judge.
-    "report-lexicon-gaps": {
-        "task": "overbae.tasks.innermind.report_lexicon_gaps",
-        "schedule": crontab(hour=3, minute=30, day_of_week="sunday"),
-    },
     "run-signals": {
         "task": "overbae.tasks.innermind.run_signals",
         "schedule": 300.0,
@@ -631,6 +631,13 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 3600.0,
     },
 }
+
+if MASKING_QUEUE_ENABLED:
+    # Weekly: terms the masking lexicon lacks, found by the local judge on the masking worker.
+    CELERY_BEAT_SCHEDULE["report-lexicon-gaps"] = {
+        "task": "overbae.tasks.innermind.report_lexicon_gaps",
+        "schedule": crontab(hour=3, minute=30, day_of_week="sunday"),
+    }
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 

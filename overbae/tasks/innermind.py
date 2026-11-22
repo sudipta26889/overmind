@@ -11,6 +11,7 @@ from collections import defaultdict
 
 from celery import current_app, shared_task
 from celery.exceptions import SoftTimeLimitExceeded
+from django.conf import settings
 from django.core.cache import cache
 
 from overbae.core import async_loop
@@ -68,6 +69,13 @@ def run_live_item(self, work_id: int) -> dict:
     item = admission.claim(work_id, self.request.id)
     if item is None:
         return {"skipped": True}
+    if not settings.MASKING_ENABLED and not admission.item_route(item).local:
+        # A remote-approved item that reached a worker without the masker (a flag flipped after
+        # dispatch): nothing is sent and nothing is marked; the next tick queues it for the
+        # masking worker.
+        admission.release(work_id, self.request.id)
+        wake_live_scoring()
+        return {"released": "masking"}
     error = ""
     try:
         if item.kind == "span":

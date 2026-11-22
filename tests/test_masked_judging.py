@@ -25,7 +25,9 @@ pytestmark = pytest.mark.covers("masking-egress")
 
 # Each xdist worker gets its own Redis database, so concurrent tests never share keys.
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
-REDIS_URL = f"redis://localhost:6379/{15 - int(_WORKER or 0)}"
+REDIS_URL = (
+    f"{os.environ.get('TEST_CACHE_REDIS', 'redis://localhost:6379')}/{15 - int(_WORKER or 0)}"
+)
 CLOUD = "openai/gpt-6-luna"
 LOCAL = "local/judge"
 EXPECTATION = "The answer addresses the question."
@@ -43,7 +45,7 @@ PLANTED = {
 
 
 @pytest.fixture(autouse=True)
-def _remote(monkeypatch, settings, fake_llm, tmp_path):
+def _remote(monkeypatch, settings, fake_llm, tmp_path, redis_cache):
     monkeypatch.setitem(ROLE_CHAINS, Role.CLOUD_JUDGE, ("gpt-6-luna",))
     settings.TRACE_SCORING_SAMPLE_RATE = 1
     fake_masking.enable_remote(settings, fake_llm, tmp_path, names=[PLANTED["name"]])
@@ -223,18 +225,11 @@ def test_a_remote_request_made_with_the_default_key_is_refused_by_the_gateway(fa
 @pytest.mark.parametrize(
     ("reason", "arrange"),
     [
-        (
-            "model_not_loaded",
-            lambda s: (setattr(s, "MASKING_NER_BACKEND", ""), setattr(s, "MASKING_MODEL_DIR", "")),
-        ),
         ("timeout", lambda s: setattr(s, "MASKING_TIMEOUT_SECONDS", 0)),
         ("too_large", lambda s: setattr(s, "MASKING_MAX_BYTES", 80)),
-        ("cloud_key_missing", lambda s: setattr(s, "LLM_CLOUD_API_KEY_FILE", "/nonexistent")),
-        # Docker creates a directory where a single-file bind mount points at a missing file.
-        ("cloud_key_missing", lambda s: setattr(s, "LLM_CLOUD_API_KEY_FILE", "/usr")),
     ],
 )
-def test_a_masking_failure_sends_nothing_marks_the_span_and_the_local_judge_takes_it(
+def test_a_content_failure_sends_nothing_marks_the_span_and_the_local_judge_takes_it(
     fake_llm, redis_cache, settings, reason, arrange
 ):
     arrange(settings)
@@ -251,6 +246,113 @@ def test_a_masking_failure_sends_nothing_marks_the_span_and_the_local_judge_take
     span = score_span(approved(), span)
     assert span.eval_attributes["score"] == 1.0
     assert {request.model for request in fake_llm.requests} == {LOCAL}
+
+
+@pytest.mark.covers("masking-fail-closed")
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    ("reason", "break_it", "repair"),
+    [
+        (
+            "model_not_loaded",
+            lambda s: (setattr(s, "MASKING_NER_BACKEND", ""), setattr(s, "MASKING_MODEL_DIR", "")),
+            lambda s: setattr(s, "MASKING_NER_BACKEND", fake_masking.SPEC),
+        ),
+        (
+            "cloud_key_missing",
+            lambda s: setattr(s, "LLM_CLOUD_API_KEY_FILE", "/nonexistent"),
+            None,
+        ),
+        # Docker creates a directory where a single-file bind mount points at a missing file.
+        (
+            "cloud_key_missing",
+            lambda s: setattr(s, "LLM_CLOUD_API_KEY_FILE", "/usr"),
+            None,
+        ),
+    ],
+)
+def test_a_deployment_fault_releases_the_span_unmarked_and_a_repaired_worker_judges_it_remotely(
+    fake_llm, redis_cache, settings, tmp_path, reason, break_it, repair
+):
+    good_key = settings.LLM_CLOUD_API_KEY_FILE
+    break_it(settings)
+    project = approved()
+    span = score_span(project)
+
+    assert [r for r in fake_llm.requests if r.model == CLOUD] == []
+    assert "score" not in span.eval_attributes
+    assert "masking_local" not in span.eval_attributes
+    assert span.eval_attributes.get("attempts", 0) == 0
+    assert span.eval_claimed_at is None
+    assert counter(redis_cache, reason) == 1
+    assert counter(redis_cache, "config") == 1
+    # Remote admission is held for a minute instead of retrying a broken worker hot.
+    assert judge_health.backed_off(cloud=True)
+
+    # The worker is repaired: the same span, never demoted, is judged remotely.
+    judge_health.clear()
+    settings.LLM_CLOUD_API_KEY_FILE = good_key
+    if repair:
+        repair(settings)
+    span = score_span(project, span)
+    assert span.eval_attributes["score"] == 1.0
+    assert "masking_local" not in span.eval_attributes
+    assert {request.model for request in fake_llm.requests} == {CLOUD}
+
+
+@pytest.mark.covers("masking-route")
+@pytest.mark.django_db(transaction=True)
+def test_remote_work_on_a_worker_without_the_masker_is_released_unmarked_for_the_masking_worker(
+    fake_llm, redis_cache, settings
+):
+    project = approved()
+    span = span_of(project)
+    admission.enqueue(project.pk, "span", [span.span_id])
+    item = LiveScoringWork.objects.get(key=span.span_id)
+    LiveScoringWork.objects.filter(pk=item.pk).update(
+        state="queued", task_id="t1", expires_at=timezone.now() + timedelta(minutes=5)
+    )
+
+    class Task:
+        class request:  # noqa: N801 — celery's bound task exposes ``request.id``
+            id = "t1"
+
+    settings.MASKING_ENABLED = False  # an io_traces-style worker
+    outcome = innermind.run_live_item(Task, item.pk)
+
+    assert outcome == {"released": "masking"}
+    assert fake_llm.requests == []
+    span.refresh_from_db()
+    assert "masking_local" not in span.eval_attributes
+    assert span.eval_attributes.get("attempts", 0) == 0
+    waiting = LiveScoringWork.objects.get(pk=item.pk)
+    assert waiting.state == "waiting"
+
+    # The next tick queues it for the masking worker, which judges it remotely.
+    sent = {"local": [], "masked": []}
+    admission.dispatch(lambda i, t: sent["local"].append(i), lambda i, t: sent["masked"].append(i))
+    assert sent == {"local": [], "masked": [item.pk]}
+    LiveScoringWork.objects.filter(pk=item.pk).update(task_id="t2")
+    Task.request.id = "t2"
+    settings.MASKING_ENABLED = True
+    innermind.run_live_item(Task, item.pk)
+    span.refresh_from_db()
+    assert span.eval_attributes["score"] == 1.0
+    assert {r.model for r in fake_llm.requests} == {CLOUD}
+
+
+@pytest.mark.covers("masking-route")
+@pytest.mark.django_db(transaction=True)
+def test_without_a_masking_queue_an_approved_project_is_judged_locally(
+    fake_llm, redis_cache, settings
+):
+    settings.MASKING_QUEUE_ENABLED = False
+    project = approved()
+
+    assert evals.route_for(project.pk).local
+    span = score_span(project)
+    assert span.eval_attributes["score"] == 1.0
+    assert {r.model for r in fake_llm.requests} == {LOCAL}
 
 
 @pytest.mark.covers("masking-residual-fallback")
@@ -380,3 +482,53 @@ def test_the_masking_task_runs_on_its_own_queue(settings):
     assert routes[innermind.execute_live_scoring.name] == {"queue": "io_traces"}
     assert innermind.execute_masked_scoring.soft_time_limit == 600
     assert innermind.execute_masked_scoring.time_limit == 660
+
+
+@pytest.mark.covers("masking-egress")
+@pytest.mark.django_db(transaction=True)
+def test_a_trajectory_step_name_is_sent_as_the_step_key_not_masked_as_a_person(fake_llm):
+    project = approved()
+    trace_id = uuid.uuid4().hex
+    root = make_span(
+        project,
+        trace_id=trace_id,
+        eval_attributes={"score": 0.9, "intent": "Resolve the order"},
+        attributes={"output": "Done."},
+    )
+    make_span(
+        project,
+        trace_id=trace_id,
+        parent_span_id=root.span_id,
+        span_type="tool_call",
+        name="lookup_order",
+        eval_attributes={"score": 0.9},
+        attributes={"input": "find order 7", "output": "found"},
+    )
+
+    assert async_to_sync(trajectory.score_trace)(project.pk, trace_id)
+
+    sent = " ".join(request.text for request in fake_llm.requests)
+    assert "lookup_order" in sent
+    assert '\\"step\\"' in sent
+    assert "<PERSON_" not in sent
+
+
+@pytest.mark.covers("masking-fail-closed")
+def test_the_remote_cap_fails_closed_without_redis_and_on_a_redis_error_but_the_local_cap_does_not(
+    settings,
+):
+    # A cache that is not Redis: nothing can count the call.
+    settings.CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+    assert judge_health.spend_cloud_call() is False
+    assert judge_health.spend_call() is True
+
+    # A Redis that is not there: the counter raises.
+    settings.CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": "redis://127.0.0.1:1/0",
+            "KEY_PREFIX": "overmind",
+        }
+    }
+    assert judge_health.spend_cloud_call() is False
+    assert judge_health.spend_call() is True

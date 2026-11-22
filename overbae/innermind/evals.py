@@ -68,6 +68,14 @@ class JudgeUnavailableError(RuntimeError):
     """The judge was busy, slow or down. The work is offered again; it is never an attempt."""
 
 
+# Reasons that describe this deployment, not the item: a missing model, a wrong model revision or
+# a missing key. Such an item is released unmarked and unattempted, so a fixed worker judges it
+# remotely; it is never demoted to the local judge for good.
+CONFIG_REASONS = frozenset(
+    {"model_not_loaded", "model_revision", "model_unavailable", "cloud_key_missing"}
+)
+
+
 class MaskedFallbackError(JudgeUnavailableError):
     """Masking or the gateway's guardrail kept this item off the remote judge. The caller
     writes the ``masking_local`` marker and releases the item; it is re-offered to the local
@@ -77,6 +85,7 @@ class MaskedFallbackError(JudgeUnavailableError):
         super().__init__(reason)
         self.reason = reason
         self.leak = leak
+        self.config = reason in CONFIG_REASONS
 
 
 class JudgeAnswerError(RuntimeError):
@@ -193,7 +202,7 @@ def route_for(project_id, *, marked: bool = False) -> JudgeRoute:
     id, a database error) is local. Nothing is cached: a flag changed by an admin applies to
     the next work item."""
     cloud = ROLE_CHAINS[Role.CLOUD_JUDGE]
-    if not cloud or marked:
+    if not cloud or marked or not settings.MASKING_QUEUE_ENABLED:
         return local_route()
     try:
         # Its own savepoint: a database error here must not abort the caller's transaction.
@@ -208,7 +217,12 @@ def route_for(project_id, *, marked: bool = False) -> JudgeRoute:
 
 
 async def judge_route(project_id, *, marked: bool = False) -> JudgeRoute:
-    return await sync_to_async(route_for)(project_id, marked=marked)
+    """The route this process judges on. Remote judging runs only where the masker is loaded:
+    elsewhere the item is released, unmarked and unattempted, for the masking worker."""
+    route = await sync_to_async(route_for)(project_id, marked=marked)
+    if not route.local and not settings.MASKING_ENABLED:
+        raise JudgeUnavailableError("Remote judging runs on the masking worker")
+    return route
 
 
 MARKER = "masking_local"
@@ -347,8 +361,14 @@ class Judge(Evaluator):
 
     def fallback(self, reason: str, *, leak: bool = False) -> MaskedFallbackError:
         """Counts why an item stays off the remote judge; the caller writes the marker."""
-        masking_metrics.count_fallback(reason, judge_health.now().date().isoformat(), leak=leak)
-        return MaskedFallbackError(reason, leak=leak)
+        today = judge_health.now().date().isoformat()
+        masking_metrics.count_fallback(reason, today, leak=leak)
+        error = MaskedFallbackError(reason, leak=leak)
+        if error.config:
+            masking_metrics.count_fallback("config", today)
+            # Hold remote admission for a minute instead of retrying a broken worker hot.
+            judge_health.mark_unavailable(cloud=True)
+        return error
 
     async def judge(
         self,

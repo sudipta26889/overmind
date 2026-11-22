@@ -157,3 +157,10 @@ def finish(work_id: int, token: str, error: str = "") -> None:
     LiveScoringWork.objects.filter(pk=work_id, task_id=token, state="running").update(
         state="done", finished_at=timezone.now(), error=error
     )
+
+
+def release(work_id: int, token: str) -> None:
+    """Hands a claimed item back, unattempted, for the next dispatch tick."""
+    LiveScoringWork.objects.filter(pk=work_id, task_id=token, state="running").update(
+        state="waiting", task_id="", expires_at=None, started_at=None
+    )

@@ -353,9 +353,15 @@ async def score_project_spans(project_id, spans: list[Span]) -> list[Span]:
                     route=route,
                 )
             except MaskedFallbackError as exc:
-                # Marked and released without an attempt; the sweep offers it to the local judge.
-                logger.info("Span %s stays local: %s", span.span_id, exc.reason)
-                span.eval_attributes = {**span.eval_attributes, MARKER: exc.reason}
+                if exc.config:
+                    # This deployment, not the span: released unmarked and unattempted.
+                    logger.warning(
+                        "Span %s waits for a working masker: %s", span.span_id, exc.reason
+                    )
+                else:
+                    # Marked and released without an attempt; the sweep offers it to the local judge.
+                    logger.info("Span %s stays local: %s", span.span_id, exc.reason)
+                    span.eval_attributes = {**span.eval_attributes, MARKER: exc.reason}
             except JudgeUnavailableError as exc:
                 # Released below without an attempt; the sweep offers the span again.
                 logger.info("Judge unavailable for span %s: %s", span.span_id, exc)

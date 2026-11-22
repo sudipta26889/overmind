@@ -107,8 +107,7 @@ def usable(term: str) -> bool:
         return False
     if any(hit.start == 0 and hit.end == len(term) for hit in lexicon.detect(term)):
         return False
-    names_checked = settings.MASKING_NER_BACKEND or settings.MASKING_ENABLED
-    if names_checked and ner.needs_ner(term):
+    if ner.needs_ner(term):
         return not any(hit.type == "PERSON" for hit in ner.backend().detect(term))
     return True
 
@@ -117,6 +116,10 @@ def collect(sample: int, days: int, *, cap_fraction: float | None = None) -> Gap
     """One pass. Stops, with ``skipped`` set, when the judge is off, backed off or its daily
     cap is spent; ``cap_fraction`` also stops it once that share of the cap is already used."""
     gaps = Gaps()
+    if not (settings.MASKING_NER_BACKEND or settings.MASKING_ENABLED):
+        # Without the name model a person's name could pass the filter into the report.
+        gaps.skipped = "no_ner"
+        return gaps
     try:
         model = local_model()
     except Exception:

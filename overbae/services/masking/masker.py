@@ -194,7 +194,9 @@ class Masker:
         if isinstance(value, dict):
             if value.get("type") in _ATTACHMENT_PARTS:
                 return "<ATTACHMENT>"
-            return {k: self.value(v, str(k), value) for k, v in value.items()}
+            # A key is text too: {"Rahul Sharma": ...} or {"9876543210": ...} is a value in key
+            # position. The value is still read under the original key's meaning.
+            return {self.text(str(k)): self.value(v, str(k), value) for k, v in value.items()}
         raise MaskingError("non_text_part")
 
     def part(self, item: Any) -> Any:
@@ -235,10 +237,16 @@ def mask_state(
         raise MaskingError("too_large")
     masker = Masker(deadline=time.monotonic() + timeout)
     masked = masker.value(dict(state))
-    if after_mask is not None:
-        masked = after_mask(masked)
-    if fit is not None:
-        masked = fit(masked)
+    try:
+        if after_mask is not None:
+            masked = after_mask(masked)
+        if fit is not None:
+            masked = fit(masked)
+    except MaskingError:
+        raise
+    except Exception as exc:
+        # A cut that cannot read the masked shape sends nothing; the item goes local.
+        raise MaskingError("cut") from exc
     final = json.dumps(masked, ensure_ascii=False)
     residual.require_clean(final, masker.mapping)
     return issue(final, final, masker.mapping)

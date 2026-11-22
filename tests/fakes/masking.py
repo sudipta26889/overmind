@@ -35,6 +35,8 @@ def enable_remote(settings, fake_llm, tmp_path, names=()):
     """What GuardianAI's split gives the masking worker: the name model, the remote key in a
     file, and a gateway that lets only that key call the remote model."""
     settings.MASKING_NER_BACKEND = SPEC
+    settings.MASKING_ENABLED = True
+    settings.MASKING_QUEUE_ENABLED = True
     settings.MASKING_TIMEOUT_SECONDS = 5
     settings.MASKING_MAX_BYTES = 24_000
     NAMES[:] = list(names)
