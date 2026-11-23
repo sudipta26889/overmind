@@ -472,6 +472,8 @@ CELERY_TASK_ROUTES = {
     "overbae.tasks.innermind.dispatch_live_scoring": {"queue": "control"},
     "overbae.tasks.innermind.execute_live_scoring": {"queue": "io_traces"},
     "overbae.tasks.innermind.execute_masked_scoring": {"queue": "masking"},
+    # The report and kappa commands run where the models are already loaded.
+    "overbae.tasks.masking_commands.run_command": {"queue": "masking"},
     "overbae.tasks.innermind.score_spans": {"queue": "io_traces"},
     "overbae.tasks.innermind.sweep_unscored_spans": {"queue": "io_traces"},
     "overbae.tasks.innermind.score_trajectories": {"queue": "io_traces"},
