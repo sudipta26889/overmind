@@ -100,7 +100,7 @@ def test_a_term_the_lexicon_matches_or_that_is_personal_or_too_long_is_dropped(f
 
 def test_a_remote_judge_model_is_refused_before_any_text_leaves(fake_llm, monkeypatch):
     spans(1)
-    monkeypatch.setitem(ROLE_CHAINS, Role.JUDGE, ("gpt-6-luna",))
+    monkeypatch.setitem(ROLE_CHAINS, Role.JUDGE, ("cloud-judge-masked",))
     reply(fake_llm, [])
 
     gaps = lexicon_gaps.collect(1, 14)
@@ -205,3 +205,15 @@ def test_the_weekly_task_runs_on_the_masking_queue():
 
     route = settings.CELERY_TASK_ROUTES["overbae.tasks.innermind.report_lexicon_gaps"]
     assert route == {"queue": "masking"}
+
+
+def test_with_the_local_judge_off_the_pass_and_the_weekly_task_skip_without_a_request(
+    fake_llm, monkeypatch
+):
+    spans(1)
+    monkeypatch.setitem(ROLE_CHAINS, Role.JUDGE, ())
+    reply(fake_llm, [])
+
+    assert lexicon_gaps.collect(1, 14).skipped == "judge_off"
+    assert innermind.report_lexicon_gaps()["skipped"] == "judge_off"
+    assert fake_llm.requests == []

@@ -28,7 +28,7 @@ _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
 REDIS_URL = (
     f"{os.environ.get('TEST_CACHE_REDIS', 'redis://localhost:6379')}/{15 - int(_WORKER or 0)}"
 )
-CLOUD = "openai/gpt-6-luna"
+CLOUD = "overmind/cloud-judge-masked"
 LOCAL = "local/judge"
 EXPECTATION = "The answer addresses the question."
 
@@ -46,7 +46,7 @@ PLANTED = {
 
 @pytest.fixture(autouse=True)
 def _remote(monkeypatch, settings, fake_llm, tmp_path, redis_cache):
-    monkeypatch.setitem(ROLE_CHAINS, Role.CLOUD_JUDGE, ("gpt-6-luna",))
+    monkeypatch.setitem(ROLE_CHAINS, Role.CLOUD_JUDGE, ("cloud-judge-masked",))
     settings.TRACE_SCORING_SAMPLE_RATE = 1
     fake_masking.enable_remote(settings, fake_llm, tmp_path, names=[PLANTED["name"]])
 
@@ -199,10 +199,10 @@ def test_the_default_key_cannot_reach_the_remote_model_and_only_a_masked_payload
     fake_llm,
 ):
     with pytest.raises(RuntimeError):
-        llms.call_llm("hello", model="gpt-6-luna")
+        llms.call_llm("hello", model="cloud-judge-masked")
     assert [request.model for request in fake_llm.requests] == [CLOUD]
     with pytest.raises(TypeError):
-        call_masked("a raw string", model="gpt-6-luna")  # type: ignore[arg-type]
+        call_masked("a raw string", model="cloud-judge-masked")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
         MaskedPayload(text="raw", state_json="", mapping={})
 
@@ -357,10 +357,14 @@ def test_without_a_masking_queue_an_approved_project_is_judged_locally(
 
 @pytest.mark.covers("masking-residual-fallback")
 @pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "refusal",
+    ["Request blocked by guardrail presidio-pii", "Content blocked: Aadhaar pattern detected"],
+)
 def test_a_gateway_guardrail_refusal_marks_the_span_counts_a_leak_and_goes_local(
-    fake_llm, redis_cache
+    fake_llm, redis_cache, refusal
 ):
-    fake_llm.fail(lambda r: r.model == CLOUD, 400, "Request blocked by guardrail presidio-pii")
+    fake_llm.fail(lambda r: r.model == CLOUD, 400, refusal)
     project = approved()
 
     span = score_span(project)
@@ -371,6 +375,8 @@ def test_a_gateway_guardrail_refusal_marks_the_span_counts_a_leak_and_goes_local
     day = judge_health.now().date().isoformat()
     assert int(redis_cache.get(f"overmind:masking:leak:{day}")) == 1
     assert not judge_health.backed_off(cloud=True)
+    # One remote try and no retry of the refused request.
+    assert [r.model for r in fake_llm.requests].count(CLOUD) == 1
 
     assert score_span(project, span).eval_attributes["score"] == 1.0
 
@@ -532,3 +538,36 @@ def test_the_remote_cap_fails_closed_without_redis_and_on_a_redis_error_but_the_
     }
     assert judge_health.spend_cloud_call() is False
     assert judge_health.spend_call() is True
+
+
+@pytest.mark.covers("masking-route")
+@pytest.mark.django_db(transaction=True)
+def test_with_the_local_judge_off_local_work_waits_and_remote_work_is_still_judged_remotely(
+    fake_llm, redis_cache, monkeypatch
+):
+    monkeypatch.setitem(ROLE_CHAINS, Role.JUDGE, ())
+    local_span = span_of(make_project())
+    remote_project = approved()
+    remote_span = span_of(remote_project)
+    for project, span in ((local_span.project, local_span), (remote_project, remote_span)):
+        admission.enqueue(project.pk, "span", [span.span_id])
+
+    # Admission holds the local item and queues only the remote one: nothing churns.
+    sent = {"local": [], "masked": []}
+    admission.dispatch(lambda i, t: sent["local"].append(i), lambda i, t: sent["masked"].append(i))
+    assert sent["local"] == []
+    assert len(sent["masked"]) == 1
+    waiting = LiveScoringWork.objects.get(key=local_span.span_id)
+    assert waiting.state == "waiting"
+
+    # Judged directly, the local span stays unscored and unattempted; no request goes out.
+    local_span = score_span(local_span.project, local_span)
+    assert "score" not in local_span.eval_attributes
+    assert local_span.eval_attributes.get("attempts", 0) == 0
+    assert local_span.eval_claimed_at is None
+    assert not [r for r in fake_llm.requests if r.model == LOCAL]
+
+    judge_health.clear()
+    remote_span = score_span(remote_project, remote_span)
+    assert remote_span.eval_attributes["score"] == 1.0
+    assert {r.model for r in fake_llm.requests} == {CLOUD}

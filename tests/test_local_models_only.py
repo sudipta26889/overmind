@@ -36,7 +36,9 @@ pytestmark = pytest.mark.covers("llm-gateway")
 
 # Each xdist worker gets its own Redis database, so concurrent tests never share keys.
 _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
-REDIS_URL = f"redis://localhost:6379/{15 - int(_WORKER or 0)}"
+REDIS_URL = (
+    f"{os.environ.get('TEST_CACHE_REDIS', 'redis://localhost:6379')}/{15 - int(_WORKER or 0)}"
+)
 EXPECTATION = "The answer addresses the question."
 JUDGE_DOWN = "overmind:judge:unavailable"
 
@@ -442,7 +444,7 @@ def test_plan_drift_judges_five_steps_a_run_and_saves_each(fake_llm):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_a_judge_that_is_off_still_finishes_spans_with_unknown_llm_rows(
+def test_a_judge_that_is_off_holds_the_span_unscored_and_unattempted(
     fake_llm, sampled, monkeypatch
 ):
     monkeypatch.setitem(ROLE_CHAINS, Role.JUDGE, ())
@@ -451,8 +453,9 @@ def test_a_judge_that_is_off_still_finishes_spans_with_unknown_llm_rows(
     async_to_sync(span_processor.score_project_spans)(span.project_id, [span])
 
     span.refresh_from_db()
-    assert span.eval_attributes["score"] is None
-    assert {m["error"] for m in span.eval_attributes["metrics"].values()} == {"judge is off"}
+    assert "score" not in span.eval_attributes
+    assert span.eval_attributes.get("attempts", 0) == 0
+    assert span.eval_claimed_at is None
     assert fake_llm.requests == []
 
 

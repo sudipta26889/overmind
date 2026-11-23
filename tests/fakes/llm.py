@@ -184,7 +184,7 @@ class FakeLLM:
     # With a key set, the gateway behaves as GuardianAI's split: that key may call only the
     # remote models, and every other key is refused them.
     cloud_key: str | None = None
-    cloud_models: frozenset[str] = frozenset({"openai/gpt-6-luna"})
+    cloud_models: frozenset[str] = frozenset({"overmind/cloud-judge-masked"})
     # Maps the judged state to "yes", "partial" or "no"; unset answers "yes".
     verdict: Callable[[dict[str, Any]], str] | None = None
 

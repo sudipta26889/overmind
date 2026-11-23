@@ -52,6 +52,9 @@ def judge_ready(route, active: dict) -> bool:
     its own faults, and never waits behind the local one."""
     if not route.local:
         return not judge_health.backed_off(cloud=True)
+    if not route.model:
+        # The local judge is off (LLM_JUDGE_CHAIN is empty): hold the item, so the queue does not churn.
+        return False
     if judge_health.backed_off():
         return False
     if route.single_stream:
