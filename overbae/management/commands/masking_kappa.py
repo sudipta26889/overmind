@@ -1,8 +1,10 @@
 import json
+import sys
 from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
+from overbae.core.model_registry import MODELS_BY_NAME, ROLE_CHAINS, Role
 from overbae.innermind import masking_kappa
 from overbae.services.masking import report
 
@@ -20,19 +22,28 @@ class Command(BaseCommand):
         parser.add_argument("--limit", type=int, default=masking_kappa.DEFAULT_LIMIT)
         parser.add_argument("--out", required=True)
         parser.add_argument(
+            "--mode",
+            choices=masking_kappa.MODES,
+            default=masking_kappa.DEFAULT_MODE,
+            help="same-model: the cloud judge on full masking against ids-only masking (the "
+            "primary measure); reference: the cloud judge on masked text against a local model "
+            "on the unmasked text.",
+        )
+        parser.add_argument(
             "--reference-model",
             default=masking_kappa.DEFAULT_REFERENCE,
             help="Local model for the unmasked half (default: local-judge).",
         )
 
-    def handle(self, *args, fixtures, domains, limit, out, reference_model, **options):
+    def handle(self, *args, fixtures, domains, limit, out, reference_model, mode, **options):
         if limit > masking_kappa.HARD_LIMIT:
             raise CommandError(f"--limit above {masking_kappa.HARD_LIMIT} is refused.")
         if limit < 1:
             raise CommandError("--limit must be at least 1.")
         try:
             masking_kappa.require_masking_worker()
-            masking_kappa.check_reference(reference_model)
+            if mode == "reference":
+                masking_kappa.check_reference(reference_model)
         except RuntimeError as exc:
             raise CommandError(str(exc)) from exc
         directory = Path(fixtures)
@@ -42,8 +53,11 @@ class Command(BaseCommand):
         chosen = masking_kappa.pick(report.load_fixtures(directory), wanted, limit)
         if not chosen:
             raise CommandError("No fixtures match the domains.")
-        self.stdout.write(f"reference model: {reference_model}")
-        outcome = masking_kappa.run(chosen, reference_model)
+        cloud = MODELS_BY_NAME[ROLE_CHAINS[Role.CLOUD_JUDGE][0]].slug
+        self.stdout.write(f"mode: {mode}, model: {cloud}")
+        if mode == "reference":
+            self.stdout.write(f"reference model: {reference_model}")
+        outcome = masking_kappa.run(chosen, reference_model, mode)
         target = Path(out)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("".join(json.dumps(row) + "\n" for row in outcome.pairs))
@@ -54,3 +68,7 @@ class Command(BaseCommand):
             f"cloud calls {outcome.cloud_calls}, local calls {outcome.local_calls}"
         )
         self.stdout.write(f"verdicts: {target}   skipped: {skipped}")
+        line, ok = masking_kappa.kappa_line(outcome.pairs, {f["id"]: f["domain"] for f in chosen})
+        self.stdout.write(line)
+        if not ok:
+            sys.exit(1)

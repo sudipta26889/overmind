@@ -16,6 +16,9 @@ from overbae.services.masking import lexicon, patterns
 from overbae.services.masking.errors import MaskingError
 from overbae.services.masking.payload import SURROGATE
 
+# What an ids-only check may report: the structured identifiers and a surrogate this call did
+# not issue. Names, health terms and the rest are allowed to stay in that mode.
+IDENTIFIER_KINDS = frozenset({"EMAIL", "PHONE", "ACCOUNT", "ID", "surrogate"})
 _MASKED = re.compile(r"^(?:<[A-Z]+(?:_[A-Z]+)*_\d+>|<ATTACHMENT>)$")
 
 
@@ -62,7 +65,13 @@ def _text(text: str, kinds: set[str], mapping: dict) -> None:
         kinds.add(hit.type)
 
 
-def findings(final: str, mapping: dict[str, str], *, structured: bool = True) -> list[str]:
+def findings(
+    final: str,
+    mapping: dict[str, str],
+    *,
+    structured: bool = True,
+    only: frozenset[str] | None = None,
+) -> list[str]:
     """The kinds of things still visible in ``final``; empty when it is clean."""
     kinds: set[str] = set()
     unknown = {m.group(0) for m in SURROGATE.finditer(final)} - set(mapping)
@@ -75,11 +84,17 @@ def findings(final: str, mapping: dict[str, str], *, structured: bool = True) ->
             _text(final, kinds, mapping)
     else:
         _text(final, kinds, mapping)
-    return sorted(kinds)
+    return sorted(kinds if only is None else kinds & only)
 
 
-def require_clean(final: str, mapping: dict[str, str], *, structured: bool = True) -> None:
-    kinds = findings(final, mapping, structured=structured)
+def require_clean(
+    final: str,
+    mapping: dict[str, str],
+    *,
+    structured: bool = True,
+    only: frozenset[str] | None = None,
+) -> None:
+    kinds = findings(final, mapping, structured=structured, only=only)
     if kinds:
         error = MaskingError("residual")
         error.kinds = kinds
