@@ -9,14 +9,17 @@ from dataclasses import asdict, replace
 from datetime import datetime, timedelta
 
 from celery.exceptions import SoftTimeLimitExceeded
+from django.conf import settings
 from django.utils import timezone
 
 from overbae.innermind import evidence
 from overbae.innermind.evals import (
     JUDGE_STATE_LIMIT,
+    MARKER,
     Judge,
     JudgeRoute,
     JudgeUnavailableError,
+    MaskedFallbackError,
     judge_route,
 )
 from overbae.innermind.metrics import (
@@ -130,18 +133,23 @@ class PathJudgeEvaluator(TrajectoryEvaluator):
         intent = root.eval_attributes.get("intent")
         if not intent:
             return Metric(self.expectation, error="root span has no intent")
+        # A remote judge is sent a masked copy, so each step is masked whole and cut after, never
+        # cut first: a cut can split a value in two and hide it from the masker.
+        remote = route is not None and not route.local
+        cut = None if remote else self.step_chars
         steps = [
             {
-                "name": span.name,
+                "step": span.name,
                 "type": span.span_type,
                 "status": evidence.status(span),
                 "score": score_of(span),
-                "input": evidence.read_input(span)[: self.step_chars],
-                "output": evidence.read_output(span)[: self.step_chars],
+                "input": evidence.read_input(span)[:cut],
+                "output": evidence.read_output(span)[:cut],
             }
             for span in spans
             if span is not root
         ]
+        limit = settings.MASKING_MAX_BYTES if remote else JUDGE_STATE_LIMIT
         while True:
             state = {
                 "intent": intent,
@@ -150,10 +158,23 @@ class PathJudgeEvaluator(TrajectoryEvaluator):
                 "output": evidence.read_output(root),
             }
             # Keep the first and last steps; the middle of a long run is the least telling.
-            if len(json.dumps(state).encode()) <= JUDGE_STATE_LIMIT or len(steps) <= 2:
+            if len(json.dumps(state).encode()) <= limit or len(steps) <= 2:
                 break
             del steps[len(steps) // 2]
-        return await Judge(root.project_id, route=route).judge(state, self.expectation)
+        return await Judge(root.project_id, route=route).judge(
+            state, self.expectation, after_mask=self.cut_steps if remote else None
+        )
+
+    def cut_steps(self, masked: dict) -> dict:
+        """The 300-character cut, applied to the masked steps."""
+        try:
+            steps = json.loads(masked["input"])
+        except (KeyError, TypeError, ValueError):
+            return masked
+        for step in steps:
+            for key in ("input", "output"):
+                step[key] = str(step[key])[: self.step_chars]
+        return {**masked, "input": json.dumps(steps, ensure_ascii=False)}
 
 
 class ReferenceEvaluator(TrajectoryEvaluator):
@@ -301,7 +322,7 @@ async def score_trace(project_id, trace_id: str) -> bool:
     if not is_ready(spans):
         return False
     root = roots_of(spans)[0]
-    route = await judge_route(project_id)
+    route = await judge_route(project_id, marked=MARKER in root.eval_attributes)
     if not in_scoring_sample(trace_id, route.sample_rate):
         unsampled = {"score": None, "metrics": {}, "unsampled": True}
         await store(root, {**root.eval_attributes, "trajectory": unsampled})
@@ -339,6 +360,10 @@ async def score_trace(project_id, trace_id: str) -> bool:
             checkpoint=checkpoint,
             route=route,
         )
+    except MaskedFallbackError as exc:
+        # A deployment fault (no model, no key) leaves the trace unmarked for a working masker.
+        await put(released() if exc.config else released(**{MARKER: exc.reason}))
+        raise
     except (JudgeUnavailableError, SoftTimeLimitExceeded, asyncio.CancelledError):
         await put(released())
         raise

@@ -11,6 +11,7 @@ from collections import defaultdict
 
 from celery import current_app, shared_task
 from celery.exceptions import SoftTimeLimitExceeded
+from django.conf import settings
 from django.core.cache import cache
 
 from overbae.core import async_loop
@@ -38,10 +39,14 @@ def dispatch_live_scoring() -> dict:
         connect_timeout=5,
         transport_options={"socket_connect_timeout": 5, "socket_timeout": 5},
     ) as connection:
-        return admission.dispatch(
-            lambda work_id, token: execute_live_scoring.apply_async(
+
+        def publisher(task):
+            return lambda work_id, token: task.apply_async(
                 kwargs={"work_id": work_id}, task_id=token, connection=connection, retry=False
             )
+
+        return admission.dispatch(
+            publisher(execute_live_scoring), publisher(execute_masked_scoring)
         )
 
 
@@ -57,9 +62,20 @@ def dispatch_live_scoring() -> dict:
     time_limit=660,
 )
 def execute_live_scoring(self, *, work_id: int) -> dict:
+    return run_live_item(self, work_id)
+
+
+def run_live_item(self, work_id: int) -> dict:
     item = admission.claim(work_id, self.request.id)
     if item is None:
         return {"skipped": True}
+    if not settings.MASKING_ENABLED and not admission.item_route(item).local:
+        # A remote-approved item that reached a worker without the masker (a flag flipped after
+        # dispatch): nothing is sent and nothing is marked; the next tick queues it for the
+        # masking worker.
+        admission.release(work_id, self.request.id)
+        wake_live_scoring()
+        return {"released": "masking"}
     error = ""
     try:
         if item.kind == "span":
@@ -79,6 +95,23 @@ def execute_live_scoring(self, *, work_id: int) -> dict:
         admission.finish(work_id, self.request.id, error)
         wake_live_scoring()
     return {"completed": True}
+
+
+@shared_task(
+    name="overbae.tasks.innermind.execute_masked_scoring",
+    bind=True,
+    acks_late=True,
+    reject_on_worker_lost=True,
+    # One judge call can wait for this process's slot (120 s), the Redis lock (120 s) and the
+    # request (300 s). The soft limit lets the work release its claim before the hard one; the
+    # admission lease and the span claim both outlive the hard limit.
+    soft_time_limit=600,
+    time_limit=660,
+)
+def execute_masked_scoring(self, *, work_id: int) -> dict:
+    """The same work, on the masking worker: the masker's model, the remote call and the restore
+    of the explanation all happen in this one process, and no surrogate map leaves it."""
+    return run_live_item(self, work_id)
 
 
 @shared_task(name="overbae.tasks.innermind.score_spans")
@@ -129,6 +162,25 @@ def sweep_unscored_spans() -> dict:
         enqueue_span_scoring(spans)
         count += len(spans)
     return {"spans": count}
+
+
+# Weekly pass; skipped while the judge is backed off or most of today's calls are already spent.
+LEXICON_GAPS_SAMPLE = 200
+LEXICON_GAPS_CAP_FRACTION = 0.8
+
+
+@shared_task(name="overbae.tasks.innermind.report_lexicon_gaps")
+def report_lexicon_gaps() -> dict:
+    from overbae.innermind import lexicon_gaps
+    from overbae.models import LexiconGapReport
+
+    gaps = lexicon_gaps.collect(
+        LEXICON_GAPS_SAMPLE, days=14, cap_fraction=LEXICON_GAPS_CAP_FRACTION
+    )
+    LexiconGapReport.objects.create(
+        sampled=gaps.sampled, calls=gaps.calls, terms=gaps.terms(), skipped=gaps.skipped
+    )
+    return {"sampled": gaps.sampled, "calls": gaps.calls, "skipped": gaps.skipped}
 
 
 @shared_task(name="overbae.tasks.innermind.score_trajectories")

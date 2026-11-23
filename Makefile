@@ -6,13 +6,15 @@ install-hooks:
 # Local celery worker (macOS). --pool=solo because forking after the httpx Modal
 # warmup copies locked mDNS/getaddrinfo state into the child and SIGSEGVs. Solo
 # is concurrency 1, so a long landing or script run blocks everything else locally.
-# -Q lists every queue: this one process stands in for the whole compose fleet.
+# -Q lists every queue: this one process stands in for the whole compose fleet. It has no
+# masker, and MASKING_QUEUE_ENABLED is off, so nothing is queued to ``masking`` and every project
+# is judged locally; the queue is listed only so a stray message is drained.
 # Data Workshop scripts need `make sandbox` running and SANDBOX_URL=http://127.0.0.1:8080
 # with the same SANDBOX_TOKEN in .env.
 worker:
 	OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES TOGETHER_API_KEY=placeholder-local-dev \
 		uv run celery -A overbae worker -l info --pool=solo -n local@%h \
-		-Q control,io,io_traces,batch,landing,interactive
+		-Q control,io,io_traces,masking,batch,landing,interactive
 
 # Runs scripts as your own user: no isolation, local development only.
 sandbox:

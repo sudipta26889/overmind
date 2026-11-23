@@ -64,9 +64,11 @@ def mark_unavailable(px: int | None = None, *, cloud: bool = False) -> None:
 
 
 def _spend(prefix: str, limit: int, *, cloud: bool) -> bool:
+    """One call against a daily limit. The local judge is uncapped when its counter is out of
+    reach; a remote judge fails closed, because that cap bounds spend and nothing else does."""
     client = cache_redis()
     if client is None:
-        return True
+        return not cloud
     moment = now()
     key = f"overmind:judge:{prefix}:{moment.date().isoformat()}"
     try:
@@ -74,12 +76,23 @@ def _spend(prefix: str, limit: int, *, cloud: bool) -> bool:
         if count == 1:
             client.expire(key, 48 * 3600)
     except redis.RedisError:
-        return True
+        return not cloud
     if count <= limit:
         return True
     midnight = datetime.combine(moment.date() + timedelta(days=1), datetime.min.time(), UTC)
     mark_unavailable(px=max(1000, int((midnight - moment).total_seconds() * 1000)), cloud=cloud)
     return False
+
+
+def calls_today() -> int:
+    """Local judge requests counted so far today (UTC); 0 without a cache Redis."""
+    client = cache_redis()
+    if client is None:
+        return 0
+    try:
+        return int(client.get(f"overmind:judge:calls:{now().date().isoformat()}") or 0)
+    except (redis.RedisError, ValueError):
+        return 0
 
 
 def spend_call() -> bool:
@@ -89,7 +102,8 @@ def spend_call() -> bool:
 
 
 def spend_cloud_call() -> bool:
-    """The same for a remote judge or explanation call, against its own limit and back-off."""
+    """The same for a remote judge or explanation call, against its own limit and back-off.
+    Without a cache Redis, or when it errors, the call is refused: that cap bounds spend."""
     return _spend("cloud_calls", cloud_daily_limit(), cloud=True)
 
 
