@@ -113,7 +113,15 @@ def resolve(hits: list[Hit]) -> list[Hit]:
     return sorted(kept, key=lambda h: h.start)
 
 
+# The identifiers a gateway pattern filter refuses: what an ids-only mask still replaces.
+IDENTIFIER_TYPES = frozenset({"EMAIL", "PHONE", "ACCOUNT", "ID"})
+
+
 class Masker:
+    # ids_only is for the masking_kappa comparison alone: only structured identifiers are
+    # replaced and no key forces a type. Production masking never sets it.
+    ids_only = False
+
     def __init__(self, *, deadline: float):
         self.mapping: dict[str, str] = {}
         self._index: dict[tuple[str, str], str] = {}
@@ -135,6 +143,9 @@ class Masker:
             raise MaskingError("timeout")
 
     def _detect(self, text: str) -> list[Hit]:
+        if self.ids_only:
+            found = patterns.structured(patterns.neutral(text))
+            return [hit for hit in found if hit.type in IDENTIFIER_TYPES]
         hits = patterns.detect(text) + lexicon.detect(text)
         if ner.needs_ner(text):
             if self._ner is None:
@@ -177,7 +188,7 @@ class Masker:
 
     def value(self, value: Any, key: str | None = None, siblings: Mapping | None = None) -> Any:
         self._check_time()
-        forced = key_type(key, siblings) if key else None
+        forced = key_type(key, siblings) if key and not self.ids_only else None
         if isinstance(value, bool) or value is None:
             return value
         if isinstance(value, str):
@@ -257,3 +268,32 @@ def derive(payload: MaskedPayload, prefix: str) -> MaskedPayload:
     map, so an explanation never rebuilds raw text. The wording is checked too."""
     residual.require_clean(prefix, payload.mapping, structured=False)
     return issue(prefix + payload.state_json, payload.state_json, payload.mapping)
+
+
+class _IdsOnlyMasker(Masker):
+    ids_only = True
+
+
+def mask_ids_only(
+    state: Mapping[str, Any], *, fit: Callable[[dict], dict] | None = None
+) -> MaskedPayload:
+    """Replaces only structured identifiers; names, health terms, amounts and dates stay. Used
+    by ``masking_kappa`` alone, to measure what full masking costs the judge; the residual
+    check still insists no identifier is left."""
+    timeout, max_bytes = _limits()
+    try:
+        size = len(json.dumps(state, ensure_ascii=False, default=str).encode())
+    except (TypeError, ValueError) as exc:
+        raise MaskingError("non_text_part") from exc
+    if size > max_bytes:
+        raise MaskingError("too_large")
+    masker = _IdsOnlyMasker(deadline=time.monotonic() + timeout)
+    masked = masker.value(dict(state))
+    try:
+        if fit is not None:
+            masked = fit(masked)
+    except Exception as exc:
+        raise MaskingError("cut") from exc
+    final = json.dumps(masked, ensure_ascii=False)
+    residual.require_clean(final, masker.mapping, only=residual.IDENTIFIER_KINDS)
+    return issue(final, final, masker.mapping)

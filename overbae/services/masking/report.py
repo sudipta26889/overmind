@@ -56,6 +56,8 @@ class Outcome:
 def load_fixtures(directory: Path) -> list[dict]:
     fixtures = []
     for path in sorted(Path(directory).glob("*.jsonl")):
+        if path.name.startswith("."):
+            continue  # macOS ``._*`` side files and other dotfiles are not fixtures
         for line in path.read_text().splitlines():
             if line.strip():
                 fixtures.append(json.loads(line))

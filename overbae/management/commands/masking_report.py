@@ -4,6 +4,7 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
+from overbae.innermind import masking_kappa
 from overbae.services.masking import report
 
 DEFAULT_FIXTURES = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "masking"
@@ -23,8 +24,14 @@ class Command(BaseCommand):
             "--verdicts",
             help="JSON lines {id, masked_verdict, local_verdict} from the two judges, for kappa.",
         )
+        parser.add_argument(
+            "--no-mask",
+            action="store_true",
+            help="Load no model and mask nothing: print kappa from --verdicts and the fixtures' "
+            "domains only.",
+        )
 
-    def handle(self, *args, fixtures, format, verdicts, **options):
+    def handle(self, *args, fixtures, format, verdicts, no_mask, **options):
         directory = Path(fixtures)
         if not directory.is_dir():
             raise CommandError(f"{directory} is not a directory.")
@@ -37,6 +44,16 @@ class Command(BaseCommand):
                 if line.strip():
                     row = json.loads(line)
                     pairs[row["id"]] = row
+        if no_mask:
+            if not pairs:
+                raise CommandError("--no-mask needs --verdicts.")
+            line, ok = masking_kappa.kappa_line(
+                list(pairs.values()), {f["id"]: f["domain"] for f in loaded}
+            )
+            self.stdout.write(line)
+            if not ok:
+                sys.exit(1)
+            return
         result = report.evaluate(report.run(loaded), pairs)
         failed = report.failing(result)
         if format == "json":

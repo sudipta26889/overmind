@@ -157,3 +157,58 @@ def test_the_command_exits_with_one_when_a_bar_fails(settings, tmp_path, planted
     assert exit_code == 1
     assert ("leak en-1 PERSON" in text) is planted_name_leaks
     fake_ner.NAMES[:] = []
+
+
+def test_dotfiles_and_macos_side_files_are_not_fixtures(tmp_path):
+    row = {"id": "a", "lang": "en", "domain": "general", "state": {}, "planted": []}
+    (tmp_path / "en.jsonl").write_text(json.dumps(row) + "\n")
+    (tmp_path / "._en.jsonl").write_bytes(b"\x00\x05\x16\x07 not json")
+    (tmp_path / ".hidden.jsonl").write_text("not json\n")
+
+    assert [f["id"] for f in report.load_fixtures(tmp_path)] == ["a"]
+
+
+def test_no_mask_computes_kappa_from_verdicts_and_domains_without_loading_a_model(
+    tmp_path, settings
+):
+    settings.MASKING_NER_BACKEND = ""  # a model load would raise model_not_loaded
+    settings.MASKING_MODEL_DIR = ""
+    rows = [
+        {"id": f"h{i}", "lang": "en", "domain": "health", "state": {}, "planted": []}
+        for i in range(60)
+    ]
+    (tmp_path / "en.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    verdicts = tmp_path.parent / f"{tmp_path.name}-verdicts.jsonl"
+    verdicts.write_text(
+        "".join(
+            json.dumps({"id": r["id"], "masked_verdict": v, "local_verdict": v}) + "\n"
+            for i, r in enumerate(rows)
+            for v in ["yes" if i % 2 else "no"]
+        )
+    )
+    out = io.StringIO()
+
+    call_command(
+        "masking_report",
+        "--fixtures",
+        str(tmp_path),
+        "--no-mask",
+        "--verdicts",
+        str(verdicts),
+        stdout=out,
+    )
+
+    assert "kappa 1.00 on 60 pairs (bar 0.6): ok" in out.getvalue()
+
+    verdicts.write_text(verdicts.read_text().splitlines()[0] + "\n")
+    with pytest.raises(SystemExit) as stop:
+        call_command(
+            "masking_report",
+            "--fixtures",
+            str(tmp_path),
+            "--no-mask",
+            "--verdicts",
+            str(verdicts),
+            stdout=io.StringIO(),
+        )
+    assert stop.value.code == 1
