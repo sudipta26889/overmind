@@ -9,6 +9,8 @@ from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 from dotenv import load_dotenv
 
+from overbae.core import local_hours as _local_hours
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 logger = logging.getLogger(__name__)
@@ -483,6 +485,14 @@ TRACE_SCORING_SAMPLE_RATE = float(os.environ.get("TRACE_SCORING_SAMPLE_RATE") or
 # the gateway allows that key the remote judge model and nothing else.
 LLM_CLOUD_API_KEY_FILE = os.environ.get("LLM_CLOUD_API_KEY_FILE", "")
 MASKING_ENABLED = os.environ.get("MASKING_ENABLED", "0") == "1"
+# The hours (India time, "1-8", may wrap midnight, empty = always) in which the local judge starts
+# calls. A malformed value stops the process at start-up.
+LOCAL_JUDGE_HOURS_IST = os.environ.get("LOCAL_JUDGE_HOURS_IST", "").strip()
+try:
+    _local_hours.parse(LOCAL_JUDGE_HOURS_IST)
+except ValueError as exc:
+    raise ImproperlyConfigured(str(exc)) from exc
+
 # This deployment runs a masking worker, so remote-approved work may be queued for it. Only
 # deploy/stack.yml sets it; without it every project is judged locally and nothing is queued
 # to an empty ``masking`` queue.

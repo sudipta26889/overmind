@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.core.management.base import BaseCommand
 from django.db.models import Count
 
@@ -33,6 +34,11 @@ class Command(BaseCommand):
         )
         write(f"held on the local route: {held_work} waiting items, {held_spans} unscored spans")
         write(f"projects approved for remote judging: {remote.count()}")
+        window = settings.LOCAL_JUDGE_HOURS_IST or "always"
+        write(
+            f"local judge window (IST): {window}, "
+            f"{'open' if judge_health.local_judge_open() else 'closed'} now"
+        )
         today = judge_health.now().date().isoformat()
         client = cache_redis()
         if client is None:

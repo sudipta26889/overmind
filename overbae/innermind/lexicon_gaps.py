@@ -134,6 +134,9 @@ def collect(sample: int, days: int, *, cap_fraction: float | None = None) -> Gap
     except Exception:
         gaps.skipped = "off"
         return gaps
+    if not judge_health.local_judge_open():
+        gaps.skipped = "outside_hours"
+        return gaps
     limit = judge_health.daily_limit()
     if judge_health.backed_off():
         gaps.skipped = "backed_off"
