@@ -55,7 +55,7 @@ def fixture_row(serial: int, domain: str = "health") -> dict:
         "domain": domain,
         "state": {
             "intent": "Summarise the visit",
-            "expectation": "The plan names the medicine.",
+            "expectation": f"The plan names the medicine ({serial}).",
             "input": f"Patient {PLANTED[0]} on {PLANTED[1]}, mail {PLANTED[2]}, has diabetes.",
             "output": "Continue metformin and return in a month.",
         },
@@ -307,3 +307,38 @@ def test_only_the_made_up_fixtures_are_judged(fake_llm, tmp_path):
     with pytest.raises(RuntimeError, match="made-up fixtures"):
         run(directory, tmp_path / "v.jsonl")
     assert fake_llm.requests == []
+
+
+def test_stability_mode_judges_the_same_ids_only_text_twice_and_prints_the_table(
+    fake_llm, tmp_path
+):
+    directory = write(tmp_path, [fixture_row(i) for i in range(3)])
+
+    printed, _ = run_with_code(directory, tmp_path / "v.jsonl", "--mode", "stability")
+
+    assert f"mode: stability, model: {CLOUD}" in printed
+    assert "pairs 3, skipped 0, cloud calls 6, local calls 0" in printed
+    assert len(fake_llm.requests) == 6
+    by_text = {}
+    for request in fake_llm.requests:
+        by_text.setdefault(request.text, []).append(request)
+    assert sorted(len(v) for v in by_text.values()) == [2, 2, 2]  # each text sent twice
+    for text in by_text:
+        assert PLANTED[0] in text  # ids-only keeps the name
+        assert flat(PLANTED[1]) not in flat(text)  # but never an identifier
+
+
+def test_every_mode_prints_agreement_the_three_by_three_table_and_kappa(fake_llm, tmp_path):
+    fake_llm.verdict = lambda state: "partial"
+    directory = write(tmp_path, [fixture_row(i) for i in range(2)])
+
+    for mode in ("same-model", "stability", "reference"):
+        printed, _ = run_with_code(directory, tmp_path / f"{mode}.jsonl", "--mode", mode)
+
+        assert "agreement 100.0% (2 of 2 pairs)" in printed
+        assert "rows: first judgment, columns: second" in printed
+        assert "partial" in printed
+        assert "kappa 1.00 on 2 pairs (bar 0.6): fail" in printed  # under the 60-pair floor
+        table = printed.splitlines()
+        partial_row = next(line for line in table if line.strip().startswith("partial "))
+        assert partial_row.split()[-3:] == ["0", "2", "0"]

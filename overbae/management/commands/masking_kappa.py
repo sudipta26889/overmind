@@ -11,7 +11,9 @@ from overbae.services.masking import report
 
 class Command(BaseCommand):
     help = (
-        "Judge each fixture twice: its masked copy by the remote judge, its unmasked state by the "
+        "Run it as a one-off container from the masking image (docker run --memory 8g, the key "
+        "directory mounted, MASKING_ENABLED=1), never inside the 4 GB worker: it loads the "
+        "models a second time and is OOM-killed. Judge each fixture twice: its masked copy by the remote judge, its unmasked state by the "
         "local judge. Writes {id, masked_verdict, local_verdict} lines for masking_report "
         "--verdicts. Runs on the masking worker only; spends real calls."
     )
@@ -26,8 +28,9 @@ class Command(BaseCommand):
             choices=masking_kappa.MODES,
             default=masking_kappa.DEFAULT_MODE,
             help="same-model: the cloud judge on full masking against ids-only masking (the "
-            "primary measure); reference: the cloud judge on masked text against a local model "
-            "on the unmasked text.",
+            "primary measure); stability: the same judge on the same ids-only text twice (the "
+            "run-to-run floor); reference: the cloud judge on masked text against a local model "
+            "on the unmasked text. Every mode prints agreement, the 3x3 table and kappa.",
         )
         parser.add_argument(
             "--reference-model",
@@ -68,7 +71,7 @@ class Command(BaseCommand):
             f"cloud calls {outcome.cloud_calls}, local calls {outcome.local_calls}"
         )
         self.stdout.write(f"verdicts: {target}   skipped: {skipped}")
-        line, ok = masking_kappa.kappa_line(outcome.pairs, {f["id"]: f["domain"] for f in chosen})
+        line, ok = masking_kappa.summary(outcome.pairs, {f["id"]: f["domain"] for f in chosen})
         self.stdout.write(line)
         if not ok:
             sys.exit(1)

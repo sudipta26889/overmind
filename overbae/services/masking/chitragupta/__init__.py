@@ -99,6 +99,8 @@ def quantise(model):
 
 
 class Tagger:
+    source = "chitragupta"
+
     def __init__(self, directory: str, *, quantize: bool = True):
         import torch  # noqa: PLC0415 — the masking extra is not installed in other images
         from transformers import AutoModelForTokenClassification, AutoTokenizer  # noqa: PLC0415

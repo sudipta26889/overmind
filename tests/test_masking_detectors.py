@@ -399,8 +399,9 @@ def test_the_context_detector_maps_labels_to_surrogate_types_and_offsets_each_ch
 
     assert [(text[h.start : h.end], h.type) for h in hits] == [("nerve conduction study", "TEST")]
     assert len(model.seen) == 2
-    assert model.seen[0][2] == 0.15
+    assert model.seen[0][2] == 0.2  # the lowest active label threshold
     assert {"medical condition", "bank or lender", "city"} <= set(model.seen[0][1])
+    assert "family relation" not in model.seen[0][1]  # switched off: the lexicon owns RELATION
 
 
 def test_the_union_takes_the_hits_of_every_member():
@@ -416,7 +417,10 @@ def test_the_union_takes_the_hits_of_every_member():
 
     union = ner.Union(Fixed(Hit(0, 2, "PERSON")), Fixed(Hit(3, 5, "TEST")))
 
-    assert union.detect("ab cd") == [Hit(0, 2, "PERSON"), Hit(3, 5, "TEST")]
+    assert union.detect("ab cd") == [
+        Hit(0, 2, "PERSON", source="fixed"),
+        Hit(3, 5, "TEST", source="fixed"),
+    ]
 
 
 @pytest.mark.covers("masking-fail-closed")
@@ -470,3 +474,154 @@ def test_a_cut_that_cannot_read_the_masked_shape_fails_closed_as_a_cut_error(hoo
         )
 
     assert refused.value.reason == "cut"
+
+
+@pytest.mark.parametrize(
+    "number", ["1,23,456", "99,999", "9,999.99", "1,23,456.78", "450.00", "12.50", "2.75"]
+)
+def test_a_bare_number_with_separators_or_two_decimals_is_an_amount(number):
+    out = masked(f"The invoice shows {number} for the visit")
+
+    assert number not in out
+    assert "<AMOUNT_1>" in out
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Meeting at 10:30 sharp", "build 1.2.3 shipped", "HbA1c 7.5 this week", "list 10,20,30 ok"],
+)
+def test_a_time_a_version_a_lab_value_and_a_list_are_not_amounts(text):
+    from overbae.services.masking import patterns
+
+    assert [h for h in patterns.detect(text) if h.type == "AMOUNT"] == []
+
+
+def test_a_reading_found_by_context_beats_a_bare_amount():
+    out = masked("ferritin 12.50 and sugar 450.00 were measured")
+
+    assert "<VALUE_" in out
+    assert "<AMOUNT_" not in out
+
+
+def test_the_invoice_shape_masks_every_bare_decimal_in_a_json_input():
+    invoice = {"subtotal": "99,999.99", "tax_9": "9,999.99", "fee": "450.00", "n": "12000"}
+
+    out = mask_state({"input": json.dumps(invoice)}).text
+
+    for value in invoice.values():
+        assert value not in out
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "stays"),
+    [
+        ("qty", "12", True),
+        ("age", "34", True),
+        ("count", "7", True),
+        ("code", "12", False),
+        ("whatever", "12000", False),
+        ("whatever", "0.75", False),
+        ("whatever", "99,999.99", False),
+        ("qty", "12000", False),
+    ],
+)
+def test_a_json_string_that_is_only_a_number_is_masked_unless_a_short_count(key, value, stays):
+    out = mask_state({"input": json.dumps({key: value})}).text
+
+    assert (f'\\"{value}\\"' in out) is stays
+
+
+def test_a_model_span_made_only_of_function_words_is_never_masked():
+    fake_ner.NAMES[:] = ["er jonno"]
+
+    assert masked("Policy er jonno renew") == "Policy er jonno renew"
+    fake_ner.NAMES[:] = ["Ravi er"]
+    assert "Ravi" not in masked("Ravi er jonno")  # a name next to a function word is still a name
+
+
+def test_the_stop_list_drops_stop_words_and_short_roman_variants_from_the_lexicon():
+    from overbae.services.masking import lexicon, stoplist
+
+    assert stoplist.only_stop_words("er jonno") and stoplist.only_stop_words("premium")
+    assert not stoplist.only_stop_words("Ravi er")
+    assert not lexicon.keep_form("er", variant=False)
+    assert not lexicon.keep_form("xy", variant=True)
+    assert lexicon.keep_form("xy", variant=False)
+    assert lexicon.keep_form("diabetes", variant=True)
+    assert "er" not in lexicon.terms()
+
+
+def test_the_address_cue_needs_a_digit_a_suffix_word_or_a_gazetteer_place():
+    from overbae.services.masking import gliner_ner
+
+    assert gliner_ner.address_cue("12 Foo")
+    assert gliner_ner.address_cue("Lake View Apartments")
+    assert gliner_ner.address_cue("Salt Lake")
+    assert not gliner_ner.address_cue("Foo")
+    assert not gliner_ner.address_cue("jonno")
+
+
+def test_a_label_switched_off_is_never_asked_and_a_bare_address_word_is_dropped():
+    from overbae.services.masking import gliner_ner
+
+    class Model:
+        def __init__(self):
+            self.labels = []
+
+        def predict_entities(self, text, labels, threshold):
+            self.labels = labels
+            return [
+                {"start": 0, "end": 3, "label": "city", "score": 0.99},
+                {"start": 4, "end": 8, "label": "city", "score": 0.99},
+            ]
+
+    model = Model()
+    hits = gliner_ner.Detector(model, 0.15).detect("Foo Pune")
+
+    assert "family relation" not in model.labels
+    assert [(h.start, h.end) for h in hits] == [(4, 8)]  # "Pune" is a gazetteer city; "Foo" is not
+
+
+@pytest.mark.covers("masking-fail-closed")
+def test_the_remote_judge_is_told_what_placeholders_are():
+    from overbae.innermind.evals import REMOTE_NOTE, Judge
+
+    assert "never mark an answer down because it contains placeholders" in REMOTE_NOTE
+    assert REMOTE_NOTE in Judge.remote_instructions()
+    assert REMOTE_NOTE not in Judge.instructions  # the local judge reads unmasked text
+
+
+@pytest.mark.covers("masking-detectors")
+def test_a_lexicon_relation_beats_a_context_model_condition_on_an_overlap():
+    from overbae.services.masking.masker import Masker
+    from overbae.services.masking.patterns import Hit
+
+    text = "nominee thakuma Rahul"
+    relation = Hit(8, 15, "RELATION", source="lexicon")
+    guesses = [
+        Hit(8, 15, "CONDITION", source="gliner"),
+        Hit(0, 15, "ORG", source="gliner"),
+        Hit(16, 21, "ADDRESS", source="gliner"),
+    ]
+
+    kept = Masker._relation_first([relation, *guesses])
+
+    assert [(h.type, h.source) for h in kept] == [
+        ("RELATION", "lexicon"),
+        ("ADDRESS", "gliner"),  # no overlap with the relation word: unchanged
+    ]
+    assert text[16:21] == "Rahul"
+
+
+@pytest.mark.parametrize(
+    "word", ["thakuma", "dida", "didu", "mamu", "kaku", "jethu", "pishi", "mashi", "boudi", "nanu"]
+)
+def test_the_relation_words_are_masked_in_latin_script(word):
+    assert word not in masked(f"call {word} about it")
+
+
+@pytest.mark.parametrize(
+    "word", ["ঠাকুমা", "দিদা", "মামু", "কাকু", "জেঠু", "পিসি", "মাসি", "বউদি", "बुआ", "ताऊ"]
+)
+def test_the_relation_words_are_masked_in_their_own_script(word):
+    assert word not in masked(f"{word} কে বলুন")

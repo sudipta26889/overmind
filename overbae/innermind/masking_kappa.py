@@ -35,7 +35,7 @@ from overbae.services.masking.send import call_masked
 
 DEFAULT_LIMIT = 100
 DEFAULT_REFERENCE = "local-judge"
-MODES = ("same-model", "reference")
+MODES = ("same-model", "reference", "stability")
 DEFAULT_MODE = "same-model"
 HARD_LIMIT = 150
 DOMAINS = ("health", "finance")
@@ -116,24 +116,38 @@ async def judge_same_model(fixture: dict, outcome: Outcome) -> None:
         return outcome.skipped.append({"id": fixture["id"], "reason": f"masking: {exc.reason}"})
     except (JudgeUnavailableError, JudgeAnswerError) as exc:
         return outcome.skipped.append({"id": fixture["id"], "reason": f"cloud: {exc}"[:120]})
+    ids_only = await ids_only_verdict(state, fixture, outcome)
+    if ids_only is not None:
+        outcome.pairs.append(
+            {"id": fixture["id"], "masked_verdict": masked.verdict, "local_verdict": ids_only}
+        )
+
+
+async def ids_only_verdict(state: dict, fixture: dict, outcome: Outcome) -> str | None:
+    """One cloud judgment of the ids-only copy; a failure is recorded as a skip and returns None."""
     try:
         payload = await asyncio.to_thread(mask_ids_only, state, fit=fit)
     except MaskingError as exc:
-        return outcome.skipped.append({"id": fixture["id"], "reason": f"ids-only: {exc.reason}"})
+        outcome.skipped.append({"id": fixture["id"], "reason": f"ids-only: {exc.reason}"})
+        return None
+    return await judge_payload(payload, fixture, outcome)
+
+
+async def judge_payload(payload, fixture: dict, outcome: Outcome) -> str | None:
     if not judge_health.spend_cloud_call():
-        return outcome.skipped.append({"id": fixture["id"], "reason": "cloud: daily cap spent"})
+        outcome.skipped.append({"id": fixture["id"], "reason": "cloud: daily cap spent"})
+        return None
     try:
         text, _ = await asyncio.to_thread(
             call_masked,
             payload,
             model=ROLE_CHAINS[Role.CLOUD_JUDGE][0],
-            system_prompt=Judge.instructions,
+            system_prompt=Judge.remote_instructions(),
             response_format=Verdict,
             request_kwargs={"temperature": 0, "user": AUDIT_ID},
             max_tokens=JUDGE_MAX_TOKENS,
         )
-        ids_only = Judge.parse(text)
-        outcome.cloud_calls += 1
+        verdict = Judge.parse(text)
     except Exception as exc:  # noqa: BLE001 — each failure is one skipped fixture, not a failed run
         if refuses_guardrail(exc):
             found = _BLOCKED.search(str(exc))
@@ -142,10 +156,27 @@ async def judge_same_model(fixture: dict, outcome: Outcome) -> None:
             reason = "cloud: no verdict"
         else:
             reason = f"cloud: {type(exc).__name__}"
-        return outcome.skipped.append({"id": fixture["id"], "reason": reason})
-    outcome.pairs.append(
-        {"id": fixture["id"], "masked_verdict": masked.verdict, "local_verdict": ids_only}
-    )
+        outcome.skipped.append({"id": fixture["id"], "reason": reason})
+        return None
+    outcome.cloud_calls += 1
+    return verdict
+
+
+async def judge_stability(fixture: dict, outcome: Outcome) -> None:
+    """The same remote judge on the same ids-only text twice: the run-to-run floor."""
+    state = fixture["state"]
+    try:
+        payload = await asyncio.to_thread(mask_ids_only, state, fit=fit)
+    except MaskingError as exc:
+        return outcome.skipped.append({"id": fixture["id"], "reason": f"ids-only: {exc.reason}"})
+    first = await judge_payload(payload, fixture, outcome)
+    if first is None:
+        return
+    second = await judge_payload(payload, fixture, outcome)
+    if second is not None:
+        outcome.pairs.append(
+            {"id": fixture["id"], "masked_verdict": first, "local_verdict": second}
+        )
 
 
 def run(
@@ -158,7 +189,9 @@ def run(
         if judge_health.backed_off(cloud=True):
             outcome.skipped.append({"id": fixture["id"], "reason": "cloud judge backed off"})
             continue
-        if mode == "same-model":
+        if mode == "stability":
+            async_loop.run(judge_stability(fixture, outcome))
+        elif mode == "same-model":
             async_loop.run(judge_same_model(fixture, outcome))
         else:
             async_loop.run(judge_pair(fixture, outcome, reference))
@@ -186,6 +219,31 @@ def check_reference(name: str) -> None:
 
 KAPPA_BAR = 0.6
 MIN_PAIRS = 60
+
+
+VERDICTS = ("yes", "partial", "no")
+
+
+def summary(pairs: list[dict], domains: dict[str, str]) -> tuple[str, bool]:
+    """Raw agreement, the 3x3 table (rows: the first verdict, columns: the second) and kappa,
+    over the health and finance pairs, with whether kappa clears the bar."""
+    chosen = [
+        (p["masked_verdict"], p["local_verdict"])
+        for p in pairs
+        if domains.get(p["id"]) in ("health", "finance")
+    ]
+    agree = sum(a == b for a, b in chosen)
+    share = f"{100 * agree / len(chosen):.1f}%" if chosen else "n/a"
+    lines = [
+        f"agreement {share} ({agree} of {len(chosen)} pairs)",
+        "rows: first judgment, columns: second",
+    ]
+    lines.append(f"{'':>9}" + "".join(f"{label:>9}" for label in VERDICTS))
+    for row in VERDICTS:
+        counts = [sum(1 for a, b in chosen if a == row and b == col) for col in VERDICTS]
+        lines.append(f"{row:>9}" + "".join(f"{n:>9}" for n in counts))
+    line, ok = kappa_line(pairs, domains)
+    return "\n".join([*lines, line]), ok
 
 
 def kappa_line(pairs: list[dict], domains: dict[str, str]) -> tuple[str, bool]:

@@ -24,7 +24,15 @@ DOMAINS = ("general", "health", "finance")
 IDENTIFIER_TYPES = ("PHONE", "EMAIL", "ACCOUNT", "ID", "URL")
 VALUE_TYPES = ("AMOUNT", "DATE", "VALUE")
 LEXICON_TYPES = ("CONDITION", "MEDICATION", "TEST", "ORG", "RELATION")
-BARS = {"identifiers": 0.99, "names": 0.90, "values": 0.99, "lexicon": 0.95, "kappa": 0.6}
+BARS = {
+    "identifiers": 0.99,
+    "names": 0.90,
+    "values": 0.99,
+    "lexicon": 0.95,
+    "kappa": 0.6,
+    # The share of non-sensitive words that must reach the judge unmasked, per language.
+    "kept": 0.85,
+}
 _SEPARATORS = re.compile(r"[\s\-,./]")
 
 
@@ -51,6 +59,8 @@ class Outcome:
     fallback: str = ""
     final: str = ""
     surrogates: dict[str, str] = field(default_factory=dict)
+    # (leaf text, start, end, type, detector) for every span the masker replaced.
+    trace: list = field(default_factory=list)
 
 
 def load_fixtures(directory: Path) -> list[dict]:
@@ -68,8 +78,9 @@ def run(fixtures: list[dict]) -> list[Outcome]:
     outcomes = []
     for fixture in fixtures:
         started = time.perf_counter()
+        trace: list = []
         try:
-            payload = mask_state(fixture["state"])
+            payload = mask_state(fixture["state"], trace=trace)
         except MaskingError as exc:
             outcomes.append(Outcome(fixture, time.perf_counter() - started, fallback=exc.reason))
             continue
@@ -79,9 +90,82 @@ def run(fixtures: list[dict]) -> list[Outcome]:
                 time.perf_counter() - started,
                 final=payload.text,
                 surrogates=dict(payload.mapping),
+                trace=trace,
             )
         )
     return outcomes
+
+
+_TOKEN = re.compile(f"{patterns.WORD}+")
+
+
+def leaves(value) -> list[str]:
+    """Every string leaf of a state, NFKC-normalised, with JSON-encoded strings opened up."""
+    found: list[str] = []
+    if isinstance(value, str):
+        text = unicodedata.normalize("NFKC", value)
+        try:
+            inner = json.loads(text) if text.lstrip()[:1] in "{[" else None
+        except ValueError:
+            inner = None
+        if inner is not None:
+            found += leaves(inner)
+        else:
+            found.append(text)
+    elif isinstance(value, dict):
+        for item in value.values():
+            found += leaves(item)
+    elif isinstance(value, list):
+        for item in value:
+            found += leaves(item)
+    return found
+
+
+def words(text: str, start: int = 0, end: int | None = None):
+    """The word tokens (they hold a letter) of ``text[start:end]`` as (start, end) spans."""
+    end = len(text) if end is None else end
+    return [
+        m.span()
+        for m in _TOKEN.finditer(text)
+        if m.start() >= start and m.end() <= end and any(c.isalpha() for c in m.group())
+    ]
+
+
+def planted_ranges(text: str, planted: list[dict]) -> list[tuple[int, int]]:
+    found = []
+    for item in planted:
+        value = unicodedata.normalize("NFKC", item["value"])
+        found += [m.span() for m in re.finditer(re.escape(value), text, re.IGNORECASE)]
+    return found
+
+
+def inside(span: tuple[int, int], ranges: list[tuple[int, int]]) -> bool:
+    return any(a <= span[0] and span[1] <= b for a, b in ranges)
+
+
+def utility(outcome: Outcome) -> tuple[int, int, Counter]:
+    """(non-sensitive words, how many of them were replaced, who replaced them) for one fixture.
+    A word inside a planted value is sensitive; every other word should reach the judge."""
+    fixture = outcome.fixture
+    ranges: dict[str, list[tuple[int, int]]] = {}
+
+    def planted_in(text: str) -> list[tuple[int, int]]:
+        if text not in ranges:
+            ranges[text] = planted_ranges(text, fixture["planted"])
+        return ranges[text]
+
+    total = sum(
+        1
+        for text in leaves(fixture["state"])
+        for span in words(text)
+        if not inside(span, planted_in(text))
+    )
+    removed: Counter = Counter()
+    for text, start, end, kind, source in outcome.trace:
+        for span in words(text, start, end):
+            if not inside(span, planted_in(text)):
+                removed[(source, kind)] += 1
+    return total, sum(removed.values()), removed
 
 
 def ratio(hit: int, total: int) -> float | None:
@@ -115,7 +199,12 @@ def verdict_kappa(outcomes: list[Outcome], verdicts: dict[str, dict]) -> tuple[f
     return kappa(pairs), len(pairs)
 
 
-def evaluate(outcomes: list[Outcome], verdicts: dict[str, dict] | None = None) -> dict:
+def evaluate(
+    outcomes: list[Outcome],
+    verdicts: dict[str, dict] | None = None,
+    *,
+    kept_bar: float = BARS["kept"],
+) -> dict:
     caught: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
     by_domain: dict[str, dict] = {d: Counter() for d in DOMAINS}
     leaks, tool_leaks = [], []
@@ -152,9 +241,27 @@ def evaluate(outcomes: list[Outcome], verdicts: dict[str, dict] | None = None) -
             cell = precision[(kind, fixture["lang"])]
             cell[1] += 1
             cell[0] += true_positive
+    kept_by_lang: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    removers: Counter = Counter()
+    for outcome in outcomes:
+        if outcome.fallback:
+            continue
+        words_total, words_removed, who = utility(outcome)
+        cell = kept_by_lang[outcome.fixture["lang"]]
+        cell[0] += words_total - words_removed
+        cell[1] += words_total
+        removers.update(who)
     seconds = [o.seconds for o in outcomes]
     total = len(outcomes)
     overall = _bars(caught)
+    for lang in LANGUAGES:
+        if lang in kept_by_lang:
+            value = ratio(*kept_by_lang[lang])
+            overall[f"kept/{lang}"] = {
+                "value": value,
+                "bar": kept_bar,
+                "ok": value is not None and value >= kept_bar,
+            }
     kappa_value, paired = verdict_kappa(outcomes, verdicts or {})
     return {
         "fixtures": total,
@@ -168,6 +275,12 @@ def evaluate(outcomes: list[Outcome], verdicts: dict[str, dict] | None = None) -
         "leaks": leaks,
         "tool_argument_leaks": tool_leaks,
         "bars": overall,
+        "kept": {lang: ratio(*cell) for lang, cell in kept_by_lang.items()},
+        "kept_counts": dict(kept_by_lang),
+        "removers": [
+            {"detector": source, "type": kind, "words": count}
+            for (source, kind), count in removers.most_common()
+        ],
         "kappa": {"value": kappa_value, "pairs": paired, "bar": BARS["kappa"]},
     }
 
@@ -230,6 +343,14 @@ def format_text(report: dict) -> str:
             f"{domain:<10}{c.get('fixtures', 0):>9}{c.get('fallback', 0):>10}"
             f"{c.get('planted', 0):>9}{c.get('leaked', 0):>8}{c.get('fallback:residual', 0):>10}"
         )
+    lines += ["", "kept (non-sensitive words that reach the judge unmasked)"]
+    for lang in LANGUAGES:
+        if lang in report["kept_counts"]:
+            kept, total_words = report["kept_counts"][lang]
+            lines.append(f"  {lang:<9}{pct(report['kept'][lang])}  ({kept} of {total_words} words)")
+    lines.append("non-sensitive words removed, by detector and label (most first)")
+    for row in report["removers"][:12]:
+        lines.append(f"  {row['detector']:<18}{row['type']:<11}{row['words']:>6}")
     latency = report["latency"]
     lines += [
         "",

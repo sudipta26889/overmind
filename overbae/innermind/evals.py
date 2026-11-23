@@ -237,6 +237,13 @@ async def judge_route(project_id, *, marked: bool = False) -> JudgeRoute:
 
 MARKER = "masking_local"
 
+# Said to every remote judge: it reads a masked copy, and a placeholder is not a defect.
+REMOTE_NOTE = (
+    "Values written as <TYPE_n> were replaced for privacy. The same placeholder means the same "
+    "value. Judge as if each placeholder were the real value, and never mark an answer down "
+    "because it contains placeholders."
+)
+
 
 def matches(row: EvalMatrix, span: Span) -> bool:
     if row.capability_id and row.capability_id != span.capability_id:
@@ -314,6 +321,10 @@ class Judge(Evaluator):
         "Answer with the verdict only."
     )
     values = {"yes": 1.0, "partial": 0.5, "no": 0.0}
+
+    @classmethod
+    def remote_instructions(cls) -> str:
+        return f"{cls.instructions}\n{REMOTE_NOTE}"
 
     def __init__(
         self,
@@ -493,7 +504,7 @@ class Judge(Evaluator):
                 call_masked,
                 payload,
                 model=model,
-                system_prompt=self.instructions if verdict else None,
+                system_prompt=self.remote_instructions() if verdict else None,
                 response_format=Verdict if verdict else None,
                 request_kwargs={**({"temperature": 0} if verdict else {}), "user": self.project_id},
                 max_tokens=JUDGE_MAX_TOKENS if verdict else EXPLAIN_MAX_TOKENS,
@@ -529,7 +540,7 @@ class Judge(Evaluator):
             "Name what is missing or wrong; do not restate the expectation.\n\n"
         )
         if self.live:
-            return await self._explain_remote(wording)
+            return await self._explain_remote(f"{REMOTE_NOTE}\n\n{wording}")
         if not role_enabled(Role.EXPLAIN):
             return ""
         try:

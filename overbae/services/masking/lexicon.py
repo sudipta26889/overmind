@@ -13,6 +13,7 @@ import unicodedata
 from functools import cache
 from pathlib import Path
 
+from overbae.services.masking import stoplist
 from overbae.services.masking.patterns import (
     NOT_WORD_AFTER,
     NOT_WORD_BEFORE,
@@ -51,14 +52,27 @@ def read(language: str) -> list[tuple[str, str, list[str]]]:
     return rows
 
 
+def _latin(form: str) -> bool:
+    return form.isascii() and any(c.isalpha() for c in form)
+
+
+def keep_form(form: str, *, variant: bool) -> bool:
+    """A stop-list word is never a term, and a roman variant needs at least three letters: a
+    one- or two-letter Latin variant is a common word in some language."""
+    if stoplist.is_stop(form):
+        return False
+    return not (variant and _latin(form) and sum(c.isalpha() for c in form) < 3)
+
+
 @cache
 def terms() -> dict[str, str]:
     """Every term and roman variant, casefolded and normalised, mapped to its surrogate type."""
     found: dict[str, str] = {}
     for language in LANGUAGES:
         for term, kind, romans in read(language):
-            for form in (term, *romans):
-                found.setdefault(normalise(form).casefold(), SURROGATE[kind])
+            for form, variant in ((term, False), *((r, True) for r in romans)):
+                if keep_form(form, variant=variant):
+                    found.setdefault(normalise(form).casefold(), SURROGATE[kind])
     return found
 
 
@@ -77,10 +91,17 @@ def detect(text: str) -> list[Hit]:
     for match in matcher().finditer(flat):
         kind = table.get(normalise(match.group()).casefold())
         if kind:
-            found.append(Hit(match.start(), match.end(), kind))
+            found.append(
+                Hit(
+                    match.start(),
+                    match.end(),
+                    kind,
+                    source="gazetteer" if kind == "LOCATION" else "lexicon",
+                )
+            )
         if kind == "TEST":
             # A reading follows the test it belongs to: "ECG shows 72", "फेरिटिन में 18".
             reading = VALUE_AFTER_TEST.match(flat, match.end())
             if reading:
-                found.append(Hit(*reading.span(1), "VALUE"))
+                found.append(Hit(*reading.span(1), "VALUE", source="lexicon:reading"))
     return found
