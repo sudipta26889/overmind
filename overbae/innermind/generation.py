@@ -11,6 +11,7 @@ from datetime import timedelta
 from typing import Any
 
 from django.conf import settings
+from django.core.cache import cache
 from django.db import transaction
 from django.db.models import Count, Exists, F, IntegerField, Max, OuterRef, Subquery
 from django.db.models.functions import Coalesce
@@ -34,6 +35,33 @@ RUNNING_LEASE = timedelta(minutes=23)
 SCHEDULER_HEALTHY = timedelta(minutes=2)
 
 
+# A tick that finds another one admitting cannot admit anything, and the one admitting may have
+# read its rows just before this tick's cause committed. So every tick asks for a repeat before it
+# tries the lock, and the holder clears the ask right after it takes the lock: whatever committed
+# before that is seen by the holder's own reads, and anything asked after it makes the holder
+# run again once it has committed (see ``dispatch_generation``).
+REDO_KEY = "eval-generation:redo"
+REDO_TTL_SECONDS = 120
+
+
+def redo_pending() -> bool:
+    try:
+        return bool(cache.get(REDO_KEY))
+    except Exception:  # noqa: BLE001 — the beat resumes the dispatcher if the cache is down
+        logger.warning("generation redo flag unreadable", exc_info=True)
+        return False
+
+
+def _redo(action: str) -> None:
+    try:
+        if action == "ask":
+            cache.set(REDO_KEY, "1", REDO_TTL_SECONDS)
+        else:
+            cache.delete(REDO_KEY)
+    except Exception:  # noqa: BLE001
+        logger.warning("generation redo flag not %s", action, exc_info=True)
+
+
 class GenerationStoppedError(Exception):
     pass
 
@@ -47,12 +75,14 @@ def ensure_run_active(run_id) -> None:
 def dispatch(publish, publish_scoring) -> dict[str, int]:
     """One admission tick. ``publish(row_id, task_id)`` starts a generation and
     ``publish_scoring(run_id, task_id)`` hands a fully generated run to scoring."""
+    _redo("ask")
     EvalGenerationScheduler.objects.get_or_create(pk=1)
     scheduler = (
         EvalGenerationScheduler.objects.select_for_update(skip_locked=True).filter(pk=1).first()
     )
     if scheduler is None:
         return {"admitted": 0, "scoring": 0, "expired": 0, "busy": True}
+    _redo("clear")
     now = timezone.now()
     scheduler.last_tick_at = now
     scheduler.save(update_fields=["last_tick_at"])

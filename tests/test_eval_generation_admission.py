@@ -245,3 +245,56 @@ def test_dispatch_waits_for_all_source_rows_to_be_seeded(mode):
     else:
         assert len(published.scoring) == 1
         assert not published.rows
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_tick_that_finds_another_admitting_asks_it_to_run_again_so_a_finished_run_is_scored(
+    limits,
+):
+    """The last row of a run finishes just after the admitting tick has read its rows, and its
+    own wakeup finds that tick still holding the lock: it admits nothing. Without a repeat the
+    run sits fully generated, never handed to scoring, until the beat."""
+    first = make_run(count=2)
+    Published().tick()  # both rows of the first run are now in flight
+    EvalRunRow.objects.filter(run=first, row_index=0).update(state=EvalRunRow.State.DONE)
+    make_run(count=2)  # work for the admitting tick to publish while it holds the lock
+    reading_done, release = threading.Event(), threading.Event()
+
+    def holder():
+        close_old_connections()
+        try:
+
+            def publish(row_id, task_id):
+                reading_done.set()  # the rows of the first run were read before this
+                assert release.wait(10)
+
+            return generation.dispatch(publish, lambda run_id, task_id: None)
+        finally:
+            close_old_connections()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        admitting = executor.submit(holder)
+        try:
+            assert reading_done.wait(10)
+            EvalRunRow.objects.filter(run=first, row_index=1).update(state=EvalRunRow.State.DONE)
+            assert Published().tick()["busy"] is True  # the wakeup of that last row
+        finally:
+            release.set()
+        admitting.result(timeout=10)
+
+    first.refresh_from_db()
+    assert first.scoring_task_id == ""  # the admitting tick had not seen the last row finish
+    assert generation.redo_pending()  # so it is asked to run again once it has committed
+
+    again = Published()
+    assert again.tick()["scoring"] == 1
+    assert [run_id for run_id, _ in again.scoring] == [str(first.pk)]
+    assert not generation.redo_pending()  # a tick that gets the lock clears the request
+
+
+def test_a_tick_with_no_one_in_its_way_leaves_no_request_to_run_again(limits):
+    make_run(count=1)
+
+    Published().tick()
+
+    assert not generation.redo_pending()

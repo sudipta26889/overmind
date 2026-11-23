@@ -262,7 +262,12 @@ def dispatch_generation() -> dict:
                 kwargs={"eval_run_id": run_id}, task_id=task_id, connection=connection, retry=False
             )
 
-        return generation.dispatch(publish, publish_scoring)
+        outcome = generation.dispatch(publish, publish_scoring)
+    if generation.redo_pending():
+        # A tick found this one admitting and left it work: run again now that this one has
+        # committed, instead of leaving a finished run to the 30 s beat.
+        wake_generation_dispatcher()
+    return outcome
 
 
 # A claimed admission is never replayed after a worker loss; the dispatcher records an
