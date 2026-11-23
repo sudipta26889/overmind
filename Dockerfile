@@ -4,6 +4,10 @@
 ARG PYTHON_IMAGE=python:3.13-slim-bookworm
 ARG UV_VERSION=0.11.24
 ARG GIT_VERSION=2.54.0
+# The kernel.org tarball's sha256 (matches https://mirrors.edge.kernel.org/pub/software/scm/git/sha256sums.asc)
+# and the GitHub archive of the same tag. Bump all three together with GIT_VERSION.
+ARG GIT_SHA256=f689162364c10de79ef89aa8dbf48731eb057e34edbbd20aca510ce0154681a3
+ARG GIT_GITHUB_SHA256=7b01a23c44c9ccfca2e3ad9daf8cbdd4d4caaaa6b5181e77e16e60c6ae5f772a
 
 FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 
@@ -11,6 +15,8 @@ FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
 FROM ${PYTHON_IMAGE} AS deps
 
 ARG GIT_VERSION
+ARG GIT_SHA256
+ARG GIT_GITHUB_SHA256
 
 WORKDIR /code
 
@@ -21,8 +27,19 @@ RUN apt-get update \
         libcurl4-openssl-dev libexpat1-dev libssl-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" \
-        | tar -xJ \
+# Git is built from a tarball fetched with retries from the first source that works, and only
+# accepted if its sha256 is the pinned one, so no mirror can swap it and no one host can fail
+# the build. GIT_SOURCE_PREFIX lets a test point the first (kernel.org) URL somewhere dead.
+ARG GIT_SOURCE_PREFIX=https://mirrors.edge.kernel.org/pub/software/scm/git
+RUN set -eu; \
+    fetch() { \
+        curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 -o git-src.tar "$1" \
+        && echo "$2  git-src.tar" | sha256sum -c -; \
+    }; \
+    fetch "${GIT_SOURCE_PREFIX}/git-${GIT_VERSION}.tar.xz" "${GIT_SHA256}" \
+    || fetch "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" "${GIT_SHA256}" \
+    || fetch "https://github.com/git/git/archive/refs/tags/v${GIT_VERSION}.tar.gz" "${GIT_GITHUB_SHA256}"; \
+    tar -xf git-src.tar && rm git-src.tar \
     && cd "git-${GIT_VERSION}" \
     && make prefix=/opt/git NO_PERL=YesPlease NO_TCLTK=YesPlease NO_GETTEXT=YesPlease -j"$(nproc)" all \
     && make NO_PERL=YesPlease NO_TCLTK=YesPlease NO_GETTEXT=YesPlease prefix=/opt/git install \
