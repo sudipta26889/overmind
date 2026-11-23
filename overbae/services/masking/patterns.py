@@ -8,8 +8,9 @@ are covered as well.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from overbae.services.masking.checksums import aadhaar_valid, card_valid
 
@@ -39,6 +40,10 @@ class Hit:
     start: int
     end: int
     type: str
+    # A guess from shape alone (a bare number): it yields to any overlapping hit that has context.
+    weak: bool = False
+    # Which detector found it; the utility report counts what each one removes.
+    source: str = ""
 
     @property
     def priority(self) -> int:
@@ -89,15 +94,34 @@ ACCOUNT_NUMBER = re.compile(
 
 _NUMBER = r"(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d+)?"
 _SCALE = (
-    r"lakhs?|lacs?|crores?|cr|thousand|million|billion|mn|bn|k|m|"
-    r"लाख|करोड़|करोड|हज़ार|हजार|লাখ|কোটি|হাজার"
+    r"lakhs?|lacs?|lakkh|crores?|cr|koti|thousand|million|billion|mn|bn|k|m|hundred|"
+    r"hajars?|hazars?|hazaar|hajaar|hajjar|hazzar|sau|sao|"
+    r"लाख|करोड़|करोड|हज़ार|हजार|हज़ार|सौ|सो|শত|শো|লাখ|লক্ষ|কোটি|হাজার"
 )
 _CURRENCY_WORD = (
-    r"rupees?|rs|inr|dollars?|usd|euros?|eur|pounds?|gbp|taka|bdt|"
-    r"रुपये|रुपए|रुपया|रु|টাকা|রুপি|টাকার"
+    r"rupees?|rs|inr|dollars?|usd|euros?|eur|pounds?|gbp|taka|takar|takay|takaa|tk|bdt|"
+    r"rupaiya|rupaiye|rupaiyaa|rupiya|rupaye|rupaya|rupay|rupi|"
+    r"रुपये|रुपए|रुपया|रुपैया|रुपैये|रुपयों|रु|रू|টাকা|টাকার|টাকায়|রুপি|রুপী|রুপয়া"
+)
+# Number words that stand before a scale or a currency word: "char lakh", "পাঁচ হাজার".
+_NUMWORD = (
+    r"one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|"
+    r"forty|fifty|sixty|seventy|eighty|ninety|"
+    r"ek|do|dui|teen|tin|char|chaar|panch|paanch|pach|poncho|poncha|chhe|chhoy|choy|saat|sat|"
+    r"shat|aath|at|nau|noy|das|dosh|gyarah|barah|bees|kuri|pachas|ponchash|dhai|der|dedh|adhai|"
+    r"एक|दो|तीन|चार|पाँच|पांच|छह|छः|सात|आठ|नौ|दस|ग्यारह|बारह|पंद्रह|बीस|पच्चीस|तीस|चालीस|पचास|"
+    r"साठ|सत्तर|अस्सी|नब्बे|डेढ़|ढाई|सवा|"
+    r"এক|দুই|দুটি|তিন|চার|পাঁচ|ছয়|সাত|আট|নয়|দশ|এগারো|বারো|তেরো|পনেরো|কুড়ি|বিশ|পঁচিশ|ত্রিশ|"
+    r"চল্লিশ|পঞ্চাশ|ষাট|সত্তর|আশি|নব্বই|দেড়|আড়াই"
 )
 AMOUNT_PREFIX = re.compile(
-    rf"(?:₹|Rs\.?|INR|\$|USD|€|EUR|£|GBP|৳|BDT)\s?{_NUMBER}(?:\s?(?:{_SCALE}){NOT_WORD_AFTER})?",
+    r"(?:₹|Rs\.?|INR|\$|USD|€|EUR|£|GBP|৳|BDT|Tk\.?|taka|টাকা|रु\.?|रू\.?|রু\.?|rupaiya|"
+    rf"rupaiye|rupees?)\s?{_NUMBER}(?:\s?(?:{_SCALE}){NOT_WORD_AFTER})?",
+    _FLAGS,
+)
+AMOUNT_WORDS = re.compile(
+    rf"(?<!{WORD})(?:(?:{_NUMWORD})\s+){{1,2}}(?:{_SCALE})(?:\s+(?:{_CURRENCY_WORD}))?{NOT_WORD_AFTER}"
+    rf"|(?<!{WORD})(?:{_NUMWORD})\s+(?:{_CURRENCY_WORD}){NOT_WORD_AFTER}",
     _FLAGS,
 )
 AMOUNT_SUFFIX = re.compile(
@@ -123,8 +147,16 @@ _MONTH = (
     r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|"
     r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|"
     r"जनवरी|फरवरी|फ़रवरी|मार्च|अप्रैल|मई|जून|जुलाई|अगस्त|सितंबर|सितम्बर|अक्टूबर|नवंबर|नवम्बर|दिसंबर|दिसम्बर|"
-    r"জানুয়ারি|ফেব্রুয়ারি|মার্চ|এপ্রিল|মে|জুন|জুলাই|আগস্ট|সেপ্টেম্বর|অক্টোবর|নভেম্বর|ডিসেম্বর"
+    r"জানুয়ারি|ফেব্রুয়ারি|মার্চ|এপ্রিল|মে|জুন|জুলাই|আগস্ট|সেপ্টেম্বর|অক্টোবর|নভেম্বর|ডিসেম্বর|"
+    # Roman spellings people type, and the Bengali and Hindi calendar months.
+    r"janvari|farvari|epril|julai|agast|sitambar|aktubar|navambar|disambar|"
+    r"boishakh|baishakh|boisakh|jyoistho|joishtho|asharh|ashar|srabon|shrabon|bhadro|bhadra|"
+    r"ashwin|ashshin|kartik|kartick|agrahayan|poush|paush|magh|falgun|phalgun|chaitra|choitro|"
+    r"বৈশাখ|জ্যৈষ্ঠ|আষাঢ়|শ্রাবণ|ভাদ্র|আশ্বিন|কার্তিক|অগ্রহায়ণ|পৌষ|মাঘ|ফাল্গুন|চৈত্র|"
+    r"चैत्र|वैशाख|ज्येष्ठ|आषाढ़|श्रावण|भाद्रपद|आश्विन|कार्तिक|मार्गशीर्ष|पौष|माघ|फाल्गुन"
 )
+# After a day number: English ordinals, Bengali (ই শে রা লা ঠা) and Banglish (ei, ey, e).
+_DAY_SUFFIX = r"(?:st|nd|rd|th|ই|শে|রা|লা|ঠা|ei|ey|e)?"
 _TIME = (
     r"\d{1,2}:\d{2}(?::\d{2})?(?:\s?(?:am|pm))?|\d{1,2}[.:]\d{2}\s?(?:am|pm)|\d{1,2}\s?(?:am|pm)"
 )
@@ -133,15 +165,17 @@ DATE_ISO = re.compile(
 )
 DATE_NUMERIC = re.compile(r"(?<![\d/])\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4}(?![\d/])")
 DATE_DAY_MONTH = re.compile(
-    rf"\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:{_MONTH}){NOT_WORD_AFTER}\.?(?:,?\s+\d{{2,4}})?",
+    rf"\d{{1,2}}{_DAY_SUFFIX}\s+(?:of\s+)?(?:{_MONTH}){NOT_WORD_AFTER}\.?(?:,?\s+\d{{2,4}})?",
     _FLAGS,
 )
 DATE_MONTH_DAY = re.compile(
-    rf"(?<![\w])(?:{_MONTH}){NOT_WORD_AFTER}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{2,4}})?",
+    rf"(?<![\w])(?:{_MONTH}){NOT_WORD_AFTER}\.?\s+(?:(?:e|er|ke|ko|ki|ka|এর|তে)\s+)?\d{{1,2}}"
+    rf"(?:st|nd|rd|th)?(?:,?\s+\d{{2,4}})?",
     _FLAGS,
 )
 DATE_ORDINAL = re.compile(r"(?<![\w])\d{1,2}(?:st|nd|rd|th)(?![\w])", _FLAGS)
-DATE_TARIKH = re.compile(r"\d{1,2}\s*(?:तारीख|तारिख|তারিখ)|(?:तारीख|तारिख|তারিখ)\s*\d{1,2}")
+_TARIKH = r"तारीख|तारिख|তারিখ|(?:tarikh|tarik|tareekh|tareek|taarikh)(?:e|er|ko|ke|ka)?"
+DATE_TARIKH = re.compile(rf"\d{{1,2}}\s*(?:{_TARIKH})|(?:{_TARIKH})\s*\d{{1,2}}", _FLAGS)
 TIME_OF_DAY = re.compile(rf"(?<![\d:.]){_TIME}(?![\d:])", _FLAGS)
 
 # --- measured values -----------------------------------------------------------------------
@@ -267,10 +301,23 @@ def structured(text: str) -> list[Hit]:
     return hits
 
 
+# A bare amount: thousands separators in the Indian (1,23,456) or Western (99,999) style, or
+# exactly two decimals (450.00). No currency sign or word is needed. A list such as 10,20,30,
+# a version (1.2.3), a date (12.03.2026) and a time (10:30) are not matched.
+THOUSANDS = re.compile(
+    r"(?<![\d.,/\-:])(?:\d{1,2}(?:,\d{2})*,\d{3}|\d{1,3}(?:,\d{3})+)(?:\.\d+)?(?![\d,]|\.\d)"
+)
+# Below 2 it is left alone: the platform's own scores (0.00 to 1.00) appear in judge prompts.
+TWO_DECIMALS = re.compile(r"(?<![\d.,/\-:])(?:[2-9]|\d{2,})\.\d{2}(?![\d.]|,\d)")
+
+
 def amounts(text: str) -> list[Hit]:
     hits: list[Hit] = []
+    for pattern in (THOUSANDS, TWO_DECIMALS):
+        hits += (Hit(*m.span(), "AMOUNT", weak=True) for m in pattern.finditer(text))
     hits += _spans(AMOUNT_PREFIX, text, "AMOUNT")
     hits += _spans(AMOUNT_SUFFIX, text, "AMOUNT")
+    hits += _spans(AMOUNT_WORDS, text, "AMOUNT")
     hits += _spans(AMOUNT_NEAR_WORD, text, "AMOUNT", group=1)
     hits += _spans(AMOUNT_BEFORE_WORD, text, "AMOUNT", group=1)
     return hits
@@ -296,8 +343,23 @@ def values(text: str) -> list[Hit]:
     hits += _spans(VALUE_UNIT, text, "VALUE")
     hits += _spans(VALUE_AFTER_WORD, text, "VALUE", group=1)
     hits += _spans(BLOOD_PRESSURE, text, "VALUE")
-    hits += _spans(BARE_DECIMAL, text, "VALUE")
+    hits += (Hit(*m.span(), "VALUE", weak=True) for m in BARE_DECIMAL.finditer(text))
     return hits
+
+
+def drop_weak(hits: list[Hit]) -> list[Hit]:
+    """A bare number guessed to be an amount gives way to a reading found by context (a lab
+    word, a unit, a test name): the reading wins where both apply."""
+    readings = [h for h in hits if h.type == "VALUE" and not h.weak]
+    return [
+        h
+        for h in hits
+        if not (
+            h.weak
+            and h.type == "AMOUNT"
+            and any(h.start < r.end and r.start < h.end for r in readings)
+        )
+    ]
 
 
 # Medical morphology: a Latin word of six or more letters that ends the way a drug or a
@@ -332,13 +394,29 @@ def neutral(text: str) -> str:
     return _SURROGATE.sub(lambda m: "\ue000" * len(m.group()), text)
 
 
+def tag(hits: list[Hit], source: str) -> list[Hit]:
+    return [replace(hit, source=source) for hit in hits]
+
+
+def ascii_digits(text: str) -> str:
+    """Bengali, Devanagari and other decimal digits as ASCII, one for one, so every numeric rule
+    reads them. Used for matching only: the spans index the original text, which is what gets
+    replaced."""
+    return "".join(
+        str(unicodedata.decimal(ch))
+        if ch.isdigit() and unicodedata.decimal(ch, None) is not None
+        else ch
+        for ch in text
+    )
+
+
 def detect(text: str) -> list[Hit]:
-    text = neutral(text)
-    return (
-        structured(text)
-        + amounts(text)
-        + dates(text)
-        + values(text)
-        + addresses(text)
-        + medical_words(text)
+    text = ascii_digits(neutral(text))
+    return drop_weak(
+        tag(structured(text), "regex:id")
+        + tag(amounts(text), "regex:amount")
+        + tag(dates(text), "regex:date")
+        + tag(values(text), "regex:value")
+        + tag(addresses(text), "regex:address")
+        + tag(medical_words(text), "regex:medical")
     )

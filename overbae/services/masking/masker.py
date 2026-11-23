@@ -18,7 +18,7 @@ from typing import Any
 
 from django.conf import settings
 
-from overbae.services.masking import lexicon, ner, patterns, residual
+from overbae.services.masking import lexicon, ner, patterns, residual, stoplist
 from overbae.services.masking.errors import MaskingError
 from overbae.services.masking.patterns import Hit
 from overbae.services.masking.payload import MaskedPayload, issue
@@ -74,6 +74,23 @@ _NAME_EXEMPT = {
 _TOOL_SIBLINGS = {"arguments", "parameters"}
 _CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 
+# A JSON string that is only a number is a value in its own right, whatever its key: an amount
+# when it has thousands separators or decimals, otherwise a reading. A short whole number is
+# left alone under a key that counts something.
+_NUMERIC_STRING = re.compile(r"^[+-]?(?:\d{1,3}(?:,\d{2,3})+|\d+)(?:\.\d+)?$")
+_COUNT_WORDS = frozenset(
+    {"count", "quantity", "qty", "age", "size", "limit", "offset", "page", "index", "rank"}
+)
+
+
+def numeric_string_type(value: str, key: str | None) -> str | None:
+    text = value.strip()
+    if not _NUMERIC_STRING.match(text):
+        return None
+    if text.isdigit() and len(text) <= 3 and _COUNT_WORDS & set(key_tokens(key or "")):
+        return None
+    return "AMOUNT" if ("," in text or "." in text) else "VALUE"
+
 
 def key_tokens(key: str) -> list[str]:
     return [t for t in re.split(r"[^A-Za-z0-9]+", _CAMEL.sub("_", key).lower()) if t]
@@ -122,7 +139,9 @@ class Masker:
     # replaced and no key forces a type. Production masking never sets it.
     ids_only = False
 
-    def __init__(self, *, deadline: float):
+    def __init__(self, *, deadline: float, trace: list | None = None):
+        # Every replaced span as (leaf text, start, end, type, detector), for the utility report.
+        self.trace = trace
         self.mapping: dict[str, str] = {}
         self._index: dict[tuple[str, str], str] = {}
         self._counts: Counter[str] = Counter()
@@ -146,21 +165,42 @@ class Masker:
         if self.ids_only:
             found = patterns.structured(patterns.neutral(text))
             return [hit for hit in found if hit.type in IDENTIFIER_TYPES]
-        hits = patterns.detect(text) + lexicon.detect(text)
+        hits = patterns.drop_weak(patterns.detect(text) + lexicon.detect(text))
         if ner.needs_ner(text):
             if self._ner is None:
                 self._ner = ner.backend()
             try:
-                hits += self._ner.detect(text)
+                found = self._ner.detect(text)
+                # A span of only function words is never a person, a place or a lender.
+                hits += [h for h in found if not stoplist.only_stop_words(text[h.start : h.end])]
             except MaskingError:
                 raise
             except Exception as exc:
                 raise MaskingError("ner_error") from exc
-        return hits
+        return self._relation_first(hits)
+
+    @staticmethod
+    def _relation_first(hits: list[Hit]) -> list[Hit]:
+        """A lexicon RELATION (thakuma, didu, jethu) beats the context model's CONDITION, ORG
+        or ADDRESS where they overlap: the lexicon knows the word, the model only guesses."""
+        relations = [h for h in hits if h.type == "RELATION" and h.source == "lexicon"]
+        if not relations:
+            return hits
+        return [
+            h
+            for h in hits
+            if not (
+                h.source == "gliner"
+                and h.type in ("CONDITION", "ORG", "ADDRESS")
+                and any(h.start < r.end and r.start < h.end for r in relations)
+            )
+        ]
 
     def text(self, text: str, *, force: str | None = None) -> str:
         self._check_time()
         if force:
+            if self.trace is not None and text.strip():
+                self.trace.append((text, 0, len(text), force, "key"))
             return self.surrogate(force, text) if text.strip() else text
         if looks_like_attachment(text):
             return "<ATTACHMENT>"
@@ -170,6 +210,8 @@ class Masker:
         text = _EXISTING.sub(lambda m: f"<ESC:{m.group(1)}>", lexicon.normalise(text))
         out, cursor = [], 0
         for hit in resolve(self._detect(text)):
+            if self.trace is not None:
+                self.trace.append((text, hit.start, hit.end, hit.type, hit.source or "?"))
             out.append(text[cursor : hit.start])
             out.append(self.surrogate(hit.type, text[hit.start : hit.end]))
             cursor = hit.end
@@ -192,7 +234,10 @@ class Masker:
         if isinstance(value, bool) or value is None:
             return value
         if isinstance(value, str):
-            return self.text(value, force=forced)
+            kind = None if forced else numeric_string_type(value, key)
+            if kind and self.trace is not None:
+                self.trace.append((value, 0, len(value), kind, "numeric"))
+            return self.surrogate(kind, value.strip()) if kind else self.text(value, force=forced)
         if isinstance(value, (int, float)):
             if forced:
                 return self.surrogate(forced, str(value))
@@ -236,6 +281,7 @@ def mask_state(
     *,
     fit: Callable[[dict], dict] | None = None,
     after_mask: Callable[[dict], dict] | None = None,
+    trace: list | None = None,
 ) -> MaskedPayload:
     """Masks the uncut state, then applies ``after_mask`` and ``fit`` to the masked copy, and
     checks the exact string that would be sent. The result is the only thing a remote call takes."""
@@ -246,7 +292,7 @@ def mask_state(
         raise MaskingError("non_text_part") from exc
     if size > max_bytes:
         raise MaskingError("too_large")
-    masker = Masker(deadline=time.monotonic() + timeout)
+    masker = Masker(deadline=time.monotonic() + timeout, trace=trace)
     masked = masker.value(dict(state))
     try:
         if after_mask is not None:

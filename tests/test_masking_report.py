@@ -212,3 +212,29 @@ def test_no_mask_computes_kappa_from_verdicts_and_domains_without_loading_a_mode
             stdout=io.StringIO(),
         )
     assert stop.value.code == 1
+
+
+def test_kept_counts_the_non_sensitive_words_that_survive_per_language_and_names_the_remover():
+    text = "Policy er premium Ravi"
+    fixture = {
+        "id": "x",
+        "lang": "banglish",
+        "domain": "finance",
+        "state": {"input": text},
+        "planted": [{"type": "PERSON", "value": "Ravi", "path": "/input"}],
+    }
+    outcome = report.Outcome(
+        fixture,
+        0.0,
+        final="x",
+        trace=[
+            (text, 7, 9, "RELATION", "gliner"),  # "er" is not sensitive: it counts against kept
+            (text, 18, 22, "PERSON", "chitragupta"),  # Ravi is planted: it does not
+        ],
+    )
+
+    result = report.evaluate([outcome])
+
+    assert result["kept_counts"] == {"banglish": [2, 3]}
+    assert result["removers"] == [{"detector": "gliner", "type": "RELATION", "words": 1}]
+    assert result["bars"]["kept/banglish"]["ok"] is False  # 2 of 3 is below 0.85

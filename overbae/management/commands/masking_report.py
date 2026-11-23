@@ -14,7 +14,9 @@ class Command(BaseCommand):
     help = (
         "Mask every fixture and report recall and precision per type, language and domain, the "
         "leaks, and the latency. Exits 1 if a bar fails. Run it in the masking image: it loads the "
-        "real name model."
+        "real name model. Run it as a one-off container from the masking image (docker run "
+        "--memory 8g), not inside the 4 GB worker, which would load the models twice and be "
+        "OOM-killed; --no-mask needs no model."
     )
 
     def add_arguments(self, parser):
@@ -25,13 +27,20 @@ class Command(BaseCommand):
             help="JSON lines {id, masked_verdict, local_verdict} from the two judges, for kappa.",
         )
         parser.add_argument(
+            "--kept-bar",
+            type=float,
+            default=report.BARS["kept"],
+            help="Share of non-sensitive words that must stay unmasked, per language: 0.85 on "
+            "the seen fixtures (the default); 0.75 is the gate for the unseen and holdout sets.",
+        )
+        parser.add_argument(
             "--no-mask",
             action="store_true",
             help="Load no model and mask nothing: print kappa from --verdicts and the fixtures' "
             "domains only.",
         )
 
-    def handle(self, *args, fixtures, format, verdicts, no_mask, **options):
+    def handle(self, *args, fixtures, format, verdicts, no_mask, kept_bar, **options):
         directory = Path(fixtures)
         if not directory.is_dir():
             raise CommandError(f"{directory} is not a directory.")
@@ -47,14 +56,14 @@ class Command(BaseCommand):
         if no_mask:
             if not pairs:
                 raise CommandError("--no-mask needs --verdicts.")
-            line, ok = masking_kappa.kappa_line(
+            line, ok = masking_kappa.summary(
                 list(pairs.values()), {f["id"]: f["domain"] for f in loaded}
             )
             self.stdout.write(line)
             if not ok:
                 sys.exit(1)
             return
-        result = report.evaluate(report.run(loaded), pairs)
+        result = report.evaluate(report.run(loaded), pairs, kept_bar=kept_bar)
         failed = report.failing(result)
         if format == "json":
             self.stdout.write(

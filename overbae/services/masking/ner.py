@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib
 import re
+from dataclasses import replace
 from functools import cache
 from pathlib import Path
 from typing import Protocol
@@ -29,7 +30,11 @@ class Union:
         self.members = members
 
     def detect(self, text: str) -> list[Hit]:
-        return [hit for member in self.members for hit in member.detect(text)]
+        return [
+            replace(hit, source=getattr(member, "source", type(member).__name__.lower()))
+            for member in self.members
+            for hit in member.detect(text)
+        ]
 
 
 @cache
