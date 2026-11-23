@@ -217,3 +217,18 @@ def test_with_the_local_judge_off_the_pass_and_the_weekly_task_skip_without_a_re
     assert lexicon_gaps.collect(1, 14).skipped == "judge_off"
     assert innermind.report_lexicon_gaps()["skipped"] == "judge_off"
     assert fake_llm.requests == []
+
+
+def test_outside_the_local_judge_hours_the_pass_skips_without_a_request(fake_llm, settings):
+    from datetime import UTC, datetime
+
+    import time_machine
+
+    spans(1)
+    settings.LOCAL_JUDGE_HOURS_IST = "1-8"
+    reply(fake_llm, [])
+
+    with time_machine.travel(datetime(2026, 11, 25, 6, 30, tzinfo=UTC), tick=False):  # 12:00 IST
+        assert lexicon_gaps.collect(1, 14).skipped == "outside_hours"
+        assert innermind.report_lexicon_gaps()["skipped"] == "outside_hours"
+    assert fake_llm.requests == []

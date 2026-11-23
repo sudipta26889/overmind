@@ -7,13 +7,22 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 
 import redis
+from django.conf import settings
 
+from overbae.core import local_hours
 from overbae.core.llms import cache_redis
 
 KEY = "overmind:judge:unavailable"
 # A remote judge fails on its own account; it never pauses the local one.
 CLOUD_KEY = "overmind:judge:unavailable:cloud"
 CLOUD_BACKOFF_MS = 60_000
+
+
+def local_judge_open(moment: datetime | None = None) -> bool:
+    """Whether the local judge may start a call now: inside ``LOCAL_JUDGE_HOURS_IST``, or no
+    window is set. The one place that decides it; admission and the live judge both ask here."""
+    window = local_hours.parse(settings.LOCAL_JUDGE_HOURS_IST)
+    return local_hours.is_open(window, moment or now())
 
 
 def backoff_ms() -> int:

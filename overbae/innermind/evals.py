@@ -174,6 +174,14 @@ def throttled_single_stream(call, *args, **kwargs):
         _single_stream_slot.release()
 
 
+def local_call(*args, **kwargs):
+    """The live local call. A call that waited for the stream is checked once more, so none
+    starts after the window closes; one already started always finishes."""
+    if not judge_health.local_judge_open():
+        raise JudgeUnavailableError("The local judge is outside its hours")
+    return call_llm(*args, **kwargs)
+
+
 @dataclass(frozen=True)
 class JudgeRoute:
     """Where one work item is judged. ``model`` is a catalog name, empty when the judge is off."""
@@ -394,6 +402,10 @@ class Judge(Evaluator):
                 judge_health.mark_unavailable()
                 raise JudgeUnavailableError("The local judge is off") from None
             return Metric(expectation, error="judge is off")
+        if self.live and not judge_health.local_judge_open():
+            # Outside its hours the local judge behaves as if its chain were empty: held, no
+            # attempt, no score, and no back-off to outlast the window.
+            raise JudgeUnavailableError("The local judge is outside its hours")
         if self.live and not judge_health.spend_call():
             raise JudgeUnavailableError("The judge's daily call limit is spent")
         prompt = json.dumps(fit(state), ensure_ascii=False)
@@ -402,7 +414,7 @@ class Judge(Evaluator):
         try:
             raw, _ = await asyncio.to_thread(
                 throttled_single_stream if single else throttled,
-                call_llm,
+                local_call if self.live else call_llm,
                 prompt,
                 system_prompt=self.instructions,
                 model=model,
