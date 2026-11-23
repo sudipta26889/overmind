@@ -17,6 +17,7 @@ class Vendor(StrEnum):
     QWEN = "qwen"
     LOCAL = "local"
     RECURSIVESI = "recursivesi"
+    OVERMIND = "overmind"
 
 
 class Tier(StrEnum):
@@ -108,6 +109,15 @@ CATALOG: tuple[Model, ...] = (
         "openai/gpt-6-luna",
         Tier.FAST,
         "OpenAI's GPT-6 fast tier, as the self-hosted gateway serves it (LLM_*_CHAIN=gpt-6-luna).",
+        EFFORT,
+    ),
+    Model(
+        "cloud-judge-masked",
+        Vendor.OVERMIND,
+        "overmind/cloud-judge-masked",
+        Tier.FAST,
+        "The remote judge for approved projects. Its gateway key serves only this name, and the "
+        "gateway refuses any request that still carries an identifier.",
         EFFORT,
     ),
     Model("gpt-5.5", Vendor.OPENAI, "openai/gpt-5.5", Tier.LEGACY, reasoning=EFFORT),

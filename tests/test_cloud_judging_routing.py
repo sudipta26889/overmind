@@ -34,14 +34,14 @@ _WORKER = os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")
 REDIS_URL = (
     f"{os.environ.get('TEST_CACHE_REDIS', 'redis://localhost:6379')}/{15 - int(_WORKER or 0)}"
 )
-CLOUD = "openai/gpt-6-luna"
+CLOUD = "overmind/cloud-judge-masked"
 LOCAL = "local/judge"
 EXPECTATION = "The answer addresses the question."
 
 
 @pytest.fixture(autouse=True)
 def _cloud_judge(monkeypatch, settings, fake_llm, tmp_path, redis_cache):
-    monkeypatch.setitem(ROLE_CHAINS, Role.CLOUD_JUDGE, ("gpt-6-luna",))
+    monkeypatch.setitem(ROLE_CHAINS, Role.CLOUD_JUDGE, ("cloud-judge-masked",))
     fake_masking.enable_remote(settings, fake_llm, tmp_path)
     # The local judge samples almost nothing; a certified project is judged in full anyway.
     settings.TRACE_SCORING_SAMPLE_RATE = 1
@@ -182,7 +182,7 @@ def test_any_doubt_about_the_project_keeps_the_work_local():
     remote = route_for(project.pk)
     assert (remote.local, remote.model, remote.sample_rate, remote.explain) == (
         False,
-        "gpt-6-luna",
+        "cloud-judge-masked",
         1.0,
         True,
     )
@@ -199,7 +199,9 @@ def test_a_certified_project_stays_local_while_no_remote_judge_is_configured(mon
 
 @pytest.mark.django_db(transaction=True)
 def test_a_remote_route_whose_project_is_gone_sends_nothing(fake_llm):
-    remote = evals.JudgeRoute(model="gpt-6-luna", sample_rate=1.0, explain=True, local=False)
+    remote = evals.JudgeRoute(
+        model="cloud-judge-masked", sample_rate=1.0, explain=True, local=False
+    )
 
     with pytest.raises(JudgeUnavailableError):
         async_to_sync(Judge(str(uuid.uuid4()), route=remote).judge)({"output": "a"}, EXPECTATION)
@@ -332,7 +334,7 @@ def test_admission_does_not_serialise_a_remote_project_behind_the_local_judge():
 
 
 def test_the_remote_judge_may_not_be_a_local_model():
-    check_cloud_judge(("gpt-6-luna",))
+    check_cloud_judge(("cloud-judge-masked",))
     check_cloud_judge(())
     for local in ("local-judge", "flint"):
         with pytest.raises(ValueError, match="local model"):
@@ -449,7 +451,7 @@ def test_the_local_judge_must_be_local():
     check_local_judge(("local-judge",))
     check_local_judge(("flint",))
     with pytest.raises(ValueError, match="remote model"):
-        check_local_judge(("gpt-6-luna",))
+        check_local_judge(("cloud-judge-masked",))
 
 
 @pytest.mark.django_db(transaction=True)

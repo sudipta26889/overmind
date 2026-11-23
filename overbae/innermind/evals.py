@@ -138,7 +138,9 @@ def refuses_parameter(exc: BaseException) -> bool:
     return False
 
 
-_GUARDRAIL = re.compile(r"guardrail|presidio|\bpii\b|blocked by", re.IGNORECASE)
+_GUARDRAIL = re.compile(
+    r"guardrail|presidio|\bpii\b|blocked by|content blocked|pattern detected", re.IGNORECASE
+)
 
 
 def refuses_guardrail(exc: BaseException) -> bool:
@@ -318,6 +320,8 @@ class Judge(Evaluator):
         self.route = route or local_route()
         # The masked copy the verdict was judged on; an explanation reuses it and its map.
         self._payload: MaskedPayload | None = None
+        # A named local model used instead of the role's chain (masking_kappa's reference judge).
+        self.model_override = ""
 
     @property
     def live(self) -> bool:
@@ -383,8 +387,12 @@ class Judge(Evaluator):
             return await self._remote_judge(state, expectation, after_mask)
         task = TaskType.SPAN_JUDGING if self.live else TaskType.JUDGE_SCORING
         try:
-            model = resolve_model(task)
+            model = self.model_override or resolve_model(task)
         except RoleOffError:
+            if self.live:
+                # Held, never stamped: the item waits, unscored and unattempted, for a judge.
+                judge_health.mark_unavailable()
+                raise JudgeUnavailableError("The local judge is off") from None
             return Metric(expectation, error="judge is off")
         if self.live and not judge_health.spend_call():
             raise JudgeUnavailableError("The judge's daily call limit is spent")

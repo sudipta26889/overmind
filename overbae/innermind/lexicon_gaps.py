@@ -22,7 +22,13 @@ from django.utils import timezone
 from pydantic import BaseModel, ConfigDict
 
 from overbae.core.llms import SINGLE_STREAM_TIMEOUT, call_llm
-from overbae.core.model_registry import MODELS_BY_NAME, TaskType, Vendor, resolve_model
+from overbae.core.model_registry import (
+    MODELS_BY_NAME,
+    RoleOffError,
+    TaskType,
+    Vendor,
+    resolve_model,
+)
 from overbae.innermind import evidence, judge_health
 from overbae.innermind.evals import is_unavailable, lock_wait
 from overbae.models import Span
@@ -122,6 +128,9 @@ def collect(sample: int, days: int, *, cap_fraction: float | None = None) -> Gap
         return gaps
     try:
         model = local_model()
+    except RoleOffError:
+        gaps.skipped = "judge_off"
+        return gaps
     except Exception:
         gaps.skipped = "off"
         return gaps
